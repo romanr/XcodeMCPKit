@@ -47,7 +47,7 @@ public enum CLIError: Error, CustomStringConvertible {
 
 public struct CLIParser {
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
-        var listenHost = "localhost"
+        var listenHost = "127.0.0.1"
         var listenPort = 8765
         var upstreamCommand = "xcrun"
         var upstreamArgs = ["mcpbridge"]
@@ -167,8 +167,8 @@ public struct CLIParser {
         Usage: xcode-mcp-proxy [options]
 
         Options:
-          --listen host:port         Listen address (default: localhost:8765)
-          --host host                Listen host (default: localhost)
+          --listen host:port         Listen address (default: 127.0.0.1:8765)
+          --host host                Listen host (default: 127.0.0.1)
           --port port                Listen port (default: 8765)
           --upstream-command cmd     Upstream command (default: xcrun)
           --upstream-args a,b,c      Upstream args (default: mcpbridge)
@@ -191,7 +191,7 @@ public struct CLIParser {
         guard let port = Int(portPart), port > 0 else {
             throw CLIError.message("--listen expects host:port (got \(value))")
         }
-        let host = hostPart.isEmpty ? "localhost" : hostPart
+        let host = hostPart.isEmpty ? "127.0.0.1" : hostPart
         return (host, port)
     }
 }

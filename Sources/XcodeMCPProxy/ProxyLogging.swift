@@ -6,6 +6,8 @@ public enum ProxyLogging {
     private static let bootstrapState = NIOLockedValueBox(false)
     private static let labelPrefix = "XcodeMCPProxy"
 
+    /// Call from the host application to opt into StreamLogHandler-based logging.
+    /// Do not call this if swift-log is already bootstrapped elsewhere.
     public static func bootstrap(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let shouldBootstrap = bootstrapState.withLockedValue { state in
             if state {
@@ -27,8 +29,9 @@ public enum ProxyLogging {
         }
     }
 
+    /// Creates a logger without bootstrapping swift-log.
+    /// The host application may call `bootstrap()` explicitly if desired.
     public static func make(_ name: String) -> Logger {
-        bootstrap()
         return Logger(label: "\(labelPrefix).\(name)")
     }
 

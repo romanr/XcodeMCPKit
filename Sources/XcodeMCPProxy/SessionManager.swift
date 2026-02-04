@@ -67,6 +67,9 @@ final class SessionManager: @unchecked Sendable {
         self.upstream.onMessage = { [weak self] data in
             self?.routeUpstreamMessage(data)
         }
+        self.upstream.onExit = { [weak self] status in
+            self?.handleUpstreamExit(status)
+        }
         self.upstream.start()
         if config.eagerInitialize {
             startEagerInitialize()
@@ -227,6 +230,37 @@ final class SessionManager: @unchecked Sendable {
         }
 
         broadcastToAllSessions(data)
+    }
+
+    private func handleUpstreamExit(_ status: Int32) {
+        var pending: [InitPending] = []
+        var shouldEagerInitialize = false
+
+        initLock.withLock {
+            if isShuttingDown {
+                return
+            }
+            initResult = nil
+            initInFlight = false
+            didSendInitialized = false
+            initTimeout?.cancel()
+            initTimeout = nil
+            pending = initPending
+            initPending.removeAll()
+            shouldEagerInitialize = config.eagerInitialize
+        }
+
+        idMapper.reset()
+
+        for item in pending {
+            item.eventLoop.execute {
+                item.promise.fail(TimeoutError())
+            }
+        }
+
+        if shouldEagerInitialize {
+            startEagerInitialize()
+        }
     }
 
     func assignUpstreamId(sessionId: String, originalId: Any) -> Int64 {
@@ -411,6 +445,12 @@ private final class UpstreamIdMapper {
     func consume(_ upstreamId: Int64) -> UpstreamMapping? {
         lock.withLock {
             mapping.removeValue(forKey: upstreamId)
+        }
+    }
+
+    func reset() {
+        lock.withLock {
+            mapping.removeAll()
         }
     }
 }

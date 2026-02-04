@@ -11,6 +11,13 @@ let package = Package(
             name: "XcodeMCPKit",
             targets: ["XcodeMCPKit"]
         ),
+        .executable(
+            name: "xcode-mcp-proxy",
+            targets: ["XcodeMCPProxy"]
+        ),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -18,9 +25,25 @@ let package = Package(
         .target(
             name: "XcodeMCPKit"
         ),
+        .executableTarget(
+            name: "XcodeMCPProxy",
+            dependencies: [
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            ]
+        ),
         .testTarget(
             name: "XcodeMCPKitTests",
             dependencies: ["XcodeMCPKit"]
+        ),
+        .testTarget(
+            name: "XcodeMCPProxyTests",
+            dependencies: [
+                "XcodeMCPProxy",
+                .product(name: "NIO", package: "swift-nio"),
+            ]
         ),
     ]
 )

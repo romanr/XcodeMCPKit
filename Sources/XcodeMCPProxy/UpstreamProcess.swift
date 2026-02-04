@@ -140,7 +140,12 @@ actor UpstreamProcess {
         restartTask = Task { [weak self] in
             guard let self else { return }
             let nanos = UInt64(delay * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanos)
+            do {
+                try await Task.sleep(nanoseconds: nanos)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             await self.start()
         }
     }

@@ -63,6 +63,9 @@ Environment variables:
 
 - `MCP_XCODE_PID` (alternative to `--xcode-pid`)
 - `MCP_XCODE_SESSION_ID` (fix the Xcode MCP session id)
+- `MCP_LOG_LEVEL` (log level: trace|debug|info|notice|warning|error|critical)
+
+Logs are written to stderr.
 
 ## Options
 

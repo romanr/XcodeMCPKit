@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import NIOHTTP1
 
@@ -7,6 +8,7 @@ public final class ProxyServer {
     private let group: EventLoopGroup
     private let sessionManager: SessionManager
     private var channel: Channel?
+    private let logger: Logger = ProxyLogging.make("server")
 
     public init(config: ProxyConfig) {
         self.config = config
@@ -17,7 +19,7 @@ public final class ProxyServer {
     public func run() throws {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)
-        print("Xcode MCP proxy listening on http://\(host):\(port)")
+        logger.info("Xcode MCP proxy listening on http://\(host):\(port)")
         try channel.closeFuture.wait()
     }
 

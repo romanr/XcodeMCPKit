@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 actor UpstreamProcess {
     struct Config {
@@ -26,6 +27,7 @@ actor UpstreamProcess {
     private var framer = StdioFramer()
     private var isStopping = false
     private var restartTask: Task<Void, Never>?
+    private let logger: Logger = ProxyLogging.make("upstream")
 
     init(config: Config) {
         self.config = config
@@ -89,7 +91,13 @@ actor UpstreamProcess {
         }
 
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+            let data = handle.availableData
+            if data.isEmpty {
+                return
+            }
+            Task { [weak self] in
+                await self?.handleStderrData(data)
+            }
         }
 
         process.terminationHandler = { [weak self] proc in
@@ -103,6 +111,7 @@ actor UpstreamProcess {
             self.process = process
             restartDelay = config.restartInitialDelay
         } catch {
+            logger.error("Failed to start upstream process", metadata: ["error": "\(error)"])
             scheduleRestart()
         }
     }
@@ -128,8 +137,19 @@ actor UpstreamProcess {
         guard !isStopping else {
             return
         }
+        logger.warning("Upstream process exited", metadata: ["status": "\(status)"])
         continuation.yield(.exit(status))
         scheduleRestart()
+    }
+
+    private func handleStderrData(_ data: Data) {
+        if let message = String(data: data, encoding: .utf8) {
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            logger.error("Upstream stderr: \(trimmed)")
+        } else {
+            logger.error("Upstream stderr (binary)", metadata: ["bytes": "\(data.count)"])
+        }
     }
 
     private func scheduleRestart() {

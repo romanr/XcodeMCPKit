@@ -21,6 +21,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -31,6 +32,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxy",
             dependencies: [
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
@@ -39,7 +41,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "XcodeMCPProxyCLI",
-            dependencies: ["XcodeMCPProxy"]
+            dependencies: [
+                "XcodeMCPProxy",
+                .product(name: "Logging", package: "swift-log"),
+            ]
         ),
         .testTarget(
             name: "XcodeMCPKitTests",

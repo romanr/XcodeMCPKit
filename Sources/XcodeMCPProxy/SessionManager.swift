@@ -22,7 +22,22 @@ final class SessionContext: Sendable {
     }
 }
 
-final class SessionManager: Sendable {
+protocol SessionManaging: Sendable {
+    func session(id: String) -> SessionContext
+    func hasSession(id: String) -> Bool
+    func removeSession(id: String)
+    func shutdown()
+    func isInitialized() -> Bool
+    func registerInitialize(
+        originalId: RPCId,
+        requestObject: [String: Any],
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ByteBuffer>
+    func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64
+    func sendUpstream(_ data: Data)
+}
+
+final class SessionManager: Sendable, SessionManaging {
     private struct InitPending: Sendable {
         let eventLoop: EventLoop
         let promise: EventLoopPromise<ByteBuffer>
@@ -48,32 +63,20 @@ final class SessionManager: Sendable {
     private let eventLoop: EventLoop
     private let idMapper = UpstreamIdMapper()
     private let config: ProxyConfig
-    let upstream: UpstreamProcess
+    let upstream: any UpstreamClient
 
-    init(config: ProxyConfig, eventLoop: EventLoop) {
+    convenience init(config: ProxyConfig, eventLoop: EventLoop) {
+        let upstream = Self.makeDefaultUpstream(config: config)
+        self.init(config: config, eventLoop: eventLoop, upstream: upstream)
+    }
+
+    init(config: ProxyConfig, eventLoop: EventLoop, upstream: any UpstreamClient) {
         self.config = config
         self.eventLoop = eventLoop
-        var environment = ProcessInfo.processInfo.environment
-        if let pid = config.xcodePID {
-            environment["MCP_XCODE_PID"] = String(pid)
-        }
-        if let override = config.upstreamSessionID {
-            environment["MCP_XCODE_SESSION_ID"] = override
-        } else {
-            environment["MCP_XCODE_SESSION_ID"] = UUID().uuidString
-        }
-        let upstreamConfig = UpstreamProcess.Config(
-            command: config.upstreamCommand,
-            args: config.upstreamArgs,
-            environment: environment,
-            restartInitialDelay: 1,
-            restartMaxDelay: 30
-        )
-        let process = UpstreamProcess(config: upstreamConfig)
-        self.upstream = process
+        self.upstream = upstream
         let task = Task { [weak self] in
             guard let self else { return }
-            for await event in process.events {
+            for await event in upstream.events {
                 switch event {
                 case .message(let data):
                     self.routeUpstreamMessage(data)
@@ -86,7 +89,7 @@ final class SessionManager: Sendable {
             taskBox = task
         }
         Task {
-            await process.start()
+            await upstream.start()
         }
         if config.eagerInitialize {
             startEagerInitialize()
@@ -466,6 +469,28 @@ final class SessionManager: Sendable {
                 item.promise.fail(error)
             }
         }
+    }
+}
+
+private extension SessionManager {
+    static func makeDefaultUpstream(config: ProxyConfig) -> UpstreamProcess {
+        var environment = ProcessInfo.processInfo.environment
+        if let pid = config.xcodePID {
+            environment["MCP_XCODE_PID"] = String(pid)
+        }
+        if let override = config.upstreamSessionID {
+            environment["MCP_XCODE_SESSION_ID"] = override
+        } else {
+            environment["MCP_XCODE_SESSION_ID"] = UUID().uuidString
+        }
+        let upstreamConfig = UpstreamProcess.Config(
+            command: config.upstreamCommand,
+            args: config.upstreamArgs,
+            environment: environment,
+            restartInitialDelay: 1,
+            restartMaxDelay: 30
+        )
+        return UpstreamProcess(config: upstreamConfig)
     }
 }
 

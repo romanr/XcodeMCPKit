@@ -62,3 +62,61 @@ private func shutdown(_ group: EventLoopGroup) async {
         }
     }
 }
+
+@Test func proxyRouterHandlesBatchResponse() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let router = ProxyRouter(
+        requestTimeout: .seconds(5),
+        hasActiveSSE: { false },
+        sendNotification: { _ in }
+    )
+
+    let future = router.registerBatch(on: eventLoop)
+    let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
+    router.handleIncoming(Data(response.utf8))
+
+    let buffer = try await future.get()
+    let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
+    #expect(string == response)
+}
+
+@Test func proxyRouterTimesOutRequests() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let router = ProxyRouter(
+        requestTimeout: .seconds(1),
+        hasActiveSSE: { false },
+        sendNotification: { _ in }
+    )
+
+    let future = router.registerRequest(idKey: "1", on: eventLoop)
+    try await Task.sleep(nanoseconds: 1_500_000_000)
+
+    do {
+        _ = try await future.get()
+        #expect(Bool(false))
+    } catch {
+        #expect(error is TimeoutError)
+    }
+}
+
+@Test func proxyRouterEnforcesNotificationBufferLimit() async throws {
+    let router = ProxyRouter(
+        requestTimeout: .seconds(5),
+        notificationBufferLimit: 2,
+        hasActiveSSE: { false },
+        sendNotification: { _ in }
+    )
+
+    router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n1\"}".utf8))
+    router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n2\"}".utf8))
+    router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n3\"}".utf8))
+
+    let buffered = router.drainBufferedNotifications()
+    #expect(buffered.count == 2)
+    #expect(String(data: buffered[0], encoding: .utf8)?.contains("n2") == true)
+    #expect(String(data: buffered[1], encoding: .utf8)?.contains("n3") == true)
+}

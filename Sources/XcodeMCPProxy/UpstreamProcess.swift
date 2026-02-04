@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-actor UpstreamProcess {
+actor UpstreamProcess: UpstreamClient {
     struct Config {
         var command: String
         var args: [String]
@@ -10,13 +10,10 @@ actor UpstreamProcess {
         var restartMaxDelay: TimeInterval
     }
 
-    enum Event: Sendable {
-        case message(Data)
-        case exit(Int32)
-    }
+    typealias Event = UpstreamEvent
 
-    nonisolated let events: AsyncStream<Event>
-    private let continuation: AsyncStream<Event>.Continuation
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
 
     private let config: Config
     private var process: Process?
@@ -32,19 +29,19 @@ actor UpstreamProcess {
     init(config: Config) {
         self.config = config
         self.restartDelay = config.restartInitialDelay
-        var streamContinuation: AsyncStream<Event>.Continuation!
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
         self.continuation = streamContinuation
     }
 
-    func start() {
+    func start() async {
         isStopping = false
         startLocked()
     }
 
-    func stop() {
+    func stop() async {
         isStopping = true
         restartTask?.cancel()
         restartTask = nil
@@ -52,7 +49,7 @@ actor UpstreamProcess {
         continuation.finish()
     }
 
-    func send(_ data: Data) {
+    func send(_ data: Data) async {
         if process == nil {
             startLocked()
         }

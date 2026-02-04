@@ -26,10 +26,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
-    private let sessionManager: SessionManager
+    private let sessionManager: any SessionManaging
     private let logger: Logger = ProxyLogging.make("http")
 
-    init(config: ProxyConfig, sessionManager: SessionManager) {
+    init(config: ProxyConfig, sessionManager: any SessionManaging) {
         self.config = config
         self.sessionManager = sessionManager
     }

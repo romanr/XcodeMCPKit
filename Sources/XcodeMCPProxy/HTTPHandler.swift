@@ -131,39 +131,40 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let sessionId = sessionIdFromHeaders(head.headers) ?? UUID().uuidString
         let session = sessionManager.session(id: sessionId)
 
-        let info: RequestInfo
+        let transform: RequestTransform
         do {
-            info = try RequestInspector.inspect(bodyData)
+            transform = try RequestInspector.transform(bodyData, sessionId: sessionId)
         } catch {
             sendPlain(context: context, status: .badRequest, body: "invalid json", keepAlive: head.isKeepAlive, sessionId: sessionId)
             return
         }
 
-        if info.expectsResponse {
+        if transform.expectsResponse {
             let future: EventLoopFuture<ByteBuffer>
-            if info.isBatch {
+            if transform.isBatch {
                 future = session.router.registerBatch(on: context.eventLoop)
-            } else if let idKey = info.idKey {
+            } else if let idKey = transform.idKey {
                 future = session.router.registerRequest(idKey: idKey, on: context.eventLoop)
             } else {
                 sendPlain(context: context, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: sessionId)
                 return
             }
 
-            session.upstream.send(bodyData)
+            sessionManager.upstream.send(transform.upstreamData)
             future.whenComplete { [weak self, weak context] result in
                 guard let self, let context else { return }
                 context.eventLoop.execute {
                     switch result {
                     case .success(let buffer):
-                        self.sendJSON(context: context, buffer: buffer, keepAlive: head.isKeepAlive, sessionId: sessionId)
+                        let rewritten = ResponseRewriter.rewrite(buffer: buffer, sessionId: sessionId)
+                        self.sendJSON(context: context, buffer: rewritten, keepAlive: head.isKeepAlive, sessionId: sessionId)
                     case .failure:
                         self.sendPlain(context: context, status: .gatewayTimeout, body: "upstream timeout", keepAlive: head.isKeepAlive, sessionId: sessionId)
                     }
                 }
             }
         } else {
-            session.upstream.send(bodyData)
+            sessionManager.upstream.send(transform.upstreamData)
             sendEmpty(context: context, status: .noContent, keepAlive: head.isKeepAlive, sessionId: sessionId)
         }
     }
@@ -237,39 +238,78 @@ struct RequestInfo {
     let idKey: String?
 }
 
+struct RequestTransform {
+    let upstreamData: Data
+    let expectsResponse: Bool
+    let isBatch: Bool
+    let idKey: String?
+}
+
 enum RequestInspector {
-    static func inspect(_ data: Data) throws -> RequestInfo {
+    static func transform(_ data: Data, sessionId: String) throws -> RequestTransform {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
-        if let object = json as? [String: Any] {
-            if let idKey = idKey(from: object) {
-                return RequestInfo(expectsResponse: true, isBatch: false, idKey: idKey)
+        if var object = json as? [String: Any] {
+            if let id = object["id"], !(id is NSNull) {
+                let prefixed = IdCodec.encode(sessionId: sessionId, originalId: id)
+                object["id"] = prefixed
+                let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
+                return RequestTransform(upstreamData: upstream, expectsResponse: true, isBatch: false, idKey: prefixed)
             }
-            return RequestInfo(expectsResponse: false, isBatch: false, idKey: nil)
+            let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
+            return RequestTransform(upstreamData: upstream, expectsResponse: false, isBatch: false, idKey: nil)
         }
 
         if let array = json as? [Any] {
+            var transformed: [Any] = []
             var hasRequest = false
             for item in array {
-                guard let object = item as? [String: Any] else { continue }
-                if idKey(from: object) != nil {
-                    hasRequest = true
-                    break
+                if var object = item as? [String: Any] {
+                    if let id = object["id"], !(id is NSNull) {
+                        let prefixed = IdCodec.encode(sessionId: sessionId, originalId: id)
+                        object["id"] = prefixed
+                        hasRequest = true
+                    }
+                    transformed.append(object)
+                } else {
+                    transformed.append(item)
                 }
             }
-            return RequestInfo(expectsResponse: hasRequest, isBatch: true, idKey: nil)
+            let upstream = try JSONSerialization.data(withJSONObject: transformed, options: [])
+            return RequestTransform(upstreamData: upstream, expectsResponse: hasRequest, isBatch: true, idKey: nil)
         }
 
-        return RequestInfo(expectsResponse: false, isBatch: false, idKey: nil)
+        return RequestTransform(upstreamData: data, expectsResponse: false, isBatch: false, idKey: nil)
+    }
+}
+
+enum ResponseRewriter {
+    static func rewrite(buffer: ByteBuffer, sessionId: String) -> ByteBuffer {
+        var buffer = buffer
+        guard let data = buffer.readData(length: buffer.readableBytes) else { return buffer }
+        let rewritten = rewrite(data: data, sessionId: sessionId)
+        var out = ByteBufferAllocator().buffer(capacity: rewritten.count)
+        out.writeBytes(rewritten)
+        return out
     }
 
-    private static func idKey(from object: [String: Any]) -> String? {
-        guard let id = object["id"], !(id is NSNull) else { return nil }
-        if let stringId = id as? String {
-            return stringId
+    static func rewrite(data: Data, sessionId: String) -> Data {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else { return data }
+        if var object = json as? [String: Any] {
+            if let rewrittenId = IdCodec.stripPrefix(sessionId: sessionId, id: object["id"]) {
+                object["id"] = rewrittenId
+            }
+            return (try? JSONSerialization.data(withJSONObject: object, options: [])) ?? data
         }
-        if let numberId = id as? NSNumber {
-            return numberId.stringValue
+        if let array = json as? [Any] {
+            let transformed = array.map { item -> Any in
+                guard var object = item as? [String: Any] else { return item }
+                if let rewrittenId = IdCodec.stripPrefix(sessionId: sessionId, id: object["id"]) {
+                    object["id"] = rewrittenId
+                }
+                return object
+            }
+            return (try? JSONSerialization.data(withJSONObject: transformed, options: [])) ?? data
         }
-        return String(describing: id)
+        return data
     }
 }

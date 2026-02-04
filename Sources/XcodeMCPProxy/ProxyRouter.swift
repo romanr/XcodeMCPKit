@@ -5,7 +5,7 @@ import NIOConcurrencyHelpers
 final class ProxyRouter: Sendable {
     private struct Pending: Sendable {
         var promise: EventLoopPromise<ByteBuffer>
-        var timeout: Scheduled<Void>
+        var timeout: Scheduled<Void>?
     }
 
     private struct State: Sendable {
@@ -16,12 +16,12 @@ final class ProxyRouter: Sendable {
 
     private let state = NIOLockedValueBox(State())
     private let notificationBufferLimit: Int
-    private let requestTimeout: TimeAmount
+    private let requestTimeout: TimeAmount?
     private let hasActiveSSE: @Sendable () -> Bool
     private let sendNotification: @Sendable (Data) -> Void
 
     init(
-        requestTimeout: TimeAmount,
+        requestTimeout: TimeAmount?,
         notificationBufferLimit: Int = 50,
         hasActiveSSE: @escaping @Sendable () -> Bool,
         sendNotification: @escaping @Sendable (Data) -> Void
@@ -34,9 +34,11 @@ final class ProxyRouter: Sendable {
 
     func registerRequest(idKey: String, on eventLoop: EventLoop) -> EventLoopFuture<ByteBuffer> {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
-        let timeout = eventLoop.scheduleTask(in: requestTimeout) { [weak self] in
-            guard let self else { return }
-            self.failTimeout(idKey: idKey)
+        let timeout = requestTimeout.map { timeout in
+            eventLoop.scheduleTask(in: timeout) { [weak self] in
+                guard let self else { return }
+                self.failTimeout(idKey: idKey)
+            }
         }
         state.withLockedValue { state in
             state.pendingById[idKey] = Pending(promise: promise, timeout: timeout)
@@ -46,9 +48,11 @@ final class ProxyRouter: Sendable {
 
     func registerBatch(on eventLoop: EventLoop) -> EventLoopFuture<ByteBuffer> {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
-        let timeout = eventLoop.scheduleTask(in: requestTimeout) { [weak self] in
-            guard let self else { return }
-            self.failBatchTimeout()
+        let timeout = requestTimeout.map { timeout in
+            eventLoop.scheduleTask(in: timeout) { [weak self] in
+                guard let self else { return }
+                self.failBatchTimeout()
+            }
         }
         state.withLockedValue { state in
             state.pendingBatches.append(Pending(promise: promise, timeout: timeout))
@@ -118,7 +122,7 @@ final class ProxyRouter: Sendable {
     }
 
     private func complete(pending: Pending, data: Data) {
-        pending.timeout.cancel()
+        pending.timeout?.cancel()
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
         buffer.writeBytes(data)
         pending.promise.succeed(buffer)

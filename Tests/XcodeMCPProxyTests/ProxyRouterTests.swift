@@ -103,6 +103,32 @@ private func shutdown(_ group: EventLoopGroup) async {
     }
 }
 
+@Test func proxyRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let router = ProxyRouter(
+        requestTimeout: nil,
+        hasActiveSSE: { false },
+        sendNotification: { _ in }
+    )
+
+    let future = router.registerRequest(idKey: "1", on: eventLoop)
+    let failed = NIOLockedValueBox(false)
+    let succeeded = NIOLockedValueBox(false)
+    future.whenFailure { _ in
+        failed.withLockedValue { $0 = true }
+    }
+    future.whenSuccess { _ in
+        succeeded.withLockedValue { $0 = true }
+    }
+
+    try await Task.sleep(nanoseconds: 1_500_000_000)
+
+    #expect(failed.withLockedValue { $0 } == false)
+    #expect(succeeded.withLockedValue { $0 } == false)
+}
+
 @Test func proxyRouterEnforcesNotificationBufferLimit() async throws {
     let router = ProxyRouter(
         requestTimeout: .seconds(5),

@@ -55,7 +55,7 @@ swift run xcode-mcp-proxy --xcode-pid 12345
 - Listen address: `127.0.0.1:8765`
 - command: `xcrun`
 - args: `mcpbridge`
-- request timeout: `30` seconds
+- request timeout: `300` seconds（`0` で無制限）
 - max body size: `1048576` bytes
 - initialization: eager at startup
 
@@ -80,7 +80,7 @@ swift run xcode-mcp-proxy --xcode-pid 12345
 | `--xcode-pid pid` | 対象 Xcode の PID |
 | `--session-id id` | Xcode MCP セッション ID |
 | `--max-body-bytes n` | 最大ボディサイズ |
-| `--request-timeout seconds` | リクエストタイムアウト |
+| `--request-timeout seconds` | リクエストタイムアウト（`0` で無制限） |
 | `--lazy-init` | 初回リクエストまで初期化を遅延 |
 
 ## クライアント設定

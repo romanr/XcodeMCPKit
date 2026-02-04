@@ -11,7 +11,7 @@ final class SessionContext: Sendable {
         self.id = id
         self.sseHub = SSEHub()
         self.router = ProxyRouter(
-            requestTimeout: .seconds(Int64(config.requestTimeout)),
+            requestTimeout: makeRequestTimeout(config.requestTimeout),
             hasActiveSSE: { [weak sseHub] in
                 sseHub?.hasClients ?? false
             },
@@ -438,7 +438,10 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func scheduleInitTimeout() {
-        let timeout = eventLoop.scheduleTask(in: .seconds(Int64(config.requestTimeout))) { [weak self] in
+        guard let timeoutAmount = makeRequestTimeout(config.requestTimeout) else {
+            return
+        }
+        let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
             guard let self else { return }
             self.failInitPending(error: TimeoutError())
         }
@@ -470,6 +473,12 @@ final class SessionManager: Sendable, SessionManaging {
             }
         }
     }
+}
+
+private func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
+    guard seconds > 0 else { return nil }
+    let nanos = max(1, Int64(seconds * 1_000_000_000))
+    return .nanoseconds(nanos)
 }
 
 private extension SessionManager {

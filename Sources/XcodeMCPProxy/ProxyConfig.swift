@@ -54,7 +54,7 @@ public struct CLIParser {
         var xcodePID: Int?
         var upstreamSessionID: String?
         var maxBodyBytes = 1_048_576
-        var requestTimeout: TimeInterval = 30
+        var requestTimeout: TimeInterval = 300
         var eagerInitialize = true
 
         var index = 1
@@ -176,7 +176,7 @@ public struct CLIParser {
           --xcode-pid pid            Xcode PID (env MCP_XCODE_PID)
           --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
           --max-body-bytes n         Max request body size (default: 1048576)
-          --request-timeout seconds  Request timeout (default: 30)
+          --request-timeout seconds  Request timeout (default: 300, 0 disables)
           --lazy-init                Initialize upstream only on first client request
           -h, --help                 Show help
         """

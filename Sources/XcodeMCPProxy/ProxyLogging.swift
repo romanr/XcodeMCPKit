@@ -18,9 +18,7 @@ public enum ProxyLogging {
         }
         guard shouldBootstrap else { return }
 
-        let level = parseLogLevel(environment["MCP_LOG_LEVEL"])
-            ?? parseLogLevel(environment["LOG_LEVEL"])
-            ?? .info
+        let level = LogLevelParser.resolve(from: environment)
 
         LoggingSystem.bootstrap { label in
             var handler = StreamLogHandler.standardError(label: label)
@@ -35,7 +33,19 @@ public enum ProxyLogging {
         return Logger(label: "\(labelPrefix).\(name)")
     }
 
-    private static func parseLogLevel(_ value: String?) -> Logger.Level? {
+}
+
+enum LogLevelParser {
+    static func resolve(
+        from environment: [String: String],
+        default defaultLevel: Logger.Level = .info
+    ) -> Logger.Level {
+        parse(environment["MCP_LOG_LEVEL"])
+            ?? parse(environment["LOG_LEVEL"])
+            ?? defaultLevel
+    }
+
+    static func parse(_ value: String?) -> Logger.Level? {
         guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return nil
         }

@@ -6,6 +6,7 @@ PORT="${PORT:-8765}"
 LISTEN="${LISTEN:-$HOST:$PORT}"
 XCODE_PID="${XCODE_PID:-${MCP_XCODE_PID:-}}"
 LAZY_INIT="${LAZY_INIT:-}"
+DRY_RUN="${DRY_RUN:-}"
 
 resolve_xcode_pid() {
   local pid=""
@@ -49,6 +50,11 @@ fi
 if [[ -z "${XCODE_PID:-}" ]]; then
   echo "error: Xcode PID not found. Launch Xcode and retry, or set XCODE_PID." >&2
   exit 1
+fi
+
+if [[ -n "$DRY_RUN" ]]; then
+  printf '%s\n' "${ARGS[@]}"
+  exit 0
 fi
 if [[ -n "$LAZY_INIT" ]]; then
   ARGS+=(--lazy-init)

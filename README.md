@@ -2,7 +2,7 @@
 
 [日本語](README.ja.md)
 
-An MCP proxy that exposes Xcode’s `mcpbridge` over HTTP(S) + SSE.  
+An MCP proxy for Xcode MCP (`mcpbridge`).  
 The Xcode permission dialog appears once when the proxy starts.
 
 ## Quick Start

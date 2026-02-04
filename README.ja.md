@@ -2,8 +2,8 @@
 
 [English](README.md)
 
-Xcode の `mcpbridge` を **HTTP(S)/SSE で使える MCP プロキシ**です。  
-プロキシ起動時に一度だけ Xcode の許可ダイアログが表示されるように設計しています。
+Xcode MCP (mcpbridge) の MCPプロキシ。  
+Xcode のダイアログが、プロキシ起動時に一度だけ表示されるよう設計しています。
 
 ## クイックスタート
 

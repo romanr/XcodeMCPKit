@@ -48,8 +48,7 @@ else
 fi
 
 if [[ -z "${XCODE_PID:-}" ]]; then
-  echo "error: Xcode PID not found. Launch Xcode and retry, or set XCODE_PID." >&2
-  exit 1
+  echo "warning: Xcode PID not found; running without --xcode-pid." >&2
 fi
 
 if [[ -n "$DRY_RUN" ]]; then

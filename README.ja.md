@@ -111,6 +111,18 @@ url = "http://127.0.0.1:8765/mcp"
 
 ## トラブルシューティング
 
+- `mcpbridge` が実行できない  
+  Apple ドキュメントより引用:
+
+  > In Terminal, use the xcrun mcpbridge command to configure the agentic coding tool to use Xcode Tools.
+
+  参考: [Giving external agentic coding tools access to Xcode](https://developer.apple.com/documentation/Xcode/giving-agentic-coding-tools-access-to-xcode#Configure-external-coding-tools-to-use-the-MCP-server)
+
+  ```bash
+  claude mcp add --transport stdio xcode -- xcrun mcpbridge
+  codex mcp add xcode -- xcrun mcpbridge
+  ```
+
 - `MCP client ... timed out`  
   プロキシが起動しているか確認し、必要なら `startup_timeout_sec` を増やしてください。
 

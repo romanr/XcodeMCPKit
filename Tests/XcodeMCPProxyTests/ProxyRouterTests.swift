@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import Testing
 @testable import XcodeMCPProxy
 
@@ -38,18 +39,20 @@ import Testing
 }
 
 @Test func proxyRouterSendsNotifications() async throws {
-    var received: [String] = []
+    let received = NIOLockedValueBox<[String]>([])
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
         hasActiveSSE: { true },
         sendNotification: { data in
-            received.append(String(decoding: data, as: UTF8.self))
+            received.withLockedValue { values in
+                values.append(String(decoding: data, as: UTF8.self))
+            }
         }
     )
 
     let notification = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}"
     router.handleIncoming(Data(notification.utf8))
-    #expect(received == [notification])
+    #expect(received.withLockedValue { $0 } == [notification])
 }
 
 private func shutdown(_ group: EventLoopGroup) async {

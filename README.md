@@ -111,6 +111,18 @@ url = "http://127.0.0.1:8765/mcp"
 
 ## Troubleshooting
 
+- `mcpbridge` fails to run  
+  Apple documentation notes:
+
+  > In Terminal, use the xcrun mcpbridge command to configure the agentic coding tool to use Xcode Tools.
+
+  Reference: [Giving external agentic coding tools access to Xcode](https://developer.apple.com/documentation/Xcode/giving-agentic-coding-tools-access-to-xcode#Configure-external-coding-tools-to-use-the-MCP-server)
+
+  ```bash
+  claude mcp add --transport stdio xcode -- xcrun mcpbridge
+  codex mcp add xcode -- xcrun mcpbridge
+  ```
+
 - `MCP client ... timed out`  
   Ensure the proxy is running, then increase `startup_timeout_sec` if needed.
 

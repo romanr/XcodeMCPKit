@@ -55,6 +55,7 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxy",
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
             ]
         ),
     ]

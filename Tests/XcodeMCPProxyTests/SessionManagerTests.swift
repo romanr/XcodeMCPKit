@@ -81,7 +81,8 @@ import Testing
     let eventLoop = group.next()
     let upstream = TestUpstreamClient()
     let config = makeConfig(eagerInitialize: true, requestTimeout: 5)
-    _ = SessionManager(config: config, eventLoop: eventLoop, upstream: upstream)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstream: upstream)
+    #expect(manager.isInitialized() == false)
 
     await Task.yield()
     #expect((await upstream.sent()).count == 1)

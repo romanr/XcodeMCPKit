@@ -63,6 +63,9 @@ swift run xcode-mcp-proxy --xcode-pid 12345
 
 - `MCP_XCODE_PID`（`--xcode-pid` の代替）
 - `MCP_XCODE_SESSION_ID`（Xcode MCP セッション ID を固定）
+- `MCP_LOG_LEVEL`（ログレベル: trace|debug|info|notice|warning|error|critical）
+
+ログは stderr に出力されます。
 
 ## オプション
 

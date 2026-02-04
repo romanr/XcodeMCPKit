@@ -1,5 +1,9 @@
 import Foundation
+import Logging
 import XcodeMCPProxy
+
+ProxyLogging.bootstrap()
+let logger: Logger = ProxyLogging.make("cli")
 
 do {
     let config = try CLIParser.parse(
@@ -9,12 +13,12 @@ do {
     let server = ProxyServer(config: config)
     try server.run()
 } catch let error as CLIError {
-    print(error.description)
+    logger.error("\(error.description)")
     if !error.description.contains("Usage:") {
-        print(CLIParser.usage())
+        logger.error("\(CLIParser.usage())")
     }
     exit(1)
 } catch {
-    print("error: \(error)")
+    logger.error("error: \(error)")
     exit(1)
 }

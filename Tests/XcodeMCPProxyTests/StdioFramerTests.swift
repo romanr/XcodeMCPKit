@@ -21,3 +21,11 @@ import Testing
     #expect(String(data: parts[0], encoding: .utf8) == json1)
     #expect(String(data: parts[1], encoding: .utf8) == json2)
 }
+
+@Test func stdioFramerRawJSON() async throws {
+    let framer = StdioFramer()
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}"
+    let parts = framer.append(Data(json.utf8))
+    #expect(parts.count == 1)
+    #expect(String(data: parts[0], encoding: .utf8) == json)
+}

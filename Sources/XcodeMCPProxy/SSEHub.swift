@@ -35,4 +35,16 @@ final class SSEHub: @unchecked Sendable {
             }
         }
     }
+
+    func closeAll() {
+        let channels = lock.withLock { Array(clients.values) }
+        lock.withLock {
+            clients.removeAll()
+        }
+        for channel in channels {
+            channel.eventLoop.execute {
+                channel.close(promise: nil)
+            }
+        }
+    }
 }

@@ -1,41 +1,40 @@
 # XcodeMCPProxy
 
-`xcrun mcpbridge` を上流に持つ HTTP MCP リレーサーバーです。  
-Codex は `url` 接続に切り替え、承認ダイアログはリレー起動時のみで済む構成を想定しています。
+An HTTP MCP proxy server that bridges to Xcode's MCP tools via `xcrun mcpbridge`.
 
-## 使い方
+Japanese documentation: [README.ja.md](README.ja.md)
 
-### LaunchAgent で常駐
+## Usage
 
-```
-scripts/install.sh
-```
-
-停止・削除:
-
-```
-scripts/uninstall.sh
-```
-
-ログ:
-
-```
-~/Library/Logs/XcodeMCPProxy/proxy.log
-```
-
-### 手動起動
+### Manual run
 
 ```
 swift run xcode-mcp-proxy --listen 127.0.0.1:8765
 ```
 
-`xcode` の対象を固定したい場合:
+By default the proxy eagerly initializes the upstream Xcode MCP session so the Xcode permission dialog appears when the proxy starts. Use `--lazy-init` to defer initialization until the first client request.
+
+To target a specific Xcode process:
 
 ```
 swift run xcode-mcp-proxy --xcode-pid 12345
 ```
 
-## Codex 設定例
+### Convenience script
+
+```
+scripts/run_proxy.sh
+```
+
+Optional environment variables:
+
+- `HOST` (default: `127.0.0.1`)
+- `PORT` (default: `8765`)
+- `LISTEN` (overrides host/port)
+- `XCODE_PID` (optional)
+- `LAZY_INIT` (set to any value to pass `--lazy-init`)
+
+## Codex config
 
 `~/.codex/config.toml`:
 
@@ -44,21 +43,19 @@ swift run xcode-mcp-proxy --xcode-pid 12345
 url = "http://127.0.0.1:8765/mcp"
 ```
 
-## エンドポイント
+## Endpoints
 
-- `POST /mcp` (JSON-RPC)
-- `GET /mcp/events` (SSE)
+- `POST /mcp` (JSON-RPC; responds with JSON or SSE and returns `Mcp-Session-Id`)
+- `GET /mcp` (SSE; requires `Mcp-Session-Id` and `Accept: text/event-stream`)
+- `GET /events`, `GET /mcp/events` (aliases for SSE)
+- `DELETE /mcp` (close session)
 - `GET /health`
 
-`Accept: text/event-stream` の `GET` でも SSE として扱います。
+## Multiple clients
 
-## 複数クライアント
+The proxy runs a single upstream `mcpbridge` process and namespaces `id` per session.  
+Clients should send a unique `Mcp-Session-Id` header. If omitted, the proxy will generate one and return it in the response header.
 
-`mcpbridge` は **1回だけ起動**し、すべてのクライアントで共有します。  
-プロキシ側で `id` をセッションごとに名前空間化するので、`Mcp-Session-Id` はクライアントごとに分けてください。  
-未指定の場合はサーバーが生成し、レスポンスヘッダ `Mcp-Session-Id` で返します。
+## License
 
-## 注意
-
-- バッチ(JSON配列)は上流の応答が配列のときのみサポートします。
-- `--session-id` を指定すると上流のセッションIDが固定されます。複数クライアント用途では未指定推奨です。
+MIT. See [LICENSE](LICENSE).

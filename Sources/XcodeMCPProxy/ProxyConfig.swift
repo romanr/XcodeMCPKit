@@ -1,20 +1,43 @@
 import Foundation
 
-struct ProxyConfig {
-    var listenHost: String
-    var listenPort: Int
-    var upstreamCommand: String
-    var upstreamArgs: [String]
-    var xcodePID: Int?
-    var upstreamSessionID: String?
-    var maxBodyBytes: Int
-    var requestTimeout: TimeInterval
+public struct ProxyConfig: Sendable {
+    public var listenHost: String
+    public var listenPort: Int
+    public var upstreamCommand: String
+    public var upstreamArgs: [String]
+    public var xcodePID: Int?
+    public var upstreamSessionID: String?
+    public var maxBodyBytes: Int
+    public var requestTimeout: TimeInterval
+    public var eagerInitialize: Bool
+
+    public init(
+        listenHost: String,
+        listenPort: Int,
+        upstreamCommand: String,
+        upstreamArgs: [String],
+        xcodePID: Int? = nil,
+        upstreamSessionID: String? = nil,
+        maxBodyBytes: Int,
+        requestTimeout: TimeInterval,
+        eagerInitialize: Bool = true
+    ) {
+        self.listenHost = listenHost
+        self.listenPort = listenPort
+        self.upstreamCommand = upstreamCommand
+        self.upstreamArgs = upstreamArgs
+        self.xcodePID = xcodePID
+        self.upstreamSessionID = upstreamSessionID
+        self.maxBodyBytes = maxBodyBytes
+        self.requestTimeout = requestTimeout
+        self.eagerInitialize = eagerInitialize
+    }
 }
 
-enum CLIError: Error, CustomStringConvertible {
+public enum CLIError: Error, CustomStringConvertible {
     case message(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .message(let text):
             return text
@@ -22,8 +45,8 @@ enum CLIError: Error, CustomStringConvertible {
     }
 }
 
-struct CLIParser {
-    static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
+public struct CLIParser {
+    public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         var listenHost = "127.0.0.1"
         var listenPort = 8765
         var upstreamCommand = "xcrun"
@@ -32,6 +55,7 @@ struct CLIParser {
         var upstreamSessionID: String?
         var maxBodyBytes = 1_048_576
         var requestTimeout: TimeInterval = 30
+        var eagerInitialize = true
 
         var index = 1
         while index < args.count {
@@ -42,9 +66,27 @@ struct CLIParser {
                     throw CLIError.message("--listen requires host:port")
                 }
                 let value = args[index + 1]
-                let parsed = try parseListen(value)
-                listenHost = parsed.host
-                listenPort = parsed.port
+                if value.contains(":") {
+                    let parsed = try parseListen(value)
+                    listenHost = parsed.host
+                    listenPort = parsed.port
+                } else if let port = Int(value) {
+                    listenPort = port
+                } else {
+                    listenHost = value
+                }
+                index += 2
+            case "--host":
+                guard index + 1 < args.count else {
+                    throw CLIError.message("--host requires a value")
+                }
+                listenHost = args[index + 1]
+                index += 2
+            case "--port":
+                guard index + 1 < args.count else {
+                    throw CLIError.message("--port requires a value")
+                }
+                listenPort = Int(args[index + 1]) ?? listenPort
                 index += 2
             case "--upstream-command":
                 guard index + 1 < args.count else {
@@ -90,6 +132,9 @@ struct CLIParser {
                 }
                 requestTimeout = TimeInterval(args[index + 1]) ?? requestTimeout
                 index += 2
+            case "--lazy-init":
+                eagerInitialize = false
+                index += 1
             case "-h", "--help":
                 throw CLIError.message(usage())
             default:
@@ -112,16 +157,19 @@ struct CLIParser {
             xcodePID: xcodePID,
             upstreamSessionID: upstreamSessionID,
             maxBodyBytes: maxBodyBytes,
-            requestTimeout: requestTimeout
+            requestTimeout: requestTimeout,
+            eagerInitialize: eagerInitialize
         )
     }
 
-    static func usage() -> String {
+    public static func usage() -> String {
         """
         Usage: xcode-mcp-proxy [options]
 
         Options:
           --listen host:port         Listen address (default: 127.0.0.1:8765)
+          --host host                Listen host (default: 127.0.0.1)
+          --port port                Listen port (default: 8765)
           --upstream-command cmd     Upstream command (default: xcrun)
           --upstream-args a,b,c      Upstream args (default: mcpbridge)
           --upstream-arg value       Append a single upstream arg
@@ -129,6 +177,7 @@ struct CLIParser {
           --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
           --max-body-bytes n         Max request body size (default: 1048576)
           --request-timeout seconds  Request timeout (default: 30)
+          --lazy-init                Initialize upstream only on first client request
           -h, --help                 Show help
         """
     }

@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPProxy
 
 do {
     let config = try CLIParser.parse(

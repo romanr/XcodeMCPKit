@@ -13,7 +13,7 @@ let package = Package(
         ),
         .executable(
             name: "xcode-mcp-proxy",
-            targets: ["XcodeMCPProxy"]
+            targets: ["XcodeMCPProxyCLI"]
         ),
     ],
     dependencies: [
@@ -25,7 +25,7 @@ let package = Package(
         .target(
             name: "XcodeMCPKit"
         ),
-        .executableTarget(
+        .target(
             name: "XcodeMCPProxy",
             dependencies: [
                 .product(name: "NIO", package: "swift-nio"),
@@ -33,6 +33,10 @@ let package = Package(
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ]
+        ),
+        .executableTarget(
+            name: "XcodeMCPProxyCLI",
+            dependencies: ["XcodeMCPProxy"]
         ),
         .testTarget(
             name: "XcodeMCPKitTests",

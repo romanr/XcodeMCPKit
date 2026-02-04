@@ -1,6 +1,6 @@
 import Foundation
 
-final class UpstreamProcess: @unchecked Sendable {
+actor UpstreamProcess {
     struct Config {
         var command: String
         var args: [String]
@@ -9,39 +9,56 @@ final class UpstreamProcess: @unchecked Sendable {
         var restartMaxDelay: TimeInterval
     }
 
+    enum Event: Sendable {
+        case message(Data)
+        case exit(Int32)
+    }
+
+    nonisolated let events: AsyncStream<Event>
+    private let continuation: AsyncStream<Event>.Continuation
+
     private let config: Config
-    private let queue = DispatchQueue(label: "XcodeMCPProxy.UpstreamProcess")
     private var process: Process?
     private var stdinPipe = Pipe()
     private var stdoutPipe = Pipe()
     private var stderrPipe = Pipe()
     private var restartDelay: TimeInterval
     private var framer = StdioFramer()
-
-    var onMessage: ((Data) -> Void)?
-    var onExit: ((Int32) -> Void)?
+    private var isStopping = false
+    private var restartTask: Task<Void, Never>?
 
     init(config: Config) {
         self.config = config
         self.restartDelay = config.restartInitialDelay
+        var streamContinuation: AsyncStream<Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
     }
 
     func start() {
-        queue.async { [weak self] in
-            self?.startLocked()
-        }
+        isStopping = false
+        startLocked()
     }
 
     func stop() {
-        queue.async { [weak self] in
-            self?.stopLocked()
-        }
+        isStopping = true
+        restartTask?.cancel()
+        restartTask = nil
+        stopLocked()
+        continuation.finish()
     }
 
     func send(_ data: Data) {
-        queue.async { [weak self] in
-            self?.sendLocked(data)
+        if process == nil {
+            startLocked()
         }
+        var payload = data
+        if payload.last != 0x0A {
+            payload.append(0x0A)
+        }
+        stdinPipe.fileHandleForWriting.write(payload)
     }
 
     private func startLocked() {
@@ -50,6 +67,7 @@ final class UpstreamProcess: @unchecked Sendable {
         stdinPipe = Pipe()
         stdoutPipe = Pipe()
         stderrPipe = Pipe()
+        framer = StdioFramer()
 
         let (executableURL, args) = resolveCommand(command: config.command, args: config.args)
         let process = Process()
@@ -65,7 +83,9 @@ final class UpstreamProcess: @unchecked Sendable {
             if data.isEmpty {
                 return
             }
-            self?.handleStdoutData(data)
+            Task {
+                await self?.handleStdoutData(data)
+            }
         }
 
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -73,7 +93,9 @@ final class UpstreamProcess: @unchecked Sendable {
         }
 
         process.terminationHandler = { [weak self] proc in
-            self?.handleTermination(status: proc.terminationStatus)
+            Task {
+                await self?.handleTermination(status: proc.terminationStatus)
+            }
         }
 
         do {
@@ -94,35 +116,32 @@ final class UpstreamProcess: @unchecked Sendable {
         process = nil
     }
 
-    private func sendLocked(_ data: Data) {
-        if process == nil {
-            startLocked()
-        }
-        var payload = data
-        if payload.last != 0x0A {
-            payload.append(0x0A)
-        }
-        stdinPipe.fileHandleForWriting.write(payload)
-    }
-
     private func handleStdoutData(_ data: Data) {
         let messages = framer.append(data)
         for message in messages {
-            onMessage?(message)
+            continuation.yield(.message(message))
         }
     }
 
     private func handleTermination(status: Int32) {
         process = nil
-        onExit?(status)
+        guard !isStopping else {
+            return
+        }
+        continuation.yield(.exit(status))
         scheduleRestart()
     }
 
     private func scheduleRestart() {
+        guard !isStopping else { return }
         let delay = restartDelay
         restartDelay = min(restartDelay * 2, config.restartMaxDelay)
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.startLocked()
+        restartTask?.cancel()
+        restartTask = Task { [weak self] in
+            guard let self else { return }
+            let nanos = UInt64(delay * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            await self.start()
         }
     }
 

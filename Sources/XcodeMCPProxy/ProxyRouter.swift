@@ -2,26 +2,29 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-final class ProxyRouter: @unchecked Sendable {
-    private struct Pending {
+final class ProxyRouter: Sendable {
+    private struct Pending: Sendable {
         var promise: EventLoopPromise<ByteBuffer>
         var timeout: Scheduled<Void>
     }
 
-    private let lock = NIOLock()
-    private var pendingById: [String: Pending] = [:]
-    private var pendingBatches: [Pending] = []
-    private var notificationBuffer: [Data] = []
+    private struct State: Sendable {
+        var pendingById: [String: Pending] = [:]
+        var pendingBatches: [Pending] = []
+        var notificationBuffer: [Data] = []
+    }
+
+    private let state = NIOLockedValueBox(State())
     private let notificationBufferLimit: Int
     private let requestTimeout: TimeAmount
-    private let hasActiveSSE: () -> Bool
-    private let sendNotification: (Data) -> Void
+    private let hasActiveSSE: @Sendable () -> Bool
+    private let sendNotification: @Sendable (Data) -> Void
 
     init(
         requestTimeout: TimeAmount,
         notificationBufferLimit: Int = 50,
-        hasActiveSSE: @escaping () -> Bool,
-        sendNotification: @escaping (Data) -> Void
+        hasActiveSSE: @escaping @Sendable () -> Bool,
+        sendNotification: @escaping @Sendable (Data) -> Void
     ) {
         self.requestTimeout = requestTimeout
         self.notificationBufferLimit = notificationBufferLimit
@@ -35,8 +38,8 @@ final class ProxyRouter: @unchecked Sendable {
             guard let self else { return }
             self.failTimeout(idKey: idKey)
         }
-        lock.withLock {
-            pendingById[idKey] = Pending(promise: promise, timeout: timeout)
+        state.withLockedValue { state in
+            state.pendingById[idKey] = Pending(promise: promise, timeout: timeout)
         }
         return promise.futureResult
     }
@@ -47,8 +50,8 @@ final class ProxyRouter: @unchecked Sendable {
             guard let self else { return }
             self.failBatchTimeout()
         }
-        lock.withLock {
-            pendingBatches.append(Pending(promise: promise, timeout: timeout))
+        state.withLockedValue { state in
+            state.pendingBatches.append(Pending(promise: promise, timeout: timeout))
         }
         return promise.futureResult
     }
@@ -81,32 +84,36 @@ final class ProxyRouter: @unchecked Sendable {
     }
 
     func drainBufferedNotifications() -> [Data] {
-        lock.withLock {
-            let drained = notificationBuffer
-            notificationBuffer.removeAll()
+        state.withLockedValue { state in
+            let drained = state.notificationBuffer
+            state.notificationBuffer.removeAll()
             return drained
         }
     }
 
     private func failTimeout(idKey: String) {
-        let pending = lock.withLock { pendingById.removeValue(forKey: idKey) }
+        let pending = state.withLockedValue { state in
+            state.pendingById.removeValue(forKey: idKey)
+        }
         pending?.promise.fail(TimeoutError())
     }
 
     private func failBatchTimeout() {
-        let pending = lock.withLock { pendingBatches.isEmpty ? nil : pendingBatches.removeFirst() }
+        let pending = state.withLockedValue { state in
+            state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
+        }
         pending?.promise.fail(TimeoutError())
     }
 
     private func pop(idKey: String) -> Pending? {
-        lock.withLock {
-            pendingById.removeValue(forKey: idKey)
+        state.withLockedValue { state in
+            state.pendingById.removeValue(forKey: idKey)
         }
     }
 
     private func popBatch() -> Pending? {
-        lock.withLock {
-            pendingBatches.isEmpty ? nil : pendingBatches.removeFirst()
+        state.withLockedValue { state in
+            state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
         }
     }
 
@@ -126,10 +133,10 @@ final class ProxyRouter: @unchecked Sendable {
     }
 
     private func bufferNotification(_ data: Data) {
-        lock.withLock {
-            notificationBuffer.append(data)
-            if notificationBuffer.count > notificationBufferLimit {
-                notificationBuffer.removeFirst(notificationBuffer.count - notificationBufferLimit)
+        state.withLockedValue { state in
+            state.notificationBuffer.append(data)
+            if state.notificationBuffer.count > notificationBufferLimit {
+                state.notificationBuffer.removeFirst(state.notificationBuffer.count - notificationBufferLimit)
             }
         }
     }

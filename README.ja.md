@@ -1,32 +1,34 @@
 # XcodeMCPProxy
 
-`xcrun mcpbridge` を上流に持つ HTTP MCP リレーサーバーです。
+[English](README.md)
 
-英語版（正本）: [README.md](README.md)
+Xcode の `mcpbridge` を **HTTP(S)/SSE で使える MCP プロキシ**です。  
+プロキシ起動時に一度だけ Xcode の許可ダイアログが表示されるように設計しています。
+
+## クイックスタート
+
+1. プロキシを起動
+   ```bash
+   scripts/run_proxy.sh
+   ```
+2. クライアントを `http://127.0.0.1:8765/mcp` に向ける（例は後述）
+3. Xcode の許可ダイアログが出たら **Allow**
+
+## 特徴
+
+- `mcpbridge` は **単一プロセスで運用**
+- 複数クライアントは `Mcp-Session-Id` で分離
+- JSON-RPC over HTTP + SSE（Streamable MCP）
 
 ## 使い方
 
-### 手動起動
+### Run Script
 
-```
-swift run xcode-mcp-proxy --listen 127.0.0.1:8765
-```
-
-既定では上流の Xcode MCP セッションを起動時に初期化し、Xcode の許可ダイアログがプロキシ起動時に出るようにしています。必要なら `--lazy-init` で初期化を遅延できます。
-
-Xcode の対象を固定する場合:
-
-```
-swift run xcode-mcp-proxy --xcode-pid 12345
-```
-
-### 便利スクリプト
-
-```
+```bash
 scripts/run_proxy.sh
 ```
 
-任意の環境変数:
+環境変数:
 
 - `HOST` (既定: `127.0.0.1`)
 - `PORT` (既定: `8765`)
@@ -34,11 +36,61 @@ scripts/run_proxy.sh
 - `XCODE_PID` (任意)
 - `LAZY_INIT` (`--lazy-init` を付与)
 
-## Codex 設定例
+### Manual Start
 
-`~/.codex/config.toml`:
-
+```bash
+swift run xcode-mcp-proxy --listen 127.0.0.1:8765
 ```
+
+Xcode MCP セッションは起動時に初期化し、Xcode の許可ダイアログが起動時に出るようにしています。`--lazy-init` で初期化を遅延させることもできます。
+
+Xcode の対象を固定する場合:
+
+```bash
+swift run xcode-mcp-proxy --xcode-pid 12345
+```
+
+## デフォルト値
+
+- Listen address: `127.0.0.1:8765`
+- command: `xcrun`
+- args: `mcpbridge`
+- request timeout: `30` seconds
+- max body size: `1048576` bytes
+- initialization: eager at startup
+
+環境変数:
+
+- `MCP_XCODE_PID`（`--xcode-pid` の代替）
+- `MCP_XCODE_SESSION_ID`（Xcode MCP セッション ID を固定）
+
+## オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--listen host:port` | 待ち受けアドレス |
+| `--host host` | 待ち受けホスト |
+| `--port port` | 待ち受けポート |
+| `--upstream-command cmd` | `mcpbridge` コマンド |
+| `--upstream-args a,b,c` | `mcpbridge` 引数（カンマ区切り） |
+| `--upstream-arg value` | `mcpbridge` 引数を1つ追加 |
+| `--xcode-pid pid` | 対象 Xcode の PID |
+| `--session-id id` | Xcode MCP セッション ID |
+| `--max-body-bytes n` | 最大ボディサイズ |
+| `--request-timeout seconds` | リクエストタイムアウト |
+| `--lazy-init` | 初回リクエストまで初期化を遅延 |
+
+## クライアント設定
+
+**Claude Code** (`~/.claude/settings.json`):
+
+```json
+{ "mcpServers": { "xcode": { "url": "http://127.0.0.1:8765/mcp" } } }
+```
+
+**Codex** (`~/.codex/config.toml`):
+
+```toml
 [mcp_servers.xcode]
 url = "http://127.0.0.1:8765/mcp"
 ```
@@ -51,12 +103,23 @@ url = "http://127.0.0.1:8765/mcp"
 - `DELETE /mcp` (セッション終了)
 - `GET /health`
 
-## 複数クライアント
+## セッションと複数クライアント
 
-上流の `mcpbridge` は 1 回だけ起動し共有します。  
-セッションごとに `id` を名前空間化するため、`Mcp-Session-Id` をクライアントごとに分けてください。  
-未指定の場合はサーバーが生成し、レスポンスヘッダ `Mcp-Session-Id` で返します。
+- クライアントごとに **異なる `Mcp-Session-Id`** を使ってください。
+- `initialize` を `Mcp-Session-Id` なしで送ると、サーバーが生成してレスポンスヘッダで返します。
+- SSE を使う場合は `GET /mcp` に `Mcp-Session-Id` を付与してください。
+
+## トラブルシューティング
+
+- `MCP client ... timed out`  
+  プロキシが起動しているか確認し、必要なら `startup_timeout_sec` を増やしてください。
+
+- Xcode のダイアログが出ない  
+  `--lazy-init` を指定していないか確認してください（指定している場合は最初のリクエストまでダイアログが出ません）。
+
+- `session not found`  
+  `Mcp-Session-Id` が一致しているか確認してください。
 
 ## ライセンス
 
-MIT。詳細は [LICENSE](LICENSE) を参照してください。
+[LICENSE](LICENSE)

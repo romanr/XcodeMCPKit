@@ -22,7 +22,22 @@ final class SessionContext: Sendable {
     }
 }
 
-final class SessionManager: Sendable {
+protocol SessionManaging: Sendable {
+    func session(id: String) -> SessionContext
+    func hasSession(id: String) -> Bool
+    func removeSession(id: String)
+    func shutdown()
+    func isInitialized() -> Bool
+    func registerInitialize(
+        originalId: RPCId,
+        requestObject: [String: Any],
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ByteBuffer>
+    func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64
+    func sendUpstream(_ data: Data)
+}
+
+final class SessionManager: Sendable, SessionManaging {
     private struct InitPending: Sendable {
         let eventLoop: EventLoop
         let promise: EventLoopPromise<ByteBuffer>

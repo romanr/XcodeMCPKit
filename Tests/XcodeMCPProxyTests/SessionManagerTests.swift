@@ -1,10 +1,12 @@
 import Foundation
-import NIOEmbedded
+import NIO
 import Testing
 @testable import XcodeMCPProxy
 
 @Test func sessionManagerQueuesInitializeRequests() async throws {
-    let eventLoop = EmbeddedEventLoop()
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
     let upstream = TestUpstreamClient()
     let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
     let manager = SessionManager(config: config, eventLoop: eventLoop, upstream: upstream)
@@ -22,14 +24,13 @@ import Testing
         on: eventLoop
     )
 
-    try await Task.yield()
+    await Task.yield()
     let sent = await upstream.sent()
     #expect(sent.count == 1)
 
     let upstreamId = try extractUpstreamId(from: sent[0])
     let response = try makeInitializeResponse(id: upstreamId)
     await upstream.yield(.message(response))
-    eventLoop.run()
 
     let response1 = try decodeJSON(from: try await future1.get())
     let response2 = try decodeJSON(from: try await future2.get())
@@ -40,7 +41,9 @@ import Testing
 }
 
 @Test func sessionManagerTimeoutResetsInitState() async throws {
-    let eventLoop = EmbeddedEventLoop()
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
     let upstream = TestUpstreamClient()
     let config = makeConfig(eagerInitialize: false, requestTimeout: 1)
     let manager = SessionManager(config: config, eventLoop: eventLoop, upstream: upstream)
@@ -51,11 +54,10 @@ import Testing
         requestObject: request,
         on: eventLoop
     )
-    try await Task.yield()
+    await Task.yield()
     #expect((await upstream.sent()).count == 1)
 
-    eventLoop.advanceTime(by: .seconds(2))
-    eventLoop.run()
+    try await Task.sleep(nanoseconds: 1_500_000_000)
 
     do {
         _ = try await future.get()
@@ -69,28 +71,30 @@ import Testing
         requestObject: makeInitializeRequest(id: 2),
         on: eventLoop
     )
-    try await Task.yield()
+    await Task.yield()
     #expect((await upstream.sent()).count == 2)
 }
 
 @Test func sessionManagerEagerInitializeRestartsAfterExit() async throws {
-    let eventLoop = EmbeddedEventLoop()
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
     let upstream = TestUpstreamClient()
     let config = makeConfig(eagerInitialize: true, requestTimeout: 5)
     _ = SessionManager(config: config, eventLoop: eventLoop, upstream: upstream)
 
-    try await Task.yield()
+    await Task.yield()
     #expect((await upstream.sent()).count == 1)
 
     await upstream.yield(.exit(1))
-    eventLoop.run()
-    try await Task.yield()
-
+    try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
     #expect((await upstream.sent()).count == 2)
 }
 
 @Test func sessionManagerSendsInitializedOnce() async throws {
-    let eventLoop = EmbeddedEventLoop()
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
     let upstream = TestUpstreamClient()
     let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
     let manager = SessionManager(config: config, eventLoop: eventLoop, upstream: upstream)
@@ -102,15 +106,14 @@ import Testing
         on: eventLoop
     )
 
-    try await Task.yield()
+    await Task.yield()
     let sent = await upstream.sent()
     let upstreamId = try extractUpstreamId(from: sent[0])
     let response = try makeInitializeResponse(id: upstreamId)
     await upstream.yield(.message(response))
-    eventLoop.run()
 
     _ = try await future.get()
-    try await Task.yield()
+    await Task.yield()
 
     let afterInit = await upstream.sent()
     #expect(afterInit.count == 2)
@@ -178,4 +181,26 @@ private func decodeJSON(from buffer: ByteBuffer) throws -> [String: Any] {
         return [:]
     }
     return (try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]) ?? [:]
+}
+
+private func shutdown(_ group: EventLoopGroup) async {
+    await withCheckedContinuation { continuation in
+        group.shutdownGracefully { _ in
+            continuation.resume()
+        }
+    }
+}
+
+private func waitForSentCount(
+    _ upstream: TestUpstreamClient,
+    count: Int,
+    timeoutSeconds: UInt64
+) async throws {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    while Date() < deadline {
+        if await upstream.sent().count >= count {
+            return
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
 }

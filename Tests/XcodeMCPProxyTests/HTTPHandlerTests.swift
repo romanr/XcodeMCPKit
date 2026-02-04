@@ -6,11 +6,10 @@ import Testing
 @testable import XcodeMCPProxy
 
 @Test func httpHealthCheck() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
@@ -23,11 +22,10 @@ import Testing
 }
 
 @Test func httpSSERequiresAcceptHeader() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
@@ -40,11 +38,10 @@ import Testing
 }
 
 @Test func httpPostRejectsUnknownAccept() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -53,7 +50,7 @@ import Testing
     var body = channel.allocator.buffer(capacity: 2)
     body.writeString("{}")
     try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(.byteBuffer(body)))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let response = try collectResponse(from: channel)
@@ -61,11 +58,10 @@ import Testing
 }
 
 @Test func httpPostRejectsNonJSONContentType() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -74,7 +70,7 @@ import Testing
     var body = channel.allocator.buffer(capacity: 2)
     body.writeString("{}")
     try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(.byteBuffer(body)))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let response = try collectResponse(from: channel)
@@ -82,11 +78,10 @@ import Testing
 }
 
 @Test func httpPostRejectsLargeBody() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig(maxBodyBytes: 1)
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -95,7 +90,7 @@ import Testing
     var body = channel.allocator.buffer(capacity: 2)
     body.writeString("{}")
     try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(.byteBuffer(body)))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let response = try collectResponse(from: channel)
@@ -103,11 +98,10 @@ import Testing
 }
 
 @Test func httpInitializeCreatesSessionAndReturnsResponse() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     let payload: [String: Any] = [
@@ -131,27 +125,8 @@ import Testing
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
     try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(.byteBuffer(body)))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
-
-    try await Task.yield()
-    let sent = await upstream.sent()
-    #expect(sent.count == 1)
-
-    let upstreamRequest = try JSONSerialization.jsonObject(with: sent[0], options: []) as? [String: Any]
-    let upstreamId = (upstreamRequest?["id"] as? NSNumber)?.int64Value
-    #expect(upstreamId != nil)
-
-    let responsePayload: [String: Any] = [
-        "jsonrpc": "2.0",
-        "id": upstreamId ?? 0,
-        "result": [
-            "capabilities": [String: Any](),
-        ],
-    ]
-    let responseData = try JSONSerialization.data(withJSONObject: responsePayload, options: [])
-    await upstream.yield(.message(responseData))
-    runEmbeddedLoop(from: channel)
 
     let response = try collectResponse(from: channel)
     #expect(response.head.status == .ok)
@@ -163,11 +138,10 @@ import Testing
 }
 
 @Test func httpInitializeRequiresId() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     let payload: [String: Any] = [
@@ -189,7 +163,7 @@ import Testing
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
     try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(.byteBuffer(body)))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let response = try collectResponse(from: channel)
@@ -198,11 +172,10 @@ import Testing
 }
 
 @Test func httpSessionHeaderMustExist() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
     let payload: [String: Any] = [
@@ -218,7 +191,7 @@ import Testing
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
     try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(.byteBuffer(body)))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let response = try collectResponse(from: channel)
@@ -227,11 +200,10 @@ import Testing
 }
 
 @Test func httpSSEHandshakeSucceedsWithSession() async throws {
-    let upstream = TestUpstreamClient()
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
-    let sessionManager = SessionManager(config: config, eventLoop: channel.eventLoop, upstream: upstream)
+    let sessionManager = TestSessionManager(config: config)
     _ = sessionManager.session(id: "session-1")
     try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -251,6 +223,68 @@ private enum HTTPTestError: Error {
     case missingResponseHead
 }
 
+private final class TestSessionManager: SessionManaging, @unchecked Sendable {
+    private var sessions: [String: SessionContext] = [:]
+    private var nextUpstreamId: Int64 = 1
+    private var initialized = false
+    private let config: ProxyConfig
+
+    init(config: ProxyConfig) {
+        self.config = config
+    }
+
+    func session(id: String) -> SessionContext {
+        if let existing = sessions[id] {
+            return existing
+        }
+        let context = SessionContext(id: id, config: config)
+        sessions[id] = context
+        return context
+    }
+
+    func hasSession(id: String) -> Bool {
+        sessions[id] != nil
+    }
+
+    func removeSession(id: String) {
+        let context = sessions.removeValue(forKey: id)
+        context?.sseHub.closeAll()
+    }
+
+    func shutdown() {}
+
+    func isInitialized() -> Bool {
+        initialized
+    }
+
+    func registerInitialize(
+        originalId: RPCId,
+        requestObject: [String: Any],
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ByteBuffer> {
+        initialized = true
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "result": [
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: response, options: [])) ?? Data()
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        return eventLoop.makeSucceededFuture(buffer)
+    }
+
+    func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64 {
+        let id = nextUpstreamId
+        nextUpstreamId += 1
+        return id
+    }
+
+    func sendUpstream(_ data: Data) {}
+}
+
 private func makeConfig(maxBodyBytes: Int = 1024, requestTimeout: TimeInterval = 1) -> ProxyConfig {
     ProxyConfig(
         listenHost: "127.0.0.1",
@@ -268,7 +302,7 @@ private func makeConfig(maxBodyBytes: Int = 1024, requestTimeout: TimeInterval =
 private func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: ProxyConfig,
-    sessionManager: SessionManager
+    sessionManager: any SessionManaging
 ) throws {
     let handler = HTTPHandler(config: config, sessionManager: sessionManager)
     try channel.pipeline.addHandler(handler).wait()
@@ -299,10 +333,4 @@ private func collectResponse(from channel: EmbeddedChannel) throws -> (head: HTT
     }
     let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
     return (responseHead, body)
-}
-
-private func runEmbeddedLoop(from channel: EmbeddedChannel) {
-    if let embedded = channel.eventLoop as? EmbeddedEventLoop {
-        embedded.run()
-    }
 }

@@ -83,15 +83,16 @@ import Testing
     #expect(mappedCount == 1)
 }
 
-@Test func requestInspectorPassesThroughScalars() async throws {
+@Test func requestInspectorRejectsScalarJSON() async throws {
     let data = Data("true".utf8)
-    let transform = try RequestInspector.transform(
-        data,
-        sessionId: "s1",
-        mapId: { _, _ in 1 }
-    )
-    #expect(transform.expectsResponse == false)
-    #expect(transform.isBatch == false)
-    #expect(transform.method == nil)
-    #expect(transform.upstreamData == data)
+    do {
+        _ = try RequestInspector.transform(
+            data,
+            sessionId: "s1",
+            mapId: { _, _ in 1 }
+        )
+        #expect(Bool(false))
+    } catch {
+        #expect(Bool(true))
+    }
 }

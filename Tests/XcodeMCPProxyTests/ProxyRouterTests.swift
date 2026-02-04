@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import NIOEmbedded
 import Testing
 @testable import XcodeMCPProxy
 
@@ -65,7 +64,9 @@ private func shutdown(_ group: EventLoopGroup) async {
 }
 
 @Test func proxyRouterHandlesBatchResponse() async throws {
-    let eventLoop = EmbeddedEventLoop()
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
         hasActiveSSE: { false },
@@ -76,14 +77,15 @@ private func shutdown(_ group: EventLoopGroup) async {
     let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
     router.handleIncoming(Data(response.utf8))
 
-    eventLoop.run()
     let buffer = try await future.get()
     let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
     #expect(string == response)
 }
 
 @Test func proxyRouterTimesOutRequests() async throws {
-    let eventLoop = EmbeddedEventLoop()
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
     let router = ProxyRouter(
         requestTimeout: .seconds(1),
         hasActiveSSE: { false },
@@ -91,8 +93,7 @@ private func shutdown(_ group: EventLoopGroup) async {
     )
 
     let future = router.registerRequest(idKey: "1", on: eventLoop)
-    eventLoop.advanceTime(by: .seconds(2))
-    eventLoop.run()
+    try await Task.sleep(nanoseconds: 1_500_000_000)
 
     do {
         _ = try await future.get()

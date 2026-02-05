@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-localhost}"
 PORT="${PORT:-8765}"
 LISTEN="${LISTEN:-$HOST:$PORT}"
 XCODE_PID="${XCODE_PID:-${MCP_XCODE_PID:-}}"

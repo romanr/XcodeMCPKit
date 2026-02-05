@@ -7,7 +7,6 @@ public final class ProxyServer {
     private let config: ProxyConfig
     private let group: EventLoopGroup
     private let sessionManager: SessionManager
-    private let stdioServer: StdioServer?
     private var channels: [Channel] = []
     private let logger: Logger = ProxyLogging.make("server")
 
@@ -16,37 +15,14 @@ public final class ProxyServer {
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let eventLoop = group.next()
         self.sessionManager = SessionManager(config: config, eventLoop: eventLoop)
-        if config.transport.includesStdio {
-            self.stdioServer = StdioServer(sessionManager: sessionManager, eventLoop: eventLoop)
-        } else {
-            self.stdioServer = nil
-        }
     }
 
     public func run() async throws {
-        if config.transport.includesStdio {
-            await stdioServer?.start()
-            logger.info("Xcode MCP proxy listening on stdio")
-        }
-
-        if config.transport.includesHTTP {
-            let channel = try start()
-            let (host, port) = resolvedListenAddress(for: channel)
-            let displayHost = config.listenHost == "localhost" ? "localhost" : host
-            logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
-        }
-
-        switch (config.transport.includesHTTP, config.transport.includesStdio) {
-        case (true, true):
-            try await waitForHTTP()
-            await stdioServer?.wait()
-        case (true, false):
-            try await waitForHTTP()
-        case (false, true):
-            await stdioServer?.wait()
-        default:
-            return
-        }
+        let channel = try start()
+        let (host, port) = resolvedListenAddress(for: channel)
+        let displayHost = config.listenHost == "localhost" ? "localhost" : host
+        logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
+        try await waitForHTTP()
     }
 
     public func start() throws -> Channel {
@@ -75,9 +51,6 @@ public final class ProxyServer {
     public func shutdownGracefully() -> EventLoopFuture<Void> {
         let promise = group.next().makePromise(of: Void.self)
         sessionManager.shutdown()
-        Task { [stdioServer] in
-            await stdioServer?.stop()
-        }
         for channel in channels {
             channel.close(promise: nil)
         }

@@ -1,168 +1,109 @@
-# XcodeMCPProxy
+# XcodeMCPKit
 
 [日本語](README.ja.md)
 
-An MCP proxy for Xcode MCP (`mcpbridge`).  
-The Xcode permission dialog appears once when the proxy starts.
+An MCP proxy for Xcode MCP (mcpbridge).  
+Designed so the Xcode permission dialog appears once when the proxy starts.
 
 ## Quick Start
 
 1. Start the proxy
    ```bash
-   scripts/run_proxy.sh
+   xcode-mcp-proxy-server
    ```
-2. Point your client to `http://localhost:8765/mcp`
-3. Click **Allow** in Xcode’s permission dialog
-
-## Features
-
-- `mcpbridge` runs as a **single process**
-- Multi-client support via `Mcp-Session-Id`
-- JSON-RPC over HTTP + SSE (Streamable MCP)
-- NDJSON over STDIO (Codex-compatible)
+2. Click **Allow** in Xcode’s permission dialog
 
 ## Architecture
 
-See [Docs/architecture.md](Docs/architecture.md) for the process overview and diagram.
+See [Architecture](Docs/architecture.md) for the process overview.
+
+## Installation
+
+```bash
+swift run -c release xcode-mcp-proxy-install
+```
+
+By default, `xcode-mcp-proxy` and `xcode-mcp-proxy-server` are installed to `~/.local/bin`. Add it to your `PATH` if needed.
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+To change the destination:
+
+```bash
+./.build/release/xcode-mcp-proxy-install --prefix "$HOME/.local"
+# or
+./.build/release/xcode-mcp-proxy-install --bindir "$HOME/bin"
+```
 
 ## Usage
 
-### Run Script
+### Server
 
-```bash
-scripts/run_proxy.sh
-```
+See Quick Start for how to launch.
 
-Optional environment variables:
+#### Defaults
 
-- `HOST` (default: `localhost`)
-- `PORT` (default: `8765`)
-- `LISTEN` (overrides host/port)
-- `XCODE_PID` (optional)
-- `LAZY_INIT` (set to any value to pass `--lazy-init`)
+- command: `xcrun`
+- args: `mcpbridge`
+- request timeout: `300` seconds (`0` disables)
+- max body size: `1048576` bytes
+- initialization: eager at startup
+- mode: HTTP by default; STDIO when `--stdio` is set
 
-### Manual Start
-
-```bash
-swift run xcode-mcp-proxy --listen localhost:8765
-```
-
-The proxy initializes the Xcode MCP session at startup so the permission dialog appears immediately. Use `--lazy-init` to defer initialization until the first client request.
-
-To target a specific Xcode process:
-
-```bash
-swift run xcode-mcp-proxy --xcode-pid 12345
-```
-
-To run STDIO only:
-
-```bash
-swift run xcode-mcp-proxy --transport stdio
-```
-
-## Defaults
-
-- Listen address: `localhost:8765`
-- `mcpbridge` command: `xcrun`
-- `mcpbridge` args: `mcpbridge`
-- Request timeout: `300` seconds (`0` disables)
-- Max body size: `1048576` bytes
-- Initialization: eager at startup
-- Transport: `both`
-
-Environment variables:
+#### Environment Variables
 
 - `MCP_XCODE_PID` (alternative to `--xcode-pid`)
-- `MCP_XCODE_SESSION_ID` (fix the Xcode MCP session id)
+- `MCP_XCODE_SESSION_ID` (fixes the Xcode MCP session ID; usually not needed)
 - `MCP_LOG_LEVEL` (log level: trace|debug|info|notice|warning|error|critical)
 
 Logs are written to stderr.
 
-## Options
+#### Options
 
 | Option | Description |
 |--------|-------------|
-| `--listen host:port` | Listen address |
-| `--host host` | Listen host |
-| `--port port` | Listen port |
 | `--upstream-command cmd` | `mcpbridge` command |
 | `--upstream-args a,b,c` | `mcpbridge` args (comma-separated) |
 | `--upstream-arg value` | Append a single `mcpbridge` arg |
 | `--xcode-pid pid` | Xcode PID |
-| `--session-id id` | Xcode MCP session id |
+| `--session-id id` | Xcode MCP session ID (usually not needed) |
 | `--max-body-bytes n` | Max request body size |
 | `--request-timeout seconds` | Request timeout (`0` disables) |
 | `--lazy-init` | Delay initialization until first request |
-| `--transport mode` | Transport mode: `http`, `stdio`, `both` |
+| `--stdio` | Run in STDIO mode |
 
-## Client Config
+### Client
+
+#### Config
 
 **Claude Code** (`~/.claude/settings.json`):
 
 ```json
-{ "mcpServers": { "xcode": { "url": "http://localhost:8765/mcp" } } }
+{
+  "mcpServers": {
+    "xcode": {
+      "command": "xcode-mcp-proxy"
+    }
+  }
+}
 ```
 
 **Codex** (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.xcode]
-url = "http://localhost:8765/mcp"
+command = "xcode-mcp-proxy"
+args = ["--stdio"]
 ```
 
-**Codex (STDIO)**:
-
-```bash
-codex mcp add xcode -- xcode-mcp-proxy --transport stdio
-```
-
-## Endpoints
-
-- `POST /mcp` (JSON-RPC; responds with JSON or SSE and returns `Mcp-Session-Id`)
-- `GET /mcp` (SSE; requires `Mcp-Session-Id` and `Accept: text/event-stream`)
-- `GET /events`, `GET /mcp/events` (SSE aliases)
-- `DELETE /mcp` (close session)
-- `GET /health`
-- STDIO: NDJSON (`--transport stdio`)
-
-## Sessions & Multiple Clients
-
-- Use a **unique `Mcp-Session-Id` per client**.
-- If `initialize` is sent without `Mcp-Session-Id`, the proxy generates one and returns it in the response header.
-- For SSE, include `Mcp-Session-Id` on `GET /mcp`.
-- STDIO uses a single session (one client per process).
+If `xcode-mcp-proxy` is not on your `PATH`, use the full path.
 
 ## Troubleshooting
 
-- `mcpbridge` fails to run  
-  Apple documentation notes:
-
-  > In Terminal, use the xcrun mcpbridge command to configure the agentic coding tool to use Xcode Tools.
-
-  Reference: [Giving external agentic coding tools access to Xcode](https://developer.apple.com/documentation/Xcode/giving-agentic-coding-tools-access-to-xcode#Configure-external-coding-tools-to-use-the-MCP-server)
-
-  ```bash
-  claude mcp add --transport stdio xcode -- xcrun mcpbridge
-  codex mcp add xcode -- xcrun mcpbridge
-  ```
-
-- `MCP client ... timed out`  
-  Ensure the proxy is running, then increase `startup_timeout_sec` if needed.
-
-- Codex `tools/call` times out after 60 seconds  
-  Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is a Codex client-side timeout and is separate from the proxy `--request-timeout`).
-  ```toml
-  [mcp_servers.xcode]
-  url = "http://localhost:8765/mcp"
-  tool_timeout_sec = 300
-  ```
-
-- Permission dialog does not appear  
-  If `--lazy-init` is enabled, the dialog appears on the first request instead of startup.
-
-- `session not found`  
-  Verify the `Mcp-Session-Id` matches the session that was initialized.
+[Troubleshooting](Docs/troubleshooting.md)
 
 ## License
 

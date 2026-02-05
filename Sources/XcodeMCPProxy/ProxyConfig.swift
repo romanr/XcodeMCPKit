@@ -3,17 +3,6 @@ import Foundation
 public enum ProxyTransport: String, CaseIterable, Sendable {
     case http
     case stdio
-    case both
-}
-
-public extension ProxyTransport {
-    var includesHTTP: Bool {
-        self == .http || self == .both
-    }
-
-    var includesStdio: Bool {
-        self == .stdio || self == .both
-    }
 }
 
 public struct ProxyConfig: Sendable {
@@ -27,6 +16,7 @@ public struct ProxyConfig: Sendable {
     public var requestTimeout: TimeInterval
     public var eagerInitialize: Bool
     public var transport: ProxyTransport
+    public var stdioUpstreamURL: URL?
 
     public init(
         listenHost: String,
@@ -38,7 +28,8 @@ public struct ProxyConfig: Sendable {
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
         eagerInitialize: Bool = true,
-        transport: ProxyTransport = .both
+        transport: ProxyTransport = .http,
+        stdioUpstreamURL: URL? = nil
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -50,6 +41,7 @@ public struct ProxyConfig: Sendable {
         self.requestTimeout = requestTimeout
         self.eagerInitialize = eagerInitialize
         self.transport = transport
+        self.stdioUpstreamURL = stdioUpstreamURL
     }
 }
 
@@ -65,6 +57,8 @@ public enum CLIError: Error, CustomStringConvertible {
 }
 
 public struct CLIParser {
+    private static let defaultStdioUpstream = "http://localhost:8765/mcp"
+
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         var listenHost = "localhost"
         var listenPort = 8765
@@ -75,7 +69,7 @@ public struct CLIParser {
         var maxBodyBytes = 1_048_576
         var requestTimeout: TimeInterval = 300
         var eagerInitialize = true
-        var transport: ProxyTransport = .both
+        var stdioUpstreamURL: URL?
 
         var index = 1
         while index < args.count {
@@ -155,16 +149,20 @@ public struct CLIParser {
             case "--lazy-init":
                 eagerInitialize = false
                 index += 1
-            case "--transport":
-                guard index + 1 < args.count else {
-                    throw CLIError.message("--transport requires a value (http|stdio|both)")
+            case "--stdio":
+                if index + 1 < args.count {
+                    let candidate = args[index + 1]
+                    if !candidate.hasPrefix("-") {
+                        stdioUpstreamURL = try parseHTTPURL(candidate, label: "--stdio")
+                        index += 2
+                        break
+                    }
                 }
-                let value = args[index + 1].lowercased()
-                guard let parsed = ProxyTransport(rawValue: value) else {
-                    throw CLIError.message("--transport must be one of: http, stdio, both")
+                guard let defaultURL = URL(string: Self.defaultStdioUpstream) else {
+                    throw CLIError.message("Default stdio upstream URL is invalid")
                 }
-                transport = parsed
-                index += 2
+                stdioUpstreamURL = defaultURL
+                index += 1
             case "-h", "--help":
                 throw CLIError.message(usage())
             default:
@@ -178,6 +176,7 @@ public struct CLIParser {
         if upstreamSessionID == nil, let value = environment["MCP_XCODE_SESSION_ID"], !value.isEmpty {
             upstreamSessionID = value
         }
+        let transport: ProxyTransport = stdioUpstreamURL == nil ? .http : .stdio
 
         return ProxyConfig(
             listenHost: listenHost,
@@ -189,7 +188,8 @@ public struct CLIParser {
             maxBodyBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
             eagerInitialize: eagerInitialize,
-            transport: transport
+            transport: transport,
+            stdioUpstreamURL: stdioUpstreamURL
         )
     }
 
@@ -209,7 +209,7 @@ public struct CLIParser {
           --max-body-bytes n         Max request body size (default: 1048576)
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
           --lazy-init                Initialize upstream only on first client request
-          --transport mode           Transport mode: http|stdio|both (default: both)
+          --stdio [url]              Run in STDIO mode (default: http://localhost:8765/mcp)
           -h, --help                 Show help
         """
     }
@@ -225,5 +225,14 @@ public struct CLIParser {
         }
         let host = hostPart.isEmpty ? "localhost" : hostPart
         return (host, port)
+    }
+
+    private static func parseHTTPURL(_ value: String, label: String) throws -> URL {
+        guard let url = URL(string: value),
+              let scheme = url.scheme,
+              scheme == "http" || scheme == "https" else {
+            throw CLIError.message("\(label) must be an http/https URL")
+        }
+        return url
     }
 }

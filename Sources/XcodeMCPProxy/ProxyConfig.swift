@@ -182,7 +182,7 @@ public struct CLIParser {
         """
     }
 
-    public static func parseListen(_ value: String) throws -> (host: String, port: Int) {
+    private static func parseListen(_ value: String) throws -> (host: String, port: Int) {
         guard let colonIndex = value.lastIndex(of: ":") else {
             throw CLIError.message("--listen expects host:port (got \(value))")
         }

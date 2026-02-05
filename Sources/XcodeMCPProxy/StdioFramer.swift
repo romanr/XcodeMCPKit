@@ -1,11 +1,9 @@
 import Foundation
 
-public final class StdioFramer {
+final class StdioFramer {
     private var buffer = Data()
 
-    public init() {}
-
-    public func append(_ data: Data) -> [Data] {
+    func append(_ data: Data) -> [Data] {
         guard !data.isEmpty else { return [] }
         buffer.append(data)
         var messages: [Data] = []

@@ -18,10 +18,6 @@ let package = Package(
             name: "xcode-mcp-proxy",
             targets: ["XcodeMCPProxyCLI"]
         ),
-        .executable(
-            name: "xcode-mcp-stdio-proxy",
-            targets: ["XcodeMCPStdioProxyCLI"]
-        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
@@ -43,24 +39,9 @@ let package = Package(
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ]
         ),
-        .target(
-            name: "XcodeMCPStdioProxy",
-            dependencies: [
-                "XcodeMCPProxy",
-                .product(name: "Logging", package: "swift-log"),
-            ]
-        ),
         .executableTarget(
             name: "XcodeMCPProxyCLI",
             dependencies: [
-                "XcodeMCPProxy",
-                .product(name: "Logging", package: "swift-log"),
-            ]
-        ),
-        .executableTarget(
-            name: "XcodeMCPStdioProxyCLI",
-            dependencies: [
-                "XcodeMCPStdioProxy",
                 "XcodeMCPProxy",
                 .product(name: "Logging", package: "swift-log"),
             ]
@@ -75,12 +56,6 @@ let package = Package(
                 "XcodeMCPProxy",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
-            ]
-        ),
-        .testTarget(
-            name: "XcodeMCPStdioProxyTests",
-            dependencies: [
-                "XcodeMCPStdioProxy"
             ]
         ),
     ]

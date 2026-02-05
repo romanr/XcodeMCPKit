@@ -7,7 +7,7 @@ public final class ProxyServer {
     private let config: ProxyConfig
     private let group: EventLoopGroup
     private let sessionManager: SessionManager
-    private var channel: Channel?
+    private var channels: [Channel] = []
     private let logger: Logger = ProxyLogging.make("server")
 
     public init(config: ProxyConfig) {
@@ -19,8 +19,13 @@ public final class ProxyServer {
     public func run() throws {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)
-        logger.info("Xcode MCP proxy listening on http://\(host):\(port)")
-        try channel.closeFuture.wait()
+        let displayHost = config.listenHost == "localhost" ? "localhost" : host
+        logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
+        let futures = channels.map { $0.closeFuture }
+        if futures.isEmpty {
+            return
+        }
+        try EventLoopFuture.andAllSucceed(futures, on: group.next()).wait()
     }
 
     public func start() throws -> Channel {
@@ -38,16 +43,18 @@ public final class ProxyServer {
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-
-        let channel = try bootstrap.bind(host: config.listenHost, port: config.listenPort).wait()
-        self.channel = channel
-        return channel
+        let boundChannels = try bindChannels(using: bootstrap)
+        self.channels = boundChannels
+        guard let first = boundChannels.first else {
+            throw ProxyServerError.failedToBind
+        }
+        return first
     }
 
     public func shutdownGracefully() -> EventLoopFuture<Void> {
         let promise = group.next().makePromise(of: Void.self)
         sessionManager.shutdown()
-        if let channel {
+        for channel in channels {
             channel.close(promise: nil)
         }
         group.shutdownGracefully { error in
@@ -68,4 +75,30 @@ public final class ProxyServer {
         }
         return (config.listenHost, config.listenPort)
     }
+
+    private func bindChannels(using bootstrap: ServerBootstrap) throws -> [Channel] {
+        if config.listenHost != "localhost" {
+            let channel = try bootstrap.bind(host: config.listenHost, port: config.listenPort).wait()
+            return [channel]
+        }
+
+        var bound: [Channel] = []
+        let v4Channel = try bootstrap.bind(host: "127.0.0.1", port: config.listenPort).wait()
+        bound.append(v4Channel)
+        let v4Port = v4Channel.localAddress?.port ?? config.listenPort
+        guard v4Port > 0 else {
+            return bound
+        }
+        do {
+            let v6Channel = try bootstrap.bind(host: "::1", port: v4Port).wait()
+            bound.append(v6Channel)
+        } catch {
+            logger.warning("Failed to bind IPv6 loopback; continuing with IPv4 only", metadata: ["error": "\(error)"])
+        }
+        return bound
+    }
+}
+
+private enum ProxyServerError: Error {
+    case failedToBind
 }

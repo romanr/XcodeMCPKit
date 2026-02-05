@@ -84,3 +84,8 @@ flowchart LR
 ## Ports and Addressing
 - Only the central proxy uses `--listen` / `--host` / `--port`.
 - STDIO adapters do not use ports.
+- The server binds to `localhost:0` by default and writes the resolved endpoint to
+  `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
+- HTTP/SSE clients should read `url` from the discovery file to locate the active proxy endpoint.
+- STDIO adapters resolve the upstream via `XCODE_MCP_PROXY_ENDPOINT` or the discovery file,
+  with `http://localhost:8765/mcp` as a fallback.

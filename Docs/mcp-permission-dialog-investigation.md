@@ -10,6 +10,74 @@ Conclusion: **no reliable path was found to skip the dialog using external param
   - `/Applications/Xcode.app/Contents/PlugIns/IDEIntelligenceChat.framework/Versions/A/IDEIntelligenceChat`
   - `/Applications/Xcode.app/Contents/PlugIns/IDEIntelligenceAgents.framework/Versions/A/IDEIntelligenceAgents`
 
+## Diagrams
+
+### High-Level Data Flow
+```mermaid
+flowchart LR
+  client["External agent (Codex/Claude/etc.)"]
+  bridge["xcrun mcpbridge (stdio JSON-RPC)"]
+  xcode["Xcode (IDEIntelligenceChat.framework)"]
+  listener["XPC MCP bridge listener"]
+  session["XPCMCPSession"]
+  tools["toolProvider (Xcode tools)"]
+
+  client -->|"JSON-RPC over STDIO"| bridge
+  bridge -->|"XPC (tool service connection)"| listener
+  listener --> session
+  session --> tools
+  tools --> session
+  session --> listener
+  listener --> bridge
+  bridge --> client
+
+  xcode --- listener
+  xcode --- session
+  xcode --- tools
+```
+
+### Permission Decision Path (Hypothesis)
+```mermaid
+flowchart TD
+  A["Received connection from mcpbridge"] --> B["XPCMCPSession created"]
+  B --> C["rejectUntrustedAgents(...)"]
+
+  C --> D{"Known agent?"}
+  D -->|"Yes"| E["Permit (no dialog)"]
+  D -->|"No"| F{"IDEAllowUnauthenticatedAgents == true?"}
+
+  F -->|"Yes"| G["Permit (no dialog?)"]
+  F -->|"No"| H["Show permission dialog"]
+
+  H --> I{"User allows?"}
+  I -->|"Yes"| J["Permit (this connection)"]
+  I -->|"No"| K["Deny or cancel -> invalidate session"]
+
+  note["Note: IDEAllowUnauthenticatedAgents check exists, but dialog can still appear in practice.\nThis implies an alternate code path may bypass the check."]:::note
+  F -.-> note
+
+  classDef note fill:#f6f6f6,stroke:#999,color:#111;
+```
+
+### Known Agent Fast Path (Hypothesis)
+```mermaid
+flowchart TD
+  subgraph XcodeProcess["Xcode process lifetime"]
+    registry["XPCMCPSessionManager registry (in-memory)"]
+  end
+
+  first["First-time agent connection"] --> record["recordXcodeInfo(mcpSessionID, tabIdentifier, assistantName)"]
+  record --> registry
+
+  later["Later agent connection (same mcpSessionID)"] --> lookup["getXcodeInfo(for: mcpSessionID)"]
+  lookup --> decision{"Registry entry exists?"}
+  decision -->|"Yes"| allow["Known agent fast path (no dialog)"]
+  decision -->|"No"| prompt["Untrusted path (may prompt)"]
+
+  restart["Xcode restart"] --> cleared["Registry cleared"]
+  cleared --> registry
+```
+
 ## Key Observations (High Level)
 - The dialog is triggered inside `XPCMCPSession.rejectUntrustedAgents(...)`.
 - There is a **"known agent" fast path** that allows without showing the dialog.
@@ -35,6 +103,26 @@ Conclusion: **no reliable path was found to skip the dialog using external param
 - `Invalidating XPCMCPSession due to lack of user permission: %s` (`0x8eaf60`)
 - `User denied or cancelled the agent connection` (`0x8eb070`)
 - `***** Session ID: %s` (`0x8eb050`)
+
+## MCP Bridge Lifecycle (xref)
+These strings strongly suggest the MCP server-side bridge runs inside `IDEIntelligenceChat.framework`,
+creates an XPC listener, and accepts connections from `mcpbridge`.
+
+- `Initializing XPC MCP bridge` (`0x8eb7f0`)
+- `Starting XPC MCP bridge listener` (`0x8eb830`)
+- `Received connection from mcpbridge, creating session` (`0x8eb860`)
+- `Tool provider not initialized` (`0x8eb110`)
+- `Tool provider initialized successfully` (`0x8eb510`)
+- `Session initialized with context: %s` (`0x8eb670`)
+
+## MCP Request Log Strings (xref)
+- `listTools called` (`0x8eae90`)
+- `Received listTools request` (`0x8eb4a0`)
+- `Calling toolProvider.listTools()` (`0x8eb440`)
+- `Sent listTools response` (`0x8eb420`)
+- `Received callTool request for '%s'` (`0x8eb470`)
+- `Sent output to bridge` (`0x8eb130`)
+- `Sent progress update: %ld/%s` (`0x8eb0f0`)
 
 ## Known-Agent Determination (Hypothesis)
 `XPCMCPSessionManager` contains an in-memory registry:

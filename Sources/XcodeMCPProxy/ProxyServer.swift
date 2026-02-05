@@ -83,19 +83,25 @@ public final class ProxyServer {
         }
 
         var bound: [Channel] = []
-        let v4Channel = try bootstrap.bind(host: "127.0.0.1", port: config.listenPort).wait()
-        bound.append(v4Channel)
-        let v4Port = v4Channel.localAddress?.port ?? config.listenPort
-        guard v4Port > 0 else {
-            return bound
-        }
         do {
-            let v6Channel = try bootstrap.bind(host: "::1", port: v4Port).wait()
-            bound.append(v6Channel)
+            let v4Channel = try bootstrap.bind(host: "127.0.0.1", port: config.listenPort).wait()
+            bound.append(v4Channel)
+            let v4Port = v4Channel.localAddress?.port ?? config.listenPort
+            guard v4Port > 0 else {
+                return bound
+            }
+            do {
+                let v6Channel = try bootstrap.bind(host: "::1", port: v4Port).wait()
+                bound.append(v6Channel)
+            } catch {
+                logger.warning("Failed to bind IPv6 loopback; continuing with IPv4 only", metadata: ["error": "\(error)"])
+            }
+            return bound
         } catch {
-            logger.warning("Failed to bind IPv6 loopback; continuing with IPv4 only", metadata: ["error": "\(error)"])
+            logger.warning("Failed to bind IPv4 loopback; attempting IPv6 only", metadata: ["error": "\(error)"])
+            let v6Channel = try bootstrap.bind(host: "::1", port: config.listenPort).wait()
+            return [v6Channel]
         }
-        return bound
     }
 }
 

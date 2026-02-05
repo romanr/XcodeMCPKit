@@ -22,7 +22,7 @@ The Xcode permission dialog appears once when the proxy starts.
 
 ## Architecture
 
-See `Docs/architecture.md` for the process overview and diagram.
+See [Docs/architecture.md](Docs/architecture.md) for the process overview and diagram.
 
 ## Usage
 

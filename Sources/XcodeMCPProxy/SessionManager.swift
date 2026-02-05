@@ -5,18 +5,18 @@ import NIOConcurrencyHelpers
 final class SessionContext: Sendable {
     let id: String
     let router: ProxyRouter
-    let sseHub: SSEHub
+    let notificationHub: NotificationHub
 
     init(id: String, config: ProxyConfig) {
         self.id = id
-        self.sseHub = SSEHub()
+        self.notificationHub = NotificationHub()
         self.router = ProxyRouter(
             requestTimeout: makeRequestTimeout(config.requestTimeout),
-            hasActiveSSE: { [weak sseHub] in
-                sseHub?.hasClients ?? false
+            hasActiveClients: { [weak notificationHub] in
+                notificationHub?.hasClients ?? false
             },
-            sendNotification: { [weak sseHub] data in
-                sseHub?.broadcast(data)
+            sendNotification: { [weak notificationHub] data in
+                notificationHub?.broadcast(data)
             }
         )
     }
@@ -117,7 +117,7 @@ final class SessionManager: Sendable, SessionManaging {
         let context = sessionsState.withLockedValue { state in
             state.sessions.removeValue(forKey: id)
         }
-        context?.sseHub.closeAll()
+        context?.notificationHub.closeAll()
     }
 
     func shutdown() {

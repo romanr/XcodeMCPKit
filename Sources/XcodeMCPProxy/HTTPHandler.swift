@@ -79,7 +79,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let sessionId = state.withLockedValue { $0.sseSessionId }
         if let sessionId {
             let session = sessionManager.session(id: sessionId)
-            session.sseHub.remove(context.channel)
+            session.notificationHub.removeSse(context.channel)
         }
         if let remote = remoteAddressString(for: context.channel) {
             if let sessionId {
@@ -168,26 +168,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard sessionManager.hasSession(id: sessionId) else {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: sessionId,
-                requestLog: requestLog
-            )
-            return
-        }
-
         let session = sessionManager.session(id: sessionId)
-        let hadClients = session.sseHub.hasClients
+        let hadClients = session.notificationHub.hasSseClients
 
         state.withLockedValue { state in
             state.isSSE = true
             state.sseSessionId = sessionId
         }
-        session.sseHub.add(context.channel)
+        session.notificationHub.addSse(context.channel)
 
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
@@ -229,18 +217,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         }
-        guard sessionManager.hasSession(id: sessionId) else {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: sessionId,
-                requestLog: requestLog
-            )
-            return
+        if sessionManager.hasSession(id: sessionId) {
+            sessionManager.removeSession(id: sessionId)
         }
-        sessionManager.removeSession(id: sessionId)
         sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
     }
 
@@ -287,27 +266,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         let headerSessionId = sessionIdFromHeaders(head.headers)
-        if let headerSessionId, !sessionManager.hasSession(id: headerSessionId) {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: headerSessionId,
-                requestLog: requestLog
-            )
-            return
-        }
+        let headerSessionExists = headerSessionId.map { sessionManager.hasSession(id: $0) } ?? false
 
         if let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
            let method = object["method"] as? String,
-           method == "initialize",
-           headerSessionId == nil {
+           method == "initialize" {
             guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
                 sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
                 return
             }
-            let sessionId = UUID().uuidString
+            let sessionId = headerSessionId ?? UUID().uuidString
             _ = sessionManager.session(id: sessionId)
             let future = sessionManager.registerInitialize(
                 originalId: originalId,
@@ -337,6 +305,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
             return
+        }
+
+        if let headerSessionId, !headerSessionExists {
+            _ = sessionManager.session(id: headerSessionId)
         }
 
         let sessionId = headerSessionId ?? UUID().uuidString

@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
 import Testing
@@ -171,7 +172,7 @@ import Testing
     #expect(response.body.contains("missing id"))
 }
 
-@Test func httpSessionHeaderMustExist() async throws {
+@Test func httpSessionHeaderAutoCreatesSession() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
@@ -181,7 +182,10 @@ import Testing
     let payload: [String: Any] = [
         "jsonrpc": "2.0",
         "id": 99,
-        "method": "tools/list",
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
     ]
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -195,8 +199,9 @@ import Testing
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let response = try collectResponse(from: channel)
-    #expect(response.head.status == .unauthorized)
-    #expect(response.body.contains("session not found"))
+    #expect(response.head.status == .ok)
+    #expect(response.head.headers.first(name: "Mcp-Session-Id") == "missing-session")
+    #expect(response.body.contains("\"result\""))
 }
 
 @Test func httpSSEHandshakeSucceedsWithSession() async throws {
@@ -223,10 +228,14 @@ private enum HTTPTestError: Error {
     case missingResponseHead
 }
 
-private final class TestSessionManager: SessionManaging, @unchecked Sendable {
-    private var sessions: [String: SessionContext] = [:]
-    private var nextUpstreamId: Int64 = 1
-    private var initialized = false
+private final class TestSessionManager: SessionManaging {
+    private struct State: Sendable {
+        var sessions: [String: SessionContext] = [:]
+        var nextUpstreamId: Int64 = 1
+        var initialized = false
+    }
+
+    private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
 
     init(config: ProxyConfig) {
@@ -234,27 +243,35 @@ private final class TestSessionManager: SessionManaging, @unchecked Sendable {
     }
 
     func session(id: String) -> SessionContext {
-        if let existing = sessions[id] {
-            return existing
+        state.withLockedValue { state in
+            if let existing = state.sessions[id] {
+                return existing
+            }
+            let context = SessionContext(id: id, config: config)
+            state.sessions[id] = context
+            return context
         }
-        let context = SessionContext(id: id, config: config)
-        sessions[id] = context
-        return context
     }
 
     func hasSession(id: String) -> Bool {
-        sessions[id] != nil
+        state.withLockedValue { state in
+            state.sessions[id] != nil
+        }
     }
 
     func removeSession(id: String) {
-        let context = sessions.removeValue(forKey: id)
-        context?.sseHub.closeAll()
+        let context = state.withLockedValue { state in
+            state.sessions.removeValue(forKey: id)
+        }
+        context?.notificationHub.closeAll()
     }
 
     func shutdown() {}
 
     func isInitialized() -> Bool {
-        initialized
+        state.withLockedValue { state in
+            state.initialized
+        }
     }
 
     func registerInitialize(
@@ -262,7 +279,9 @@ private final class TestSessionManager: SessionManaging, @unchecked Sendable {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
-        initialized = true
+        state.withLockedValue { state in
+            state.initialized = true
+        }
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalId.value.foundationObject,
@@ -277,9 +296,11 @@ private final class TestSessionManager: SessionManaging, @unchecked Sendable {
     }
 
     func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64 {
-        let id = nextUpstreamId
-        nextUpstreamId += 1
-        return id
+        state.withLockedValue { state in
+            let id = state.nextUpstreamId
+            state.nextUpstreamId += 1
+            return id
+        }
     }
 
     func sendUpstream(_ data: Data) {}

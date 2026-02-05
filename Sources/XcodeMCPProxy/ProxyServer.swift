@@ -13,19 +13,16 @@ public final class ProxyServer {
     public init(config: ProxyConfig) {
         self.config = config
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.sessionManager = SessionManager(config: config, eventLoop: group.next())
+        let eventLoop = group.next()
+        self.sessionManager = SessionManager(config: config, eventLoop: eventLoop)
     }
 
-    public func run() throws {
+    public func run() async throws {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
         logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
-        let futures = channels.map { $0.closeFuture }
-        if futures.isEmpty {
-            return
-        }
-        try EventLoopFuture.andAllSucceed(futures, on: group.next()).wait()
+        try await waitForHTTP()
     }
 
     public func start() throws -> Channel {
@@ -102,6 +99,14 @@ public final class ProxyServer {
             let v6Channel = try bootstrap.bind(host: "::1", port: config.listenPort).wait()
             return [v6Channel]
         }
+    }
+
+    private func waitForHTTP() async throws {
+        let futures = channels.map { $0.closeFuture }
+        if futures.isEmpty {
+            return
+        }
+        try await EventLoopFuture.andAllSucceed(futures, on: group.next()).get()
     }
 }
 

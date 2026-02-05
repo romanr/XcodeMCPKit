@@ -13,8 +13,17 @@ struct XcodeMCPProxyCLI {
                 args: CommandLine.arguments,
                 environment: ProcessInfo.processInfo.environment
             )
-            let server = ProxyServer(config: config)
-            try await server.run()
+            if let stdioUpstreamURL = config.stdioUpstreamURL {
+                let adapter = StdioAdapter(
+                    upstreamURL: stdioUpstreamURL,
+                    requestTimeout: config.requestTimeout
+                )
+                await adapter.start()
+                await adapter.wait()
+            } else {
+                let server = ProxyServer(config: config)
+                try await server.run()
+            }
         } catch let error as CLIError {
             logger.error("\(error.description)")
             if !error.description.contains("Usage:") {

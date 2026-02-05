@@ -18,6 +18,14 @@ let package = Package(
             name: "xcode-mcp-proxy",
             targets: ["XcodeMCPProxyCLI"]
         ),
+        .executable(
+            name: "xcode-mcp-proxy-server",
+            targets: ["XcodeMCPProxyServer"]
+        ),
+        .executable(
+            name: "xcode-mcp-proxy-install",
+            targets: ["XcodeMCPProxyInstall"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
@@ -45,6 +53,14 @@ let package = Package(
                 "XcodeMCPProxy",
                 .product(name: "Logging", package: "swift-log"),
             ]
+        ),
+        .executableTarget(
+            name: "XcodeMCPProxyServer",
+            dependencies: ["XcodeMCPProxy"]
+        ),
+        .executableTarget(
+            name: "XcodeMCPProxyInstall",
+            dependencies: []
         ),
         .testTarget(
             name: "XcodeMCPKitTests",

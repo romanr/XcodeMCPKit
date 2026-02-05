@@ -39,3 +39,37 @@ import Testing
     #expect(config.xcodePID == 1234)
     #expect(config.upstreamSessionID == "session-xyz")
 }
+
+@Test func cliParsesStdioUpstream() async throws {
+    let config = try CLIParser.parse(
+        args: [
+            "xcode-mcp-proxy",
+            "--stdio",
+            "http://localhost:8765/mcp",
+        ],
+        environment: [:]
+    )
+    #expect(config.transport == .stdio)
+    #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
+}
+
+@Test func cliDefaultsStdioUpstream() async throws {
+    let config = try CLIParser.parse(
+        args: [
+            "xcode-mcp-proxy",
+            "--stdio",
+        ],
+        environment: [:]
+    )
+    #expect(config.transport == .stdio)
+    #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
+}
+
+@Test func cliDefaultsToHTTP() async throws {
+    let config = try CLIParser.parse(
+        args: ["xcode-mcp-proxy"],
+        environment: [:]
+    )
+    #expect(config.transport == .http)
+    #expect(config.stdioUpstreamURL == nil)
+}

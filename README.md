@@ -135,6 +135,11 @@ The server writes the discovery file at startup with the actual port. `XCODE_MCP
 
 [Troubleshooting](Docs/troubleshooting.md)
 
+## References
+
+- [MCP / Xcode MCP Benchmark Notes](Docs/mcp-benchmark.md)
+- [MCP Connection Permission Dialog Investigation](Docs/mcp-permission-dialog-investigation.md)
+
 ## License
 
 [LICENSE](LICENSE)

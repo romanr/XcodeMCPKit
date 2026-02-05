@@ -11,7 +11,7 @@ The Xcode permission dialog appears once when the proxy starts.
    ```bash
    scripts/run_proxy.sh
    ```
-2. Point your client to `http://127.0.0.1:8765/mcp`
+2. Point your client to `http://localhost:8765/mcp`
 3. Click **Allow** in Xcode’s permission dialog
 
 ## Features
@@ -19,6 +19,10 @@ The Xcode permission dialog appears once when the proxy starts.
 - `mcpbridge` runs as a **single process**
 - Multi-client support via `Mcp-Session-Id`
 - JSON-RPC over HTTP + SSE (Streamable MCP)
+
+## Architecture
+
+See `Docs/architecture.md` for the process overview and diagram.
 
 ## Usage
 
@@ -30,7 +34,7 @@ scripts/run_proxy.sh
 
 Optional environment variables:
 
-- `HOST` (default: `127.0.0.1`)
+- `HOST` (default: `localhost`)
 - `PORT` (default: `8765`)
 - `LISTEN` (overrides host/port)
 - `XCODE_PID` (optional)
@@ -39,7 +43,7 @@ Optional environment variables:
 ### Manual Start
 
 ```bash
-swift run xcode-mcp-proxy --listen 127.0.0.1:8765
+swift run xcode-mcp-proxy --listen localhost:8765
 ```
 
 The proxy initializes the Xcode MCP session at startup so the permission dialog appears immediately. Use `--lazy-init` to defer initialization until the first client request.
@@ -52,7 +56,7 @@ swift run xcode-mcp-proxy --xcode-pid 12345
 
 ## Defaults
 
-- Listen address: `127.0.0.1:8765`
+- Listen address: `localhost:8765`
 - `mcpbridge` command: `xcrun`
 - `mcpbridge` args: `mcpbridge`
 - Request timeout: `300` seconds (`0` disables)
@@ -88,14 +92,14 @@ Logs are written to stderr.
 **Claude Code** (`~/.claude/settings.json`):
 
 ```json
-{ "mcpServers": { "xcode": { "url": "http://127.0.0.1:8765/mcp" } } }
+{ "mcpServers": { "xcode": { "url": "http://localhost:8765/mcp" } } }
 ```
 
 **Codex** (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.xcode]
-url = "http://127.0.0.1:8765/mcp"
+url = "http://localhost:8765/mcp"
 ```
 
 ## Endpoints
@@ -133,7 +137,7 @@ url = "http://127.0.0.1:8765/mcp"
   Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is a Codex client-side timeout and is separate from the proxy `--request-timeout`).
   ```toml
   [mcp_servers.xcode]
-  url = "http://127.0.0.1:8765/mcp"
+  url = "http://localhost:8765/mcp"
   tool_timeout_sec = 300
   ```
 

@@ -128,9 +128,7 @@ public actor StdioAdapter {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
-        if requestTimeout > 0 {
-            request.timeoutInterval = requestTimeout
-        }
+        applyTimeout(to: &request)
         request.httpBody = data
 
         let (responseData, response) = try await session.data(for: request)
@@ -174,6 +172,7 @@ public actor StdioAdapter {
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
+        applyTimeout(to: &request)
 
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -187,6 +186,14 @@ public actor StdioAdapter {
             if Task.isCancelled { break }
             guard let payload = parseSSELine(line) else { continue }
             await outputWriter.send(payload)
+        }
+    }
+
+    private func applyTimeout(to request: inout URLRequest) {
+        if requestTimeout > 0 {
+            request.timeoutInterval = requestTimeout
+        } else {
+            request.timeoutInterval = .infinity
         }
     }
 

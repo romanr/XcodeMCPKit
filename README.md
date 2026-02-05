@@ -129,6 +129,14 @@ url = "http://127.0.0.1:8765/mcp"
 - `MCP client ... timed out`  
   Ensure the proxy is running, then increase `startup_timeout_sec` if needed.
 
+- Codex `tools/call` times out after 60 seconds  
+  Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is a Codex client-side timeout and is separate from the proxy `--request-timeout`).
+  ```toml
+  [mcp_servers.xcode]
+  url = "http://127.0.0.1:8765/mcp"
+  tool_timeout_sec = 300
+  ```
+
 - Permission dialog does not appear  
   If `--lazy-init` is enabled, the dialog appears on the first request instead of startup.
 

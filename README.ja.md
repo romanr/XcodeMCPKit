@@ -129,6 +129,14 @@ url = "http://127.0.0.1:8765/mcp"
 - `MCP client ... timed out`  
   プロキシが起動しているか確認し、必要なら `startup_timeout_sec` を増やしてください。
 
+- Codex の `tools/call` が 60 秒でタイムアウトする  
+  `~/.codex/config.toml` の `tool_timeout_sec` を増やしてください（Codex クライアント側の待ち時間設定で、プロキシの `--request-timeout` とは別です）。
+  ```toml
+  [mcp_servers.xcode]
+  url = "http://127.0.0.1:8765/mcp"
+  tool_timeout_sec = 300
+  ```
+
 - Xcode のダイアログが出ない  
   `--lazy-init` を指定していないか確認してください（指定している場合は最初のリクエストまでダイアログが出ません）。
 

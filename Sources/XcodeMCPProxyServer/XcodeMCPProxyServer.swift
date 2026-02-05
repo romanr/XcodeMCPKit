@@ -144,7 +144,7 @@ private func applyDefaults(from environment: [String: String], to options: inout
             options.forwardedArgs += ["--listen", listen]
         } else {
             let host = environment["HOST"] ?? "localhost"
-            let port = environment["PORT"] ?? "8765"
+            let port = environment["PORT"] ?? "0"
             if nonEmpty(environment["HOST"]) != nil || nonEmpty(environment["PORT"]) != nil {
                 options.forwardedArgs += ["--listen", "\(host):\(port)"]
             }

@@ -48,10 +48,11 @@ See Quick Start for how to launch.
 
 - command: `xcrun`
 - args: `mcpbridge`
+- listen: `localhost:0` (auto-assign port)
 - request timeout: `300` seconds (`0` disables)
 - max body size: `1048576` bytes
 - initialization: eager at startup
-- mode: HTTP by default; STDIO when `--stdio` is set
+- mode: HTTP by default; STDIO adapter when `--stdio` is set
 
 #### Environment Variables
 
@@ -100,6 +101,35 @@ args = ["--stdio"]
 ```
 
 If `xcode-mcp-proxy` is not on your `PATH`, use the full path.
+
+#### HTTP/SSE Client Resolution
+
+The proxy writes a discovery file at startup:
+`~/Library/Caches/XcodeMCPProxy/endpoint.json`
+
+HTTP/SSE clients should read `url` from this file to locate the active proxy endpoint.
+
+```json
+{
+  "url": "http://localhost:51234/mcp",
+  "host": "localhost",
+  "port": 51234,
+  "pid": 12345,
+  "updatedAt": "2026-02-05T12:34:56Z"
+}
+```
+
+`host`/`port` are informational, `pid` can be used to check liveness, and `updatedAt` is the last write time (ISO 8601).
+
+#### STDIO Upstream Resolution
+
+When `--stdio` is used without a URL, the upstream is resolved in this order:
+
+1. `XCODE_MCP_PROXY_ENDPOINT` (http/https URL; STDIO adapter override)
+2. Discovery file: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
+3. Fallback: `http://localhost:8765/mcp`
+
+The server writes the discovery file at startup with the actual port. `XCODE_MCP_PROXY_ENDPOINT` only affects STDIO adapters.
 
 ## Troubleshooting
 

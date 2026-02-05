@@ -5,6 +5,13 @@ public enum ProxyTransport: String, CaseIterable, Sendable {
     case stdio
 }
 
+public enum StdioUpstreamSource: String, Sendable {
+    case explicit
+    case environment
+    case discovery
+    case fallback
+}
+
 public struct ProxyConfig: Sendable {
     public var listenHost: String
     public var listenPort: Int
@@ -17,6 +24,7 @@ public struct ProxyConfig: Sendable {
     public var eagerInitialize: Bool
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
+    public var stdioUpstreamSource: StdioUpstreamSource?
 
     public init(
         listenHost: String,
@@ -29,7 +37,8 @@ public struct ProxyConfig: Sendable {
         requestTimeout: TimeInterval,
         eagerInitialize: Bool = true,
         transport: ProxyTransport = .http,
-        stdioUpstreamURL: URL? = nil
+        stdioUpstreamURL: URL? = nil,
+        stdioUpstreamSource: StdioUpstreamSource? = nil
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -42,6 +51,7 @@ public struct ProxyConfig: Sendable {
         self.eagerInitialize = eagerInitialize
         self.transport = transport
         self.stdioUpstreamURL = stdioUpstreamURL
+        self.stdioUpstreamSource = stdioUpstreamSource
     }
 }
 
@@ -58,10 +68,19 @@ public enum CLIError: Error, CustomStringConvertible {
 
 public struct CLIParser {
     private static let defaultStdioUpstream = "http://localhost:8765/mcp"
+    private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
 
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
+        return try parse(args: args, environment: environment, discoveryOverrideURL: nil)
+    }
+
+    static func parse(
+        args: [String],
+        environment: [String: String],
+        discoveryOverrideURL: URL?
+    ) throws -> ProxyConfig {
         var listenHost = "localhost"
-        var listenPort = 8765
+        var listenPort = 0
         var upstreamCommand = "xcrun"
         var upstreamArgs = ["mcpbridge"]
         var xcodePID: Int?
@@ -70,6 +89,7 @@ public struct CLIParser {
         var requestTimeout: TimeInterval = 300
         var eagerInitialize = true
         var stdioUpstreamURL: URL?
+        var stdioUpstreamSource: StdioUpstreamSource?
 
         var index = 1
         while index < args.count {
@@ -154,14 +174,17 @@ public struct CLIParser {
                     let candidate = args[index + 1]
                     if !candidate.hasPrefix("-") {
                         stdioUpstreamURL = try parseHTTPURL(candidate, label: "--stdio")
+                        stdioUpstreamSource = .explicit
                         index += 2
                         break
                     }
                 }
-                guard let defaultURL = URL(string: Self.defaultStdioUpstream) else {
-                    throw CLIError.message("Default stdio upstream URL is invalid")
-                }
-                stdioUpstreamURL = defaultURL
+                let resolved = try resolveDefaultStdioUpstream(
+                    environment: environment,
+                    discoveryOverrideURL: discoveryOverrideURL
+                )
+                stdioUpstreamURL = resolved.url
+                stdioUpstreamSource = resolved.source
                 index += 1
             case "-h", "--help":
                 throw CLIError.message(usage())
@@ -189,7 +212,8 @@ public struct CLIParser {
             requestTimeout: requestTimeout,
             eagerInitialize: eagerInitialize,
             transport: transport,
-            stdioUpstreamURL: stdioUpstreamURL
+            stdioUpstreamURL: stdioUpstreamURL,
+            stdioUpstreamSource: stdioUpstreamSource
         )
     }
 
@@ -198,9 +222,9 @@ public struct CLIParser {
         Usage: xcode-mcp-proxy [options]
 
         Options:
-          --listen host:port         Listen address (default: localhost:8765)
+          --listen host:port         Listen address (default: localhost:0)
           --host host                Listen host (default: localhost)
-          --port port                Listen port (default: 8765)
+          --port port                Listen port (default: 0)
           --upstream-command cmd     Upstream command (default: xcrun)
           --upstream-args a,b,c      Upstream args (default: mcpbridge)
           --upstream-arg value       Append a single upstream arg
@@ -209,7 +233,7 @@ public struct CLIParser {
           --max-body-bytes n         Max request body size (default: 1048576)
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
           --lazy-init                Initialize upstream only on first client request
-          --stdio [url]              Run in STDIO mode (default: http://localhost:8765/mcp)
+          --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)
           -h, --help                 Show help
         """
     }
@@ -220,7 +244,7 @@ public struct CLIParser {
         }
         let hostPart = String(value[..<colonIndex])
         let portPart = String(value[value.index(after: colonIndex)...])
-        guard let port = Int(portPart), port > 0 else {
+        guard let port = Int(portPart), port >= 0 else {
             throw CLIError.message("--listen expects host:port (got \(value))")
         }
         let host = hostPart.isEmpty ? "localhost" : hostPart
@@ -234,5 +258,30 @@ public struct CLIParser {
             throw CLIError.message("\(label) must be an http/https URL")
         }
         return url
+    }
+
+    private static func resolveDefaultStdioUpstream(
+        environment: [String: String],
+        discoveryOverrideURL: URL? = nil
+    ) throws -> (url: URL, source: StdioUpstreamSource) {
+        if let raw = nonEmpty(environment[Self.stdioEndpointEnv]) {
+            return (try parseHTTPURL(raw, label: Self.stdioEndpointEnv), .environment)
+        }
+        if let record = Discovery.read(overrideURL: discoveryOverrideURL),
+           let resolved = try? parseHTTPURL(record.url, label: "discovery") {
+            return (resolved, .discovery)
+        }
+        guard let defaultURL = URL(string: Self.defaultStdioUpstream) else {
+            throw CLIError.message("Default stdio upstream URL is invalid")
+        }
+        return (defaultURL, .fallback)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }

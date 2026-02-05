@@ -21,6 +21,7 @@ public final class ProxyServer {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
+        writeDiscovery(resolvedHost: host, port: port)
         logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
         try await waitForHTTP()
     }
@@ -107,6 +108,36 @@ public final class ProxyServer {
             return
         }
         try await EventLoopFuture.andAllSucceed(futures, on: group.next()).get()
+    }
+
+    private func writeDiscovery(resolvedHost: String, port: Int) {
+        guard let record = Discovery.makeRecord(
+            host: discoveryHost(resolvedHost),
+            port: port,
+            pid: Int(ProcessInfo.processInfo.processIdentifier)
+        ) else {
+            return
+        }
+        do {
+            try Discovery.write(record: record)
+        } catch {
+            logger.warning(
+                "Failed to write discovery file",
+                metadata: [
+                    "error": "\(error)",
+                    "path": "\(Discovery.defaultFileURL.path)",
+                ]
+            )
+        }
+    }
+
+    private func discoveryHost(_ resolvedHost: String) -> String {
+        switch config.listenHost {
+        case "localhost", "0.0.0.0", "::":
+            return "localhost"
+        default:
+            return resolvedHost
+        }
     }
 }
 

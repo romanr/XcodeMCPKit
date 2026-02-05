@@ -1,5 +1,12 @@
+import Foundation
 import Testing
 @testable import XcodeMCPProxy
+
+private func makeTempDiscoveryURL() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        .appendingPathComponent("endpoint.json")
+}
 
 @Test func cliParsesListenAddress() async throws {
     let config = try CLIParser.parse(
@@ -17,6 +24,15 @@ import Testing
     )
     #expect(config.listenHost == "localhost")
     #expect(config.listenPort == 8080)
+}
+
+@Test func cliAllowsListenPortZero() async throws {
+    let config = try CLIParser.parse(
+        args: ["xcode-mcp-proxy", "--listen", "localhost:0"],
+        environment: [:]
+    )
+    #expect(config.listenHost == "localhost")
+    #expect(config.listenPort == 0)
 }
 
 @Test func cliParsesTimeoutAndLazyInit() async throws {
@@ -51,18 +67,62 @@ import Testing
     )
     #expect(config.transport == .stdio)
     #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
+    #expect(config.stdioUpstreamSource == .explicit)
 }
 
-@Test func cliDefaultsStdioUpstream() async throws {
+@Test func cliDefaultsStdioUpstreamFallback() async throws {
+    let tempURL = makeTempDiscoveryURL()
     let config = try CLIParser.parse(
         args: [
             "xcode-mcp-proxy",
             "--stdio",
         ],
-        environment: [:]
+        environment: [:],
+        discoveryOverrideURL: tempURL
     )
     #expect(config.transport == .stdio)
     #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
+    #expect(config.stdioUpstreamSource == .fallback)
+}
+
+@Test func cliDefaultsStdioUpstreamFromDiscovery() async throws {
+    let tempURL = makeTempDiscoveryURL()
+    let record = DiscoveryRecord(
+        url: "http://localhost:5555/mcp",
+        host: "localhost",
+        port: 5555,
+        pid: Int(ProcessInfo.processInfo.processIdentifier),
+        updatedAt: Date()
+    )
+    try Discovery.write(record: record, overrideURL: tempURL)
+    let config = try CLIParser.parse(
+        args: [
+            "xcode-mcp-proxy",
+            "--stdio",
+        ],
+        environment: [:],
+        discoveryOverrideURL: tempURL
+    )
+    #expect(config.transport == .stdio)
+    #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:5555/mcp")
+    #expect(config.stdioUpstreamSource == .discovery)
+}
+
+@Test func cliDefaultsStdioUpstreamFromEnvironment() async throws {
+    let tempURL = makeTempDiscoveryURL()
+    let config = try CLIParser.parse(
+        args: [
+            "xcode-mcp-proxy",
+            "--stdio",
+        ],
+        environment: [
+            "XCODE_MCP_PROXY_ENDPOINT": "http://localhost:9000/mcp",
+        ],
+        discoveryOverrideURL: tempURL
+    )
+    #expect(config.transport == .stdio)
+    #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:9000/mcp")
+    #expect(config.stdioUpstreamSource == .environment)
 }
 
 @Test func cliDefaultsToHTTP() async throws {
@@ -72,4 +132,5 @@ import Testing
     )
     #expect(config.transport == .http)
     #expect(config.stdioUpstreamURL == nil)
+    #expect(config.listenPort == 0)
 }

@@ -172,7 +172,7 @@ public actor StdioAdapter {
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
-        applyTimeout(to: &request)
+        applyTimeout(to: &request, allowLongRunning: true)
 
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -189,7 +189,11 @@ public actor StdioAdapter {
         }
     }
 
-    private func applyTimeout(to request: inout URLRequest) {
+    private func applyTimeout(to request: inout URLRequest, allowLongRunning: Bool = false) {
+        if allowLongRunning {
+            request.timeoutInterval = .infinity
+            return
+        }
         if requestTimeout > 0 {
             request.timeoutInterval = requestTimeout
         } else {

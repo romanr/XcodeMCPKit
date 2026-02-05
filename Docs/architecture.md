@@ -1,12 +1,12 @@
 # XcodeMCPProxy Architecture
 
 ## Summary
-- `xcode-mcp-proxy` is a single HTTP server process that exposes MCP over JSON-RPC + SSE.
+- `xcode-mcp-proxy` is a single process that exposes MCP over HTTP/SSE and/or STDIO.
 - The proxy spawns `xcrun mcpbridge` as an upstream process and relays MCP messages over stdio.
 - `mcpbridge` connects to the Xcode MCP server and provides tool access.
 
 ## Processes
-- **Client**: Codex / Claude Code / other MCP clients. Connects to `http://localhost:8765/mcp`.
+- **Client**: Codex / Claude Code / other MCP clients. Connects to `http://localhost:8765/mcp` or via STDIO.
 - **Proxy**: `xcode-mcp-proxy` (SwiftNIO HTTP server). Manages sessions and SSE fan-out.
 - **Upstream**: `xcrun mcpbridge` (stdio JSON-RPC).
 - **Xcode**: Xcode MCP server and tool implementations.
@@ -30,11 +30,12 @@
 ```mermaid
 flowchart LR
   client["Client (Codex/Claude/etc.)"]
-  proxy["xcode-mcp-proxy<br/>HTTP JSON-RPC + SSE"]
+  proxy["xcode-mcp-proxy<br/>HTTP JSON-RPC + SSE + STDIO"]
   upstream["xcrun mcpbridge<br/>stdio JSON-RPC"]
   xcode["Xcode MCP server"]
 
   client -->|POST/GET /mcp<br/>Mcp-Session-Id| proxy
+  client -->|NDJSON over STDIO| proxy
   proxy -->|stdio JSON-RPC| upstream
   upstream <--> |MCP bridge| xcode
   proxy -->|SSE events| client

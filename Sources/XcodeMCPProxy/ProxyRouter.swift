@@ -17,18 +17,18 @@ final class ProxyRouter: Sendable {
     private let state = NIOLockedValueBox(State())
     private let notificationBufferLimit: Int
     private let requestTimeout: TimeAmount?
-    private let hasActiveSSE: @Sendable () -> Bool
+    private let hasActiveClients: @Sendable () -> Bool
     private let sendNotification: @Sendable (Data) -> Void
 
     init(
         requestTimeout: TimeAmount?,
         notificationBufferLimit: Int = 50,
-        hasActiveSSE: @escaping @Sendable () -> Bool,
+        hasActiveClients: @escaping @Sendable () -> Bool,
         sendNotification: @escaping @Sendable (Data) -> Void
     ) {
         self.requestTimeout = requestTimeout
         self.notificationBufferLimit = notificationBufferLimit
-        self.hasActiveSSE = hasActiveSSE
+        self.hasActiveClients = hasActiveClients
         self.sendNotification = sendNotification
     }
 
@@ -129,7 +129,7 @@ final class ProxyRouter: Sendable {
     }
 
     private func notify(_ data: Data) {
-        if hasActiveSSE() {
+        if hasActiveClients() {
             sendNotification(data)
         } else {
             bufferNotification(data)

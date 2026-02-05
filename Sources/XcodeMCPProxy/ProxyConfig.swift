@@ -1,5 +1,21 @@
 import Foundation
 
+public enum ProxyTransport: String, CaseIterable, Sendable {
+    case http
+    case stdio
+    case both
+}
+
+public extension ProxyTransport {
+    var includesHTTP: Bool {
+        self == .http || self == .both
+    }
+
+    var includesStdio: Bool {
+        self == .stdio || self == .both
+    }
+}
+
 public struct ProxyConfig: Sendable {
     public var listenHost: String
     public var listenPort: Int
@@ -10,6 +26,7 @@ public struct ProxyConfig: Sendable {
     public var maxBodyBytes: Int
     public var requestTimeout: TimeInterval
     public var eagerInitialize: Bool
+    public var transport: ProxyTransport
 
     public init(
         listenHost: String,
@@ -20,7 +37,8 @@ public struct ProxyConfig: Sendable {
         upstreamSessionID: String? = nil,
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
-        eagerInitialize: Bool = true
+        eagerInitialize: Bool = true,
+        transport: ProxyTransport = .both
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -31,6 +49,7 @@ public struct ProxyConfig: Sendable {
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.eagerInitialize = eagerInitialize
+        self.transport = transport
     }
 }
 
@@ -56,6 +75,7 @@ public struct CLIParser {
         var maxBodyBytes = 1_048_576
         var requestTimeout: TimeInterval = 300
         var eagerInitialize = true
+        var transport: ProxyTransport = .both
 
         var index = 1
         while index < args.count {
@@ -135,6 +155,16 @@ public struct CLIParser {
             case "--lazy-init":
                 eagerInitialize = false
                 index += 1
+            case "--transport":
+                guard index + 1 < args.count else {
+                    throw CLIError.message("--transport requires a value (http|stdio|both)")
+                }
+                let value = args[index + 1].lowercased()
+                guard let parsed = ProxyTransport(rawValue: value) else {
+                    throw CLIError.message("--transport must be one of: http, stdio, both")
+                }
+                transport = parsed
+                index += 2
             case "-h", "--help":
                 throw CLIError.message(usage())
             default:
@@ -158,7 +188,8 @@ public struct CLIParser {
             upstreamSessionID: upstreamSessionID,
             maxBodyBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
-            eagerInitialize: eagerInitialize
+            eagerInitialize: eagerInitialize,
+            transport: transport
         )
     }
 
@@ -178,6 +209,7 @@ public struct CLIParser {
           --max-body-bytes n         Max request body size (default: 1048576)
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
           --lazy-init                Initialize upstream only on first client request
+          --transport mode           Transport mode: http|stdio|both (default: both)
           -h, --help                 Show help
         """
     }

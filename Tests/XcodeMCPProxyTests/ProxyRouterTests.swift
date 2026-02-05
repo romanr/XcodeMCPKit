@@ -10,7 +10,7 @@ import Testing
 
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
-        hasActiveSSE: { false },
+            hasActiveClients: { false },
         sendNotification: { _ in }
     )
 
@@ -26,7 +26,7 @@ import Testing
 @Test func proxyRouterBuffersNotifications() async throws {
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
-        hasActiveSSE: { false },
+            hasActiveClients: { false },
         sendNotification: { _ in }
     )
 
@@ -42,7 +42,7 @@ import Testing
     let received = NIOLockedValueBox<[String]>([])
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
-        hasActiveSSE: { true },
+            hasActiveClients: { true },
         sendNotification: { data in
             received.withLockedValue { values in
                 values.append(String(decoding: data, as: UTF8.self))
@@ -69,7 +69,7 @@ private func shutdown(_ group: EventLoopGroup) async {
     let eventLoop = group.next()
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
-        hasActiveSSE: { false },
+            hasActiveClients: { false },
         sendNotification: { _ in }
     )
 
@@ -88,7 +88,7 @@ private func shutdown(_ group: EventLoopGroup) async {
     let eventLoop = group.next()
     let router = ProxyRouter(
         requestTimeout: .seconds(1),
-        hasActiveSSE: { false },
+            hasActiveClients: { false },
         sendNotification: { _ in }
     )
 
@@ -109,7 +109,7 @@ private func shutdown(_ group: EventLoopGroup) async {
     let eventLoop = group.next()
     let router = ProxyRouter(
         requestTimeout: nil,
-        hasActiveSSE: { false },
+            hasActiveClients: { false },
         sendNotification: { _ in }
     )
 
@@ -133,7 +133,7 @@ private func shutdown(_ group: EventLoopGroup) async {
     let router = ProxyRouter(
         requestTimeout: .seconds(5),
         notificationBufferLimit: 2,
-        hasActiveSSE: { false },
+            hasActiveClients: { false },
         sendNotification: { _ in }
     )
 

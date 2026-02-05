@@ -19,6 +19,7 @@ The Xcode permission dialog appears once when the proxy starts.
 - `mcpbridge` runs as a **single process**
 - Multi-client support via `Mcp-Session-Id`
 - JSON-RPC over HTTP + SSE (Streamable MCP)
+- NDJSON over STDIO (Codex-compatible)
 
 ## Architecture
 
@@ -54,6 +55,12 @@ To target a specific Xcode process:
 swift run xcode-mcp-proxy --xcode-pid 12345
 ```
 
+To run STDIO only:
+
+```bash
+swift run xcode-mcp-proxy --transport stdio
+```
+
 ## Defaults
 
 - Listen address: `localhost:8765`
@@ -62,6 +69,7 @@ swift run xcode-mcp-proxy --xcode-pid 12345
 - Request timeout: `300` seconds (`0` disables)
 - Max body size: `1048576` bytes
 - Initialization: eager at startup
+- Transport: `both`
 
 Environment variables:
 
@@ -86,6 +94,7 @@ Logs are written to stderr.
 | `--max-body-bytes n` | Max request body size |
 | `--request-timeout seconds` | Request timeout (`0` disables) |
 | `--lazy-init` | Delay initialization until first request |
+| `--transport mode` | Transport mode: `http`, `stdio`, `both` |
 
 ## Client Config
 
@@ -102,6 +111,12 @@ Logs are written to stderr.
 url = "http://localhost:8765/mcp"
 ```
 
+**Codex (STDIO)**:
+
+```bash
+codex mcp add xcode -- xcode-mcp-proxy --transport stdio
+```
+
 ## Endpoints
 
 - `POST /mcp` (JSON-RPC; responds with JSON or SSE and returns `Mcp-Session-Id`)
@@ -109,12 +124,14 @@ url = "http://localhost:8765/mcp"
 - `GET /events`, `GET /mcp/events` (SSE aliases)
 - `DELETE /mcp` (close session)
 - `GET /health`
+- STDIO: NDJSON (`--transport stdio`)
 
 ## Sessions & Multiple Clients
 
 - Use a **unique `Mcp-Session-Id` per client**.
 - If `initialize` is sent without `Mcp-Session-Id`, the proxy generates one and returns it in the response header.
 - For SSE, include `Mcp-Session-Id` on `GET /mcp`.
+- STDIO uses a single session (one client per process).
 
 ## Troubleshooting
 

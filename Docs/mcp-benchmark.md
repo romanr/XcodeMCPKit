@@ -214,6 +214,43 @@ Observations:
 Observations:
 - `sessions=5` produced timeouts in this run; avoid high session counts for `DocumentationSearch` unless you have measured it.
 
+## Upstream Processes (Real `mcpbridge` Multiplexing)
+`xcode-mcp-proxy-server --upstream-processes N` starts **N** upstream `mcpbridge` processes and routes requests across them (round-robin).
+
+### Environment
+- Date: `2026-02-06T18:12:36+09:00`
+- macOS: `26.2 (25C56)`
+- Xcode: `26.3 (17C519)`
+- CPU: `Apple M1 Pro` (`hw.ncpu=10`)
+- RAM: `32 GiB` (`hw.memsize=34359738368`)
+- Server: `xcode-mcp-proxy-server --upstream-processes 4` (listening on `http://localhost:58176/mcp`)
+- `tabIdentifier`: `windowtab4` (`/Users/kn/Dev/XcodeMCPKit`)
+
+### XcodeListNavigatorIssues (`concurrency=20`, `requests=100`, `timeout=30s`, `warmup=10`)
+| run | ok | err | throughput (req/s) | p50 (ms) | p90 (ms) | p99 (ms) | avg (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 100 | 0 | 327.1 | 58.2 | 65.3 | 68.9 | 55.0 |
+| 2 | 100 | 0 | 302.2 | 62.4 | 74.8 | 81.7 | 60.7 |
+| 3 | 100 | 0 | 186.2 | 60.3 | 288.0 | 311.9 | 103.2 |
+
+### XcodeGrep (`concurrency=20`, `requests=100`, `timeout=30s`, `warmup=10`)
+| run | ok | err | throughput (req/s) | p50 (ms) | p90 (ms) | p99 (ms) | avg (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 100 | 0 | 246.6 | 75.2 | 99.8 | 116.6 | 76.0 |
+| 2 | 100 | 0 | 304.8 | 56.0 | 97.6 | 103.1 | 61.0 |
+| 3 | 100 | 0 | 337.0 | 55.9 | 64.5 | 72.7 | 53.8 |
+
+### DocumentationSearch (`concurrency=3`, `requests=30`, `timeout=60s`, `warmup=10`)
+| run | ok | err | throughput (req/s) | p50 (ms) | p90 (ms) | p99 (ms) | avg (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 30 | 0 | 15.6 | 174.8 | 237.1 | 287.8 | 185.3 |
+| 2 | 30 | 0 | 14.2 | 160.4 | 194.3 | 649.7 | 206.1 |
+| 3 | 30 | 0 | 14.1 | 176.3 | 315.1 | 420.9 | 206.7 |
+
+Observations:
+- `XcodeListNavigatorIssues` / `XcodeGrep` improved notably in throughput vs the `--sessions` approximation runs above, but variance still exists (run 3 spiked in tail latency).
+- `DocumentationSearch` remained heavy; multiplexing did not produce a clear, consistent win at `concurrency=3` in this snapshot.
+
 ## Practical Guidance (Tentative)
 - `XcodeListNavigatorIssues`: start with `concurrency=10..20`; raise only if you can tolerate higher tail latency.
 - `XcodeGrep`: start with `concurrency=10..20`; `50..100` tends to trade p99 for small throughput changes (tool/query dependent).

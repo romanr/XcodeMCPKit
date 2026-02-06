@@ -23,6 +23,22 @@ See [Architecture](Docs/architecture.md) for the process overview.
 swift run -c release xcode-mcp-proxy-install
 ```
 
+Replace `xcrun mcpbridge` with `xcode-mcp-proxy`:
+
+**Codex**
+
+```bash
+codex mcp remove xcode
+codex mcp add xcode -- xcode-mcp-proxy --stdio
+```
+
+**Claude Code**
+
+```bash
+claude mcp remove xcode
+claude mcp add --transport stdio xcode -- xcode-mcp-proxy --stdio
+```
+
 By default, `xcode-mcp-proxy` and `xcode-mcp-proxy-server` are installed to `~/.local/bin`. Add it to your `PATH` if needed.
 
 ```bash
@@ -79,61 +95,6 @@ Note: when using `--upstream-processes` > 1, fixing the session id via `--sessio
 | `--request-timeout seconds` | Request timeout (`0` disables) |
 | `--lazy-init` | Delay initialization until first request |
 | `--stdio` | Run in STDIO mode |
-
-### Client
-
-#### Config
-
-**Claude Code** (`~/.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "xcode": {
-      "command": "xcode-mcp-proxy"
-    }
-  }
-}
-```
-
-**Codex** (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.xcode]
-command = "xcode-mcp-proxy"
-args = ["--stdio"]
-```
-
-If `xcode-mcp-proxy` is not on your `PATH`, use the full path.
-
-#### HTTP/SSE Client Resolution
-
-The proxy writes a discovery file at startup:
-`~/Library/Caches/XcodeMCPProxy/endpoint.json`
-
-HTTP/SSE clients should read `url` from this file to locate the active proxy endpoint.
-
-```json
-{
-  "url": "http://localhost:51234/mcp",
-  "host": "localhost",
-  "port": 51234,
-  "pid": 12345,
-  "updatedAt": "2026-02-05T12:34:56Z"
-}
-```
-
-`host`/`port` are informational, `pid` can be used to check liveness, and `updatedAt` is the last write time (ISO 8601).
-
-#### STDIO Upstream Resolution
-
-When `--stdio` is used without a URL, the upstream is resolved in this order:
-
-1. `XCODE_MCP_PROXY_ENDPOINT` (http/https URL; STDIO adapter override)
-2. Discovery file: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
-3. Fallback: `http://localhost:8765/mcp`
-
-The server writes the discovery file at startup with the actual port. `XCODE_MCP_PROXY_ENDPOINT` only affects STDIO adapters.
 
 ## Troubleshooting
 

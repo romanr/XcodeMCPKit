@@ -48,6 +48,7 @@ source ~/.zshrc
 
 - command: `xcrun`
 - args: `mcpbridge`
+- upstream processes: `1`（増やすと `mcpbridge` を複数プロセス起動）
 - listen: `localhost:0`（自動割り当て）
 - request timeout: `300` seconds（`0` で無制限）
 - max body size: `1048576` bytes
@@ -61,6 +62,8 @@ source ~/.zshrc
 
 ログは stderr に出力されます。
 
+Note: `--upstream-processes` > 1 を使う場合、`--session-id` / `MCP_XCODE_SESSION_ID` でセッション ID を固定すると、Xcode の許可ダイアログを減らせる場合があります。
+
 #### オプション
 
 | オプション | 説明 |
@@ -68,6 +71,7 @@ source ~/.zshrc
 | `--upstream-command cmd` | `mcpbridge` コマンド |
 | `--upstream-args a,b,c` | `mcpbridge` 引数（カンマ区切り） |
 | `--upstream-arg value` | `mcpbridge` 引数を1つ追加 |
+| `--upstream-processes n` | upstream `mcpbridge` を `n` プロセス起動（default: 1, max: 10） |
 | `--xcode-pid pid` | 対象 Xcode の PID |
 | `--session-id id` | Xcode MCP セッション ID（通常は不要） |
 | `--max-body-bytes n` | 最大ボディサイズ |

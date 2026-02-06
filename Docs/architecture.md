@@ -3,7 +3,7 @@
 ## Summary
 - `xcode-mcp-proxy` runs as a single HTTP/SSE proxy.
 - MCP clients connect over HTTP to `/mcp` (no STDIO adapter).
-- The proxy spawns `xcrun mcpbridge`, which bridges to the Xcode MCP server.
+- The proxy spawns one or more `xcrun mcpbridge` processes, which bridge to the Xcode MCP server.
 
 ## Diagrams
 
@@ -17,14 +17,23 @@ flowchart LR
     clientN(["Client N"])
   end
   proxy["xcode-mcp-proxy<br/>HTTP/SSE"]
-  upstream(["xcrun mcpbridge<br/>stdio JSON-RPC"])
+  subgraph Upstreams["Upstream (mcpbridge pool)"]
+    direction TB
+    upstream1(["xcrun mcpbridge #1<br/>stdio JSON-RPC"])
+    upstream2(["xcrun mcpbridge #2<br/>stdio JSON-RPC"])
+    upstreamN(["xcrun mcpbridge #N<br/>stdio JSON-RPC"])
+  end
   xcode["Xcode MCP server"]
 
   clientA -->|HTTP POST / SSE| proxy
   clientB -->|HTTP POST / SSE| proxy
   clientN -->|HTTP POST / SSE| proxy
-  proxy -->|stdio JSON-RPC| upstream
-  upstream <--> |MCP bridge| xcode
+  proxy -->|stdio JSON-RPC| upstream1
+  proxy -->|stdio JSON-RPC| upstream2
+  proxy -->|stdio JSON-RPC| upstreamN
+  upstream1 <--> |MCP bridge| xcode
+  upstream2 <--> |MCP bridge| xcode
+  upstreamN <--> |MCP bridge| xcode
 ```
 
 ### STDIO Adapter (Optional)
@@ -43,19 +52,28 @@ flowchart LR
   end
 
   proxy["xcode-mcp-proxy<br/>HTTP/SSE"]
-  upstream(["xcrun mcpbridge<br/>stdio JSON-RPC"])
+  subgraph Upstreams["Upstream (mcpbridge pool)"]
+    direction TB
+    upstream1(["xcrun mcpbridge #1<br/>stdio JSON-RPC"])
+    upstream2(["xcrun mcpbridge #2<br/>stdio JSON-RPC"])
+    upstreamN(["xcrun mcpbridge #N<br/>stdio JSON-RPC"])
+  end
   xcode["Xcode MCP server"]
 
   adapterA -->|HTTP POST / SSE| proxy
   adapterB -->|HTTP POST / SSE| proxy
-  proxy -->|stdio JSON-RPC| upstream
-  upstream <--> |MCP bridge| xcode
+  proxy -->|stdio JSON-RPC| upstream1
+  proxy -->|stdio JSON-RPC| upstream2
+  proxy -->|stdio JSON-RPC| upstreamN
+  upstream1 <--> |MCP bridge| xcode
+  upstream2 <--> |MCP bridge| xcode
+  upstreamN <--> |MCP bridge| xcode
 ```
 
 ## Processes (HTTP/SSE)
 - **Client**: MCP client (Codex / Claude Code / etc.).
 - **Proxy**: `xcode-mcp-proxy` (central proxy).
-- **Upstream**: `xcrun mcpbridge` (stdio JSON-RPC).
+- **Upstream**: `xcrun mcpbridge` (stdio JSON-RPC; one or more processes).
 - **Xcode**: Xcode MCP server and tool implementations.
 
 ## Optional: STDIO Adapter Mode
@@ -65,21 +83,21 @@ flowchart LR
 - **A/B** in the diagram just means **multiple clients/adapters** (one per STDIO stream).
 
 ## Data Flow (HTTP/SSE)
-1. Start the central HTTP proxy, which launches `mcpbridge`.
+1. Start the central HTTP proxy, which launches one or more `mcpbridge` processes.
 2. The client connects to `/mcp` over HTTP.
-3. The proxy forwards requests to `mcpbridge` over stdio JSON-RPC.
+3. The proxy forwards requests to the `mcpbridge` pool over stdio JSON-RPC.
 4. Responses and notifications return over HTTP/SSE.
 
 ## Data Flow (STDIO Adapter)
-1. Start the central HTTP proxy, which launches `mcpbridge`.
+1. Start the central HTTP proxy, which launches one or more `mcpbridge` processes.
 2. Each client starts a STDIO adapter.
 3. The adapter forwards NDJSON to the proxy via HTTP POST.
 4. Notifications flow back over SSE and are emitted on STDIO (one stream per client).
 
 ## Initialization Behavior
-- The central proxy starts `mcpbridge` at launch.
+- The central proxy starts one or more `mcpbridge` processes at launch.
 - With `--lazy-init`, it delays `initialize` until the first request.
-- If `mcpbridge` exits, it restarts with exponential backoff.
+- If a `mcpbridge` process exits, it restarts with exponential backoff.
 
 ## Ports and Addressing
 - Only the central proxy uses `--listen` / `--host` / `--port`.

@@ -44,6 +44,40 @@ private func makeTempDiscoveryURL() -> URL {
     #expect(config.eagerInitialize == false)
 }
 
+@Test func cliParsesUpstreamProcesses() async throws {
+    let config = try CLIParser.parse(
+        args: ["xcode-mcp-proxy", "--upstream-processes", "10"],
+        environment: [:]
+    )
+    #expect(config.upstreamProcessCount == 10)
+}
+
+@Test func cliRejectsInvalidUpstreamProcesses() async throws {
+    do {
+        _ = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--upstream-processes", "0"],
+            environment: [:]
+        )
+        #expect(Bool(false))
+    } catch {}
+
+    do {
+        _ = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--upstream-processes", "11"],
+            environment: [:]
+        )
+        #expect(Bool(false))
+    } catch {}
+
+    do {
+        _ = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--upstream-processes", "abc"],
+            environment: [:]
+        )
+        #expect(Bool(false))
+    } catch {}
+}
+
 @Test func cliUsesEnvironmentOverrides() async throws {
     let config = try CLIParser.parse(
         args: ["xcode-mcp-proxy"],

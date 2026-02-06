@@ -33,8 +33,9 @@ protocol SessionManaging: Sendable {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
-    func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64
-    func sendUpstream(_ data: Data)
+    func chooseUpstreamIndex(sessionId: String) -> Int
+    func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64
+    func sendUpstream(_ data: Data, upstreamIndex: Int)
 }
 
 final class SessionManager: Sendable, SessionManaging {
@@ -53,46 +54,80 @@ final class SessionManager: Sendable, SessionManaging {
         var initPending: [InitPending] = []
         var initInFlight = false
         var initTimeout: Scheduled<Void>?
-        var didSendInitialized = false
         var isShuttingDown = false
+        var didWarmSecondary = false
+        var primaryInitUpstreamId: Int64?
+        // If we drop the cached global init result while the primary is already performing a warm init,
+        // retry the eager/global init once that warm init finishes unsuccessfully (error/timeout).
+        var shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
     }
 
     private let sessionsState = NIOLockedValueBox(SessionState())
     private let initState = NIOLockedValueBox(InitState())
-    private let upstreamTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    private let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
     private let eventLoop: EventLoop
-    private let idMapper = UpstreamIdMapper()
+    private let idMapper: UpstreamIdMapper
     private let config: ProxyConfig
-    let upstream: any UpstreamClient
+    let upstreams: [any UpstreamClient]
 
-    convenience init(config: ProxyConfig, eventLoop: EventLoop) {
-        let upstream = Self.makeDefaultUpstream(config: config)
-        self.init(config: config, eventLoop: eventLoop, upstream: upstream)
+    private struct UpstreamState: Sendable {
+        var isInitialized = false
+        var initInFlight = false
+        var initTimeout: Scheduled<Void>?
+        var didSendInitialized = false
+        var initUpstreamId: Int64?
     }
 
-    init(config: ProxyConfig, eventLoop: EventLoop, upstream: any UpstreamClient) {
+    private struct UpstreamPoolState: Sendable {
+        var upstreamStates: [UpstreamState] = []
+        var nextPick: Int = 0
+    }
+
+    private let upstreamState = NIOLockedValueBox(UpstreamPoolState())
+
+    convenience init(config: ProxyConfig, eventLoop: EventLoop) {
+        let count = max(1, min(config.upstreamProcessCount, 10))
+        let sharedSessionID = config.upstreamSessionID ?? UUID().uuidString
+        let upstreams = Self.makeDefaultUpstreams(config: config, sharedSessionID: sharedSessionID, count: count)
+        self.init(config: config, eventLoop: eventLoop, upstreams: upstreams)
+    }
+
+    init(config: ProxyConfig, eventLoop: EventLoop, upstreams: [any UpstreamClient]) {
+        precondition(!upstreams.isEmpty, "upstreams must not be empty")
         self.config = config
         self.eventLoop = eventLoop
-        self.upstream = upstream
-        let task = Task { [weak self] in
-            guard let self else { return }
-            for await event in upstream.events {
-                switch event {
-                case .message(let data):
-                    self.routeUpstreamMessage(data)
-                case .exit(let status):
-                    self.handleUpstreamExit(status)
+        self.upstreams = upstreams
+        self.idMapper = UpstreamIdMapper(upstreamCount: upstreams.count)
+        upstreamState.withLockedValue { state in
+            state.upstreamStates = Array(repeating: UpstreamState(), count: upstreams.count)
+            state.nextPick = 0
+        }
+
+        var tasks: [Task<Void, Never>] = []
+        tasks.reserveCapacity(upstreams.count)
+        for (upstreamIndex, upstream) in upstreams.enumerated() {
+            let task = Task { [weak self] in
+                guard let self else { return }
+                for await event in upstream.events {
+                    switch event {
+                    case .message(let data):
+                        self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+                    case .exit(let status):
+                        self.handleUpstreamExit(status, upstreamIndex: upstreamIndex)
+                    }
                 }
+            }
+            tasks.append(task)
+            Task {
+                await upstream.start()
             }
         }
         upstreamTaskBox.withLockedValue { taskBox in
-            taskBox = task
+            taskBox = tasks
         }
-        Task {
-            await upstream.start()
-        }
+
         if config.eagerInitialize {
-            startEagerInitialize()
+            startEagerInitializePrimary()
         }
     }
 
@@ -121,7 +156,7 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     func shutdown() {
-        let timeout = initState.withLockedValue { state -> Scheduled<Void>? in
+        let globalTimeout = initState.withLockedValue { state -> Scheduled<Void>? in
             state.isShuttingDown = true
             state.initInFlight = false
             let existing = state.initTimeout
@@ -129,20 +164,58 @@ final class SessionManager: Sendable, SessionManaging {
             state.initPending.removeAll()
             return existing
         }
-        timeout?.cancel()
-        let task = upstreamTaskBox.withLockedValue { taskBox -> Task<Void, Never>? in
+        globalTimeout?.cancel()
+
+        let upstreamTimeouts = upstreamState.withLockedValue { state -> [Scheduled<Void>?] in
+            var timeouts: [Scheduled<Void>?] = []
+            timeouts.reserveCapacity(state.upstreamStates.count)
+            for index in 0..<state.upstreamStates.count {
+                timeouts.append(state.upstreamStates[index].initTimeout)
+                state.upstreamStates[index].initTimeout = nil
+                state.upstreamStates[index].initInFlight = false
+                state.upstreamStates[index].initUpstreamId = nil
+            }
+            return timeouts
+        }
+        for timeout in upstreamTimeouts {
+            timeout?.cancel()
+        }
+
+        let tasks = upstreamTaskBox.withLockedValue { taskBox -> [Task<Void, Never>] in
             let current = taskBox
-            taskBox = nil
+            taskBox = []
             return current
         }
-        task?.cancel()
-        Task {
-            await upstream.stop()
+        for task in tasks {
+            task.cancel()
+        }
+        for upstream in upstreams {
+            Task {
+                await upstream.stop()
+            }
         }
     }
 
     func isInitialized() -> Bool {
         initState.withLockedValue { $0.initResult != nil }
+    }
+
+    func chooseUpstreamIndex(sessionId _: String) -> Int {
+        upstreamState.withLockedValue { state in
+            let count = state.upstreamStates.count
+            guard count > 0 else { return 0 }
+
+            let rawStart = state.nextPick % count
+            let start = rawStart >= 0 ? rawStart : rawStart + count
+            state.nextPick &+= 1
+            for offset in 0..<count {
+                let candidate = (start + offset) % count
+                if state.upstreamStates[candidate].isInitialized {
+                    return candidate
+                }
+            }
+            return 0
+        }
     }
 
     func registerInitialize(
@@ -199,10 +272,14 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         if shouldSend, var initRequest {
-            let upstreamId = idMapper.assignInitialize()
+            let upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
+            initState.withLockedValue { state in
+                state.primaryInitUpstreamId = upstreamId
+            }
+            markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
             initRequest["id"] = upstreamId
             if let data = try? JSONSerialization.data(withJSONObject: initRequest, options: []) {
-                sendUpstream(data)
+                sendUpstream(data, upstreamIndex: 0)
             } else {
                 failInitPending(error: TimeoutError())
             }
@@ -214,7 +291,7 @@ final class SessionManager: Sendable, SessionManaging {
         return promise.futureResult
     }
 
-    private func routeUpstreamMessage(_ data: Data) {
+    private func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             broadcastToAllSessions(data)
             return
@@ -222,9 +299,9 @@ final class SessionManager: Sendable, SessionManaging {
 
         if var object = json as? [String: Any],
            let upstreamId = upstreamId(from: object["id"]),
-           let mapping = idMapper.consume(upstreamId) {
+           let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId) {
             if mapping.isInitialize {
-                handleInitializeResponse(object)
+                handleInitializeResponse(object, upstreamIndex: upstreamIndex)
                 return
             }
             if let sessionId = mapping.sessionId, let originalId = mapping.originalId {
@@ -244,12 +321,12 @@ final class SessionManager: Sendable, SessionManaging {
             for item in array {
                 guard var object = item as? [String: Any],
                       let upstreamId = upstreamId(from: object["id"]),
-                      let mapping = idMapper.consume(upstreamId) else {
+                      let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId) else {
                     transformed.append(item)
                     continue
                 }
                 if mapping.isInitialize {
-                    handleInitializeResponse(object)
+                    handleInitializeResponse(object, upstreamIndex: upstreamIndex)
                     continue
                 }
                 guard let originalId = mapping.originalId else {
@@ -271,45 +348,105 @@ final class SessionManager: Sendable, SessionManaging {
         broadcastToAllSessions(data)
     }
 
-    private func handleUpstreamExit(_ status: Int32) {
-        let result = initState.withLockedValue { state -> (pending: [InitPending], shouldEagerInitialize: Bool, timeout: Scheduled<Void>?)? in
+    private func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
+        let globalInit = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, hadGlobalInit: Bool, wasInFlight: Bool, primaryInitUpstreamId: Int64?)? in
             if state.isShuttingDown {
                 return nil
             }
-            state.initResult = nil
-            state.initInFlight = false
-            state.didSendInitialized = false
-            let timeout = state.initTimeout
-            state.initTimeout = nil
+            let wasInFlight = state.initInFlight
+            let hadGlobalInit = state.initResult != nil
             let pending = state.initPending
-            state.initPending.removeAll()
-            return (pending, config.eagerInitialize, timeout)
+            let timeout = state.initTimeout
+            let primaryId = state.primaryInitUpstreamId
+
+            if upstreamIndex == 0 && wasInFlight {
+                state.initInFlight = false
+                state.initTimeout = nil
+                state.initPending.removeAll()
+                state.primaryInitUpstreamId = nil
+            }
+
+            return (pending, timeout, hadGlobalInit, wasInFlight, primaryId)
         }
-        guard let result else { return }
-        result.timeout?.cancel()
-        let pending = result.pending
-        let shouldEagerInitialize = result.shouldEagerInitialize
+        guard let globalInit else { return }
 
-        idMapper.reset()
-
-        for item in pending {
-            item.eventLoop.execute {
-                item.promise.fail(TimeoutError())
+        if upstreamIndex == 0 && globalInit.wasInFlight {
+            globalInit.timeout?.cancel()
+            if let upstreamId = globalInit.primaryInitUpstreamId {
+                idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
+            }
+            for item in globalInit.pending {
+                item.eventLoop.execute {
+                    item.promise.fail(TimeoutError())
+                }
             }
         }
 
-        if shouldEagerInitialize {
-            startEagerInitialize()
+        clearUpstreamState(upstreamIndex: upstreamIndex)
+        idMapper.reset(upstreamIndex: upstreamIndex)
+
+        // If an upstream dies after a successful global initialize and there are no remaining
+        // initialized upstreams, drop the cached init result. Otherwise, new downstream initialize
+        // requests would get an immediate cached response and then fail/hang because there's no
+        // initialized upstream to serve subsequent requests.
+        let shouldResetGlobalInit: Bool
+        if globalInit.hadGlobalInit {
+            let anyInitialized = upstreamState.withLockedValue { state in
+                state.upstreamStates.contains { $0.isInitialized }
+            }
+            shouldResetGlobalInit = !anyInitialized
+        } else {
+            shouldResetGlobalInit = false
+        }
+        if shouldResetGlobalInit {
+            initState.withLockedValue { state in
+                state.initResult = nil
+                state.didWarmSecondary = false
+            }
+        }
+
+        if config.eagerInitialize {
+            if upstreamIndex == 0 {
+                if shouldResetGlobalInit || !globalInit.hadGlobalInit {
+                    startEagerInitializePrimary()
+                } else {
+                    startUpstreamWarmInitialize(upstreamIndex: 0)
+                }
+            } else if globalInit.hadGlobalInit {
+                if shouldResetGlobalInit {
+                    // When the last initialized upstream exits, we drop the cached init result.
+                    // Ensure the primary/global initialize path is re-run so the proxy becomes usable
+                    // again without requiring a downstream initialize retry.
+                    let primaryInitInFlight = upstreamState.withLockedValue { state in
+                        guard !state.upstreamStates.isEmpty else { return false }
+                        return state.upstreamStates[0].initInFlight
+                    }
+                    if primaryInitInFlight {
+                        initState.withLockedValue { state in
+                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = true
+                        }
+                    } else {
+                        initState.withLockedValue { state in
+                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+                        }
+                        startEagerInitializePrimary()
+                    }
+                }
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            }
         }
     }
 
-    func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64 {
-        idMapper.assign(sessionId: sessionId, originalId: originalId, isInitialize: false)
+    func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64 {
+        idMapper.assign(upstreamIndex: upstreamIndex, sessionId: sessionId, originalId: originalId, isInitialize: false)
     }
 
-    func sendUpstream(_ data: Data) {
+    func sendUpstream(_ data: Data, upstreamIndex: Int) {
+        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+            return
+        }
         Task {
-            await upstream.send(data)
+            await upstreams[upstreamIndex].send(data)
         }
     }
 
@@ -332,9 +469,10 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
-    private func startEagerInitialize() {
+    private func startEagerInitializePrimary() {
         var shouldSend = false
         var shouldScheduleTimeout = false
+        var upstreamId: Int64?
         initState.withLockedValue { state in
             if state.initResult == nil && !state.initInFlight {
                 state.initInFlight = true
@@ -347,34 +485,40 @@ final class SessionManager: Sendable, SessionManaging {
         }
         guard shouldSend else { return }
 
-        let upstreamId = idMapper.assignInitialize()
-        let request: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": upstreamId,
-            "method": "initialize",
-            "params": [
-                "protocolVersion": "2025-03-26",
-                "capabilities": [:],
-                "clientInfo": [
-                    "name": "xcode-mcp-proxy",
-                    "version": "0.0",
-                ],
-            ],
-        ]
+        upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
+        if let upstreamId {
+            initState.withLockedValue { state in
+                state.primaryInitUpstreamId = upstreamId
+            }
+            markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
+        }
+
+        let request = makeInternalInitializeRequest(id: upstreamId ?? 1)
         if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
-            sendUpstream(data)
+            sendUpstream(data, upstreamIndex: 0)
         } else {
             failInitPending(error: TimeoutError())
         }
     }
 
-    private func handleInitializeResponse(_ object: [String: Any]) {
+    private func handleInitializeResponse(_ object: [String: Any], upstreamIndex: Int) {
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {
-            failInitPending(error: TimeoutError())
+            if upstreamIndex == 0 {
+                failInitPending(error: TimeoutError())
+            } else {
+                clearUpstreamState(upstreamIndex: upstreamIndex)
+            }
             return
         }
 
-        let update = initState.withLockedValue { state -> (pending: [InitPending], shouldSendInitialized: Bool, timeout: Scheduled<Void>?)? in
+        markUpstreamInitialized(upstreamIndex: upstreamIndex)
+        sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex)
+
+        if upstreamIndex != 0 {
+            return
+        }
+
+        let update = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, shouldWarmSecondary: Bool)? in
             if state.isShuttingDown {
                 return nil
             }
@@ -382,22 +526,20 @@ final class SessionManager: Sendable, SessionManaging {
                 state.initResult = result
             }
             state.initInFlight = false
+            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             let timeout = state.initTimeout
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
-            let shouldSendInitialized = !state.didSendInitialized
-            if shouldSendInitialized {
-                state.didSendInitialized = true
+            state.primaryInitUpstreamId = nil
+            let shouldWarmSecondary = !state.didWarmSecondary
+            if shouldWarmSecondary {
+                state.didWarmSecondary = true
             }
-            return (pending, shouldSendInitialized, timeout)
+            return (pending, timeout, shouldWarmSecondary)
         }
         guard let update else { return }
         update.timeout?.cancel()
-
-        if update.shouldSendInitialized {
-            sendInitializedNotification()
-        }
 
         for item in update.pending {
             if let buffer = encodeInitializeResponse(originalId: item.originalId, result: result) {
@@ -409,6 +551,10 @@ final class SessionManager: Sendable, SessionManaging {
                     item.promise.fail(TimeoutError())
                 }
             }
+        }
+
+        if update.shouldWarmSecondary {
+            warmUpSecondaryUpstreams()
         }
     }
 
@@ -427,13 +573,23 @@ final class SessionManager: Sendable, SessionManaging {
         return buffer
     }
 
-    private func sendInitializedNotification() {
+    private func sendInitializedNotificationIfNeeded(upstreamIndex: Int) {
+        let shouldSend = upstreamState.withLockedValue { state -> Bool in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
+            if state.upstreamStates[upstreamIndex].didSendInitialized {
+                return false
+            }
+            state.upstreamStates[upstreamIndex].didSendInitialized = true
+            return true
+        }
+        guard shouldSend else { return }
+
         let notification: [String: Any] = [
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: notification, options: []) {
-            sendUpstream(data)
+            sendUpstream(data, upstreamIndex: upstreamIndex)
         }
     }
 
@@ -454,24 +610,179 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func failInitPending(error: Error) {
-        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?)? in
+        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?, shouldRetryEagerInit: Bool)? in
             if state.isShuttingDown {
                 return nil
+            }
+            let shouldRetryEagerInit = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            if shouldRetryEagerInit {
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
             state.initInFlight = false
             let timeout = state.initTimeout
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
-            return (pending, timeout)
+            let upstreamId = state.primaryInitUpstreamId
+            state.primaryInitUpstreamId = nil
+            return (pending, timeout, upstreamId, shouldRetryEagerInit)
         }
         guard let result else { return }
         result.timeout?.cancel()
+        if let upstreamId = result.upstreamId {
+            idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
+        }
+        clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
             item.eventLoop.execute {
                 item.promise.fail(error)
             }
         }
+
+        if result.shouldRetryEagerInit, config.eagerInitialize {
+            startEagerInitializePrimary()
+        }
+    }
+
+    private func markUpstreamInitInFlight(upstreamIndex: Int, upstreamId: Int64) {
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            state.upstreamStates[upstreamIndex].initInFlight = true
+            state.upstreamStates[upstreamIndex].initUpstreamId = upstreamId
+            state.upstreamStates[upstreamIndex].isInitialized = false
+        }
+    }
+
+    private func clearUpstreamInitInFlight(upstreamIndex: Int) {
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            state.upstreamStates[upstreamIndex].initInFlight = false
+            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+        }
+    }
+
+    private func clearUpstreamState(upstreamIndex: Int) {
+        let timeout = upstreamState.withLockedValue { state -> Scheduled<Void>? in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            let timeout = state.upstreamStates[upstreamIndex].initTimeout
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+            state.upstreamStates[upstreamIndex].isInitialized = false
+            state.upstreamStates[upstreamIndex].initInFlight = false
+            state.upstreamStates[upstreamIndex].didSendInitialized = false
+            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            return timeout
+        }
+        timeout?.cancel()
+    }
+
+    private func markUpstreamInitialized(upstreamIndex: Int) {
+        let timeout = upstreamState.withLockedValue { state -> Scheduled<Void>? in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            state.upstreamStates[upstreamIndex].isInitialized = true
+            state.upstreamStates[upstreamIndex].initInFlight = false
+            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            let timeout = state.upstreamStates[upstreamIndex].initTimeout
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+            return timeout
+        }
+        timeout?.cancel()
+    }
+
+    private func warmUpSecondaryUpstreams() {
+        guard upstreams.count > 1 else { return }
+        for upstreamIndex in 1..<upstreams.count {
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    private func startUpstreamWarmInitialize(upstreamIndex: Int) {
+        var shouldSend = false
+        var upstreamId: Int64?
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            if state.upstreamStates[upstreamIndex].isInitialized || state.upstreamStates[upstreamIndex].initInFlight {
+                return
+            }
+            state.upstreamStates[upstreamIndex].initInFlight = true
+            shouldSend = true
+        }
+        guard shouldSend else { return }
+
+        upstreamId = idMapper.assignInitialize(upstreamIndex: upstreamIndex)
+        if let upstreamId {
+            upstreamState.withLockedValue { state in
+                guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+                state.upstreamStates[upstreamIndex].initUpstreamId = upstreamId
+            }
+            scheduleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+        }
+
+        let request = makeInternalInitializeRequest(id: upstreamId ?? 1)
+        if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
+            sendUpstream(data, upstreamIndex: upstreamIndex)
+        } else {
+            clearUpstreamState(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    private func scheduleUpstreamInitTimeout(upstreamIndex: Int, upstreamId: Int64) {
+        guard let timeoutAmount = makeRequestTimeout(config.requestTimeout) else {
+            return
+        }
+        let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
+            guard let self else { return }
+            self.handleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+        }
+        let previous = upstreamState.withLockedValue { state -> Scheduled<Void>? in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            let existing = state.upstreamStates[upstreamIndex].initTimeout
+            state.upstreamStates[upstreamIndex].initTimeout = timeout
+            return existing
+        }
+        previous?.cancel()
+    }
+
+    private func handleUpstreamInitTimeout(upstreamIndex: Int, upstreamId: Int64) {
+        let shouldClear = upstreamState.withLockedValue { state -> Bool in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
+            guard state.upstreamStates[upstreamIndex].initUpstreamId == upstreamId else { return false }
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+            state.upstreamStates[upstreamIndex].initInFlight = false
+            state.upstreamStates[upstreamIndex].isInitialized = false
+            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            return true
+        }
+        guard shouldClear else { return }
+        idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+
+        guard upstreamIndex == 0, config.eagerInitialize else { return }
+        let shouldRetryEagerInit = initState.withLockedValue { state -> Bool in
+            let shouldRetry = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            if shouldRetry {
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+            }
+            return shouldRetry
+        }
+        if shouldRetryEagerInit {
+            startEagerInitializePrimary()
+        }
+    }
+
+    private func makeInternalInitializeRequest(id: Int64) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2025-03-26",
+                "capabilities": [:],
+                "clientInfo": [
+                    "name": "xcode-mcp-proxy",
+                    "version": "0.0",
+                ],
+            ],
+        ]
     }
 }
 
@@ -482,16 +793,16 @@ private func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
 }
 
 private extension SessionManager {
-    static func makeDefaultUpstream(config: ProxyConfig) -> UpstreamProcess {
+    static func makeDefaultUpstreams(
+        config: ProxyConfig,
+        sharedSessionID: String,
+        count: Int
+    ) -> [UpstreamProcess] {
         var environment = ProcessInfo.processInfo.environment
         if let pid = config.xcodePID {
             environment["MCP_XCODE_PID"] = String(pid)
         }
-        if let override = config.upstreamSessionID {
-            environment["MCP_XCODE_SESSION_ID"] = override
-        } else {
-            environment["MCP_XCODE_SESSION_ID"] = UUID().uuidString
-        }
+        environment["MCP_XCODE_SESSION_ID"] = sharedSessionID
         let upstreamConfig = UpstreamProcess.Config(
             command: config.upstreamCommand,
             args: config.upstreamArgs,
@@ -499,23 +810,38 @@ private extension SessionManager {
             restartInitialDelay: 1,
             restartMaxDelay: 30
         )
-        return UpstreamProcess(config: upstreamConfig)
+        if count <= 1 {
+            return [UpstreamProcess(config: upstreamConfig)]
+        }
+        var upstreams: [UpstreamProcess] = []
+        upstreams.reserveCapacity(count)
+        for _ in 0..<count {
+            upstreams.append(UpstreamProcess(config: upstreamConfig))
+        }
+        return upstreams
     }
 }
 
 private final class UpstreamIdMapper: Sendable {
     private struct State: Sendable {
         var nextId: Int64 = 1
-        var mapping: [Int64: UpstreamMapping] = [:]
+        var mappingsByUpstream: [[Int64: UpstreamMapping]] = []
     }
 
     private let state = NIOLockedValueBox(State())
 
-    func assign(sessionId: String, originalId: RPCId, isInitialize: Bool) -> Int64 {
+    init(upstreamCount: Int) {
         state.withLockedValue { state in
+            state.mappingsByUpstream = Array(repeating: [:], count: upstreamCount)
+        }
+    }
+
+    func assign(upstreamIndex: Int, sessionId: String, originalId: RPCId, isInitialize: Bool) -> Int64 {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return 0 }
             let id = state.nextId
             state.nextId += 1
-            state.mapping[id] = UpstreamMapping(
+            state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
                 sessionId: sessionId,
                 originalId: originalId,
                 isInitialize: isInitialize
@@ -524,11 +850,12 @@ private final class UpstreamIdMapper: Sendable {
         }
     }
 
-    func assignInitialize() -> Int64 {
+    func assignInitialize(upstreamIndex: Int) -> Int64 {
         state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return 0 }
             let id = state.nextId
             state.nextId += 1
-            state.mapping[id] = UpstreamMapping(
+            state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
                 sessionId: nil,
                 originalId: nil,
                 isInitialize: true
@@ -537,15 +864,24 @@ private final class UpstreamIdMapper: Sendable {
         }
     }
 
-    func consume(_ upstreamId: Int64) -> UpstreamMapping? {
+    func consume(upstreamIndex: Int, upstreamId: Int64) -> UpstreamMapping? {
         state.withLockedValue { state in
-            state.mapping.removeValue(forKey: upstreamId)
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return nil }
+            return state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
         }
     }
 
-    func reset() {
+    func remove(upstreamIndex: Int, upstreamId: Int64) {
         state.withLockedValue { state in
-            state.mapping.removeAll()
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
+            state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
+        }
+    }
+
+    func reset(upstreamIndex: Int) {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
+            state.mappingsByUpstream[upstreamIndex].removeAll()
         }
     }
 }

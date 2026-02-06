@@ -295,7 +295,9 @@ private final class TestSessionManager: SessionManaging {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
-    func assignUpstreamId(sessionId: String, originalId: RPCId) -> Int64 {
+    func chooseUpstreamIndex(sessionId _: String) -> Int { 0 }
+
+    func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex _: Int) -> Int64 {
         state.withLockedValue { state in
             let id = state.nextUpstreamId
             state.nextUpstreamId += 1
@@ -303,7 +305,7 @@ private final class TestSessionManager: SessionManaging {
         }
     }
 
-    func sendUpstream(_ data: Data) {}
+    func sendUpstream(_ data: Data, upstreamIndex _: Int) {}
 }
 
 private func makeConfig(maxBodyBytes: Int = 1024, requestTimeout: TimeInterval = 1) -> ProxyConfig {

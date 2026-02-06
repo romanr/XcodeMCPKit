@@ -109,13 +109,11 @@ private func install(options: InstallOptions) throws {
     }
 
     try fileManager.createDirectory(at: binDir, withIntermediateDirectories: true)
-    let missing = binaries.filter { name in
-        !fileManager.fileExists(atPath: baseURL.appendingPathComponent(name).path)
-    }
-    if !missing.isEmpty {
-        let repoRoot = repositoryRoot(from: selfURL)
-            ?? URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-        try buildProducts(missing, in: repoRoot)
+    // Always build the installed products when possible, so users get the latest binary after pulling updates.
+    // Only do this when we can confidently locate the repo root from the installer path (typically `.build/...`).
+    if let repoRoot = repositoryRoot(from: selfURL),
+       fileManager.fileExists(atPath: repoRoot.appendingPathComponent("Package.swift").path) {
+        try buildProducts(binaries, in: repoRoot)
     }
 
     for name in binaries {
@@ -145,21 +143,19 @@ private func repositoryRoot(from executableURL: URL) -> URL? {
 }
 
 private func buildProducts(_ products: [String], in directory: URL) throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    var arguments = ["swift", "build", "-c", "release"]
     for product in products {
-        arguments += ["--product", product]
-    }
-    process.arguments = arguments
-    process.currentDirectoryURL = directory
-    process.standardOutput = FileHandle.standardOutput
-    process.standardError = FileHandle.standardError
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["swift", "build", "-c", "release", "--product", product]
+        process.currentDirectoryURL = directory
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
 
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-        throw InstallError.message("swift build failed; run from the repo root and try again")
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw InstallError.message("swift build failed; run from the repo root and try again")
+        }
     }
 }
 

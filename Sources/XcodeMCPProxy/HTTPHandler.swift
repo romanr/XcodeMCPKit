@@ -313,13 +313,31 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let sessionId = headerSessionId ?? UUID().uuidString
 
+        if sessionManager.isInitialized() == false {
+            sendPlain(
+                on: context.channel,
+                status: .unprocessableEntity,
+                body: "expected initialize request",
+                keepAlive: head.isKeepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+            return
+        }
+
+        let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId)
+
         let transform: RequestTransform
         do {
             transform = try RequestInspector.transform(
                 bodyData,
                 sessionId: sessionId,
                 mapId: { sessionId, originalId in
-                    sessionManager.assignUpstreamId(sessionId: sessionId, originalId: originalId)
+                    sessionManager.assignUpstreamId(
+                        sessionId: sessionId,
+                        originalId: originalId,
+                        upstreamIndex: upstreamIndex
+                    )
                 }
             )
         } catch {
@@ -354,7 +372,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 return
             }
 
-            sessionManager.sendUpstream(transform.upstreamData)
+            sessionManager.sendUpstream(transform.upstreamData, upstreamIndex: upstreamIndex)
             let keepAlive = head.isKeepAlive
             let sessionIdCopy = sessionId
             let prefersEventStream = wantsEventStream
@@ -382,7 +400,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             if transform.method == "notifications/initialized" && sessionManager.isInitialized() {
                 sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             } else {
-                sessionManager.sendUpstream(transform.upstreamData)
+                sessionManager.sendUpstream(transform.upstreamData, upstreamIndex: upstreamIndex)
                 sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             }
         }

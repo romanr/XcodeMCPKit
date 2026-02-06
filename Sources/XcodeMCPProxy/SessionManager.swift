@@ -57,6 +57,9 @@ final class SessionManager: Sendable, SessionManaging {
         var isShuttingDown = false
         var didWarmSecondary = false
         var primaryInitUpstreamId: Int64?
+        // If we drop the cached global init result while the primary is already performing a warm init,
+        // retry the eager/global init once that warm init finishes unsuccessfully (error/timeout).
+        var shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
     }
 
     private let sessionsState = NIOLockedValueBox(SessionState())
@@ -418,7 +421,14 @@ final class SessionManager: Sendable, SessionManaging {
                         guard !state.upstreamStates.isEmpty else { return false }
                         return state.upstreamStates[0].initInFlight
                     }
-                    if !primaryInitInFlight {
+                    if primaryInitInFlight {
+                        initState.withLockedValue { state in
+                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = true
+                        }
+                    } else {
+                        initState.withLockedValue { state in
+                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+                        }
                         startEagerInitializePrimary()
                     }
                 }
@@ -516,6 +526,7 @@ final class SessionManager: Sendable, SessionManaging {
                 state.initResult = result
             }
             state.initInFlight = false
+            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             let timeout = state.initTimeout
             state.initTimeout = nil
             let pending = state.initPending
@@ -599,9 +610,13 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func failInitPending(error: Error) {
-        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?)? in
+        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?, shouldRetryEagerInit: Bool)? in
             if state.isShuttingDown {
                 return nil
+            }
+            let shouldRetryEagerInit = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            if shouldRetryEagerInit {
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
             state.initInFlight = false
             let timeout = state.initTimeout
@@ -610,7 +625,7 @@ final class SessionManager: Sendable, SessionManaging {
             state.initPending.removeAll()
             let upstreamId = state.primaryInitUpstreamId
             state.primaryInitUpstreamId = nil
-            return (pending, timeout, upstreamId)
+            return (pending, timeout, upstreamId, shouldRetryEagerInit)
         }
         guard let result else { return }
         result.timeout?.cancel()
@@ -622,6 +637,10 @@ final class SessionManager: Sendable, SessionManaging {
             item.eventLoop.execute {
                 item.promise.fail(error)
             }
+        }
+
+        if result.shouldRetryEagerInit, config.eagerInitialize {
+            startEagerInitializePrimary()
         }
     }
 
@@ -736,6 +755,18 @@ final class SessionManager: Sendable, SessionManaging {
         }
         guard shouldClear else { return }
         idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+
+        guard upstreamIndex == 0, config.eagerInitialize else { return }
+        let shouldRetryEagerInit = initState.withLockedValue { state -> Bool in
+            let shouldRetry = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            if shouldRetry {
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+            }
+            return shouldRetry
+        }
+        if shouldRetryEagerInit {
+            startEagerInitializePrimary()
+        }
     }
 
     private func makeInternalInitializeRequest(id: Int64) -> [String: Any] {

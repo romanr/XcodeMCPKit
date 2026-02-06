@@ -48,6 +48,7 @@ See Quick Start for how to launch.
 
 - command: `xcrun`
 - args: `mcpbridge`
+- upstream processes: `1` (spawns multiple `mcpbridge` processes when increased)
 - listen: `localhost:0` (auto-assign port)
 - request timeout: `300` seconds (`0` disables)
 - max body size: `1048576` bytes
@@ -62,6 +63,8 @@ See Quick Start for how to launch.
 
 Logs are written to stderr.
 
+Note: when using `--upstream-processes` > 1, fixing the session id via `--session-id` / `MCP_XCODE_SESSION_ID` can help reduce permission dialog prompts in Xcode.
+
 #### Options
 
 | Option | Description |
@@ -69,6 +72,7 @@ Logs are written to stderr.
 | `--upstream-command cmd` | `mcpbridge` command |
 | `--upstream-args a,b,c` | `mcpbridge` args (comma-separated) |
 | `--upstream-arg value` | Append a single `mcpbridge` arg |
+| `--upstream-processes n` | Spawn `n` upstream `mcpbridge` processes (default: 1, max: 10) |
 | `--xcode-pid pid` | Xcode PID |
 | `--session-id id` | Xcode MCP session ID (usually not needed) |
 | `--max-body-bytes n` | Max request body size |

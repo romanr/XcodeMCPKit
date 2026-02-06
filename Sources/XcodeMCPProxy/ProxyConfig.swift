@@ -17,6 +17,7 @@ public struct ProxyConfig: Sendable {
     public var listenPort: Int
     public var upstreamCommand: String
     public var upstreamArgs: [String]
+    public var upstreamProcessCount: Int
     public var xcodePID: Int?
     public var upstreamSessionID: String?
     public var maxBodyBytes: Int
@@ -31,6 +32,7 @@ public struct ProxyConfig: Sendable {
         listenPort: Int,
         upstreamCommand: String,
         upstreamArgs: [String],
+        upstreamProcessCount: Int = 1,
         xcodePID: Int? = nil,
         upstreamSessionID: String? = nil,
         maxBodyBytes: Int,
@@ -44,6 +46,7 @@ public struct ProxyConfig: Sendable {
         self.listenPort = listenPort
         self.upstreamCommand = upstreamCommand
         self.upstreamArgs = upstreamArgs
+        self.upstreamProcessCount = upstreamProcessCount
         self.xcodePID = xcodePID
         self.upstreamSessionID = upstreamSessionID
         self.maxBodyBytes = maxBodyBytes
@@ -83,6 +86,7 @@ public struct CLIParser {
         var listenPort = 0
         var upstreamCommand = "xcrun"
         var upstreamArgs = ["mcpbridge"]
+        var upstreamProcessCount = 1
         var xcodePID: Int?
         var upstreamSessionID: String?
         var maxBodyBytes = 1_048_576
@@ -141,6 +145,15 @@ public struct CLIParser {
                     throw CLIError.message("--upstream-arg requires a value")
                 }
                 upstreamArgs.append(args[index + 1])
+                index += 2
+            case "--upstream-processes":
+                guard index + 1 < args.count else {
+                    throw CLIError.message("--upstream-processes requires a value")
+                }
+                guard let parsed = Int(args[index + 1]), (1...10).contains(parsed) else {
+                    throw CLIError.message("--upstream-processes must be an integer in 1..10")
+                }
+                upstreamProcessCount = parsed
                 index += 2
             case "--xcode-pid":
                 guard index + 1 < args.count else {
@@ -206,6 +219,7 @@ public struct CLIParser {
             listenPort: listenPort,
             upstreamCommand: upstreamCommand,
             upstreamArgs: upstreamArgs,
+            upstreamProcessCount: upstreamProcessCount,
             xcodePID: xcodePID,
             upstreamSessionID: upstreamSessionID,
             maxBodyBytes: maxBodyBytes,
@@ -228,6 +242,7 @@ public struct CLIParser {
           --upstream-command cmd     Upstream command (default: xcrun)
           --upstream-args a,b,c      Upstream args (default: mcpbridge)
           --upstream-arg value       Append a single upstream arg
+          --upstream-processes n     Upstream process count (default: 1, max: 10)
           --xcode-pid pid            Xcode PID (env MCP_XCODE_PID)
           --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
           --max-body-bytes n         Max request body size (default: 1048576)

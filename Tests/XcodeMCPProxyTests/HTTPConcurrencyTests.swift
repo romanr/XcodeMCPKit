@@ -128,7 +128,7 @@ private struct TestHTTPServer {
             eagerInitialize: false
         )
         let upstream = EchoUpstreamClient()
-        let sessionManager = SessionManager(config: config, eventLoop: group.next(), upstream: upstream)
+        let sessionManager = SessionManager(config: config, eventLoop: group.next(), upstreams: [upstream])
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)

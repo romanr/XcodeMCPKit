@@ -79,6 +79,7 @@ private func parseOptions(args: [String], environment: [String: String]) throws 
         "--upstream-command",
         "--upstream-args",
         "--upstream-arg",
+        "--upstream-processes",
         "--xcode-pid",
         "--session-id",
         "--max-body-bytes",
@@ -220,6 +221,7 @@ private func printUsage() {
       --listen host:port
       --host host
       --port port
+      --upstream-processes n
       --xcode-pid pid
       --lazy-init
       --dry-run

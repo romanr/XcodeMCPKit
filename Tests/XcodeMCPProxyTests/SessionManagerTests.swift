@@ -169,6 +169,57 @@ import Testing
     _ = try await init2.get()
 }
 
+@Test func sessionManagerSecondaryExitClearsCachedInitializeResultWhenPrimaryAlreadyDown() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // First init establishes the cached init result (primary only).
+    let init1 = manager.registerInitialize(
+        originalId: RPCId(any: NSNumber(value: 1))!,
+        requestObject: makeInitializeRequest(id: 1),
+        on: eventLoop
+    )
+    await Task.yield()
+    #expect((await upstream0.sent()).count == 1)
+    let upstreamId0 = try extractUpstreamId(from: (await upstream0.sent())[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: upstreamId0)))
+    _ = try await init1.get()
+
+    // Warm init -> upstream1
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 1)
+    let init1Messages = await upstream1.sent()
+    let upstreamId1 = try extractUpstreamId(from: init1Messages[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: upstreamId1)))
+
+    // Wait for per-upstream notifications/initialized.
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 1)
+
+    // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
+    await upstream0.yield(.exit(1))
+    await Task.yield()
+
+    // Now simulate the last initialized upstream dying too.
+    await upstream1.yield(.exit(1))
+    await Task.yield()
+
+    // A new downstream initialize must trigger a new upstream initialize (no cached response).
+    let init2 = manager.registerInitialize(
+        originalId: RPCId(any: NSNumber(value: 2))!,
+        requestObject: makeInitializeRequest(id: 2),
+        on: eventLoop
+    )
+    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 1)
+    let upstreamId2 = try extractUpstreamId(from: (await upstream0.sent())[2])
+    await upstream0.yield(.message(try makeInitializeResponse(id: upstreamId2)))
+    _ = try await init2.get()
+}
+
 @Test func sessionManagerRoutesRequestsRoundRobinAcrossUpstreams() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }

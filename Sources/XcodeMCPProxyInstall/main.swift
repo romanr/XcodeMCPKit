@@ -109,10 +109,10 @@ private func install(options: InstallOptions) throws {
     }
 
     try fileManager.createDirectory(at: binDir, withIntermediateDirectories: true)
-    let repoRoot = repositoryRoot(from: selfURL)
-        ?? URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
     // Always build the installed products when possible, so users get the latest binary after pulling updates.
-    if fileManager.fileExists(atPath: repoRoot.appendingPathComponent("Package.swift").path) {
+    // Only do this when we can confidently locate the repo root from the installer path (typically `.build/...`).
+    if let repoRoot = repositoryRoot(from: selfURL),
+       fileManager.fileExists(atPath: repoRoot.appendingPathComponent("Package.swift").path) {
         try buildProducts(binaries, in: repoRoot)
     }
 

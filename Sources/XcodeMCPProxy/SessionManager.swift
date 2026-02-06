@@ -382,12 +382,12 @@ final class SessionManager: Sendable, SessionManaging {
         clearUpstreamState(upstreamIndex: upstreamIndex)
         idMapper.reset(upstreamIndex: upstreamIndex)
 
-        // If the primary upstream dies after a successful global initialize and there are no
-        // remaining initialized upstreams, drop the cached init result. Otherwise, new downstream
-        // initialize requests would get an immediate cached response and then fail/hang because
-        // there's no initialized upstream to serve subsequent requests.
+        // If an upstream dies after a successful global initialize and there are no remaining
+        // initialized upstreams, drop the cached init result. Otherwise, new downstream initialize
+        // requests would get an immediate cached response and then fail/hang because there's no
+        // initialized upstream to serve subsequent requests.
         let shouldResetGlobalInit: Bool
-        if upstreamIndex == 0 && globalInit.hadGlobalInit {
+        if globalInit.hadGlobalInit {
             let anyInitialized = upstreamState.withLockedValue { state in
                 state.upstreamStates.contains { $0.isInitialized }
             }

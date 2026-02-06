@@ -1,16 +1,11 @@
 # Troubleshooting
 
 ## `mcpbridge` cannot be executed
-Quote from Apple documentation:
+`xcode-mcp-proxy` spawns `xcrun mcpbridge` as an upstream process.
+If it fails:
 
-> In Terminal, use the xcrun mcpbridge command to configure the agentic coding tool to use Xcode Tools.
-
-Reference: [Giving external agentic coding tools access to Xcode](https://developer.apple.com/documentation/Xcode/giving-agentic-coding-tools-access-to-xcode#Configure-external-coding-tools-to-use-the-MCP-server)
-
-```bash
-claude mcp add --transport stdio xcode -- xcrun mcpbridge
-codex mcp add xcode -- xcrun mcpbridge
-```
+- Confirm Xcode is installed and selected (`xcode-select -p`).
+- Confirm `xcrun mcpbridge -h` works in Terminal.
 
 ## `MCP client ... timed out`
 Ensure the proxy is running. Increase `startup_timeout_sec` in the client config if needed.

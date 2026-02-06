@@ -410,6 +410,18 @@ final class SessionManager: Sendable, SessionManaging {
                     startUpstreamWarmInitialize(upstreamIndex: 0)
                 }
             } else if globalInit.hadGlobalInit {
+                if shouldResetGlobalInit {
+                    // When the last initialized upstream exits, we drop the cached init result.
+                    // Ensure the primary/global initialize path is re-run so the proxy becomes usable
+                    // again without requiring a downstream initialize retry.
+                    let primaryInitInFlight = upstreamState.withLockedValue { state in
+                        guard !state.upstreamStates.isEmpty else { return false }
+                        return state.upstreamStates[0].initInFlight
+                    }
+                    if !primaryInitInFlight {
+                        startEagerInitializePrimary()
+                    }
+                }
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
             }
         }

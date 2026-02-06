@@ -220,6 +220,53 @@ import Testing
     _ = try await init2.get()
 }
 
+@Test func sessionManagerEagerInitializeRerunsPrimaryInitWhenLastInitializedUpstreamExits() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
+    let _ = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 1)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 1)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    // Wait for per-upstream notifications/initialized.
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 1)
+
+    // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
+    await upstream0.yield(.exit(1))
+
+    // Primary warm init should be attempted, but we simulate it failing.
+    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 1)
+    let retry = await upstream0.sent()
+    let retryId = try extractUpstreamId(from: retry[2])
+    let errorResponse: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": retryId,
+        "error": [
+            "code": -1,
+            "message": "warm init failed",
+        ],
+    ]
+    await upstream0.yield(.message(try JSONSerialization.data(withJSONObject: errorResponse, options: [])))
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    // Now simulate the last initialized upstream dying too. Eager init should kick the global init path again.
+    await upstream1.yield(.exit(1))
+    try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 1)
+}
+
 @Test func sessionManagerRoutesRequestsRoundRobinAcrossUpstreams() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }

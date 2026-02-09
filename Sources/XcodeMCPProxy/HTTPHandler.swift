@@ -310,8 +310,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 return
             }
 
-            // Serve cached tools/list without allocating an upstream id mapping.
+            // Serve cached tools/list only for the canonical no-params request.
+            // Some clients use params for pagination; serving a cached first page would be incorrect.
             if method == "tools/list",
+               ToolsListCachePolicy.isCacheableParams(object["params"]),
                let headerSessionId,
                sessionManager.isInitialized(),
                let cachedResult = sessionManager.cachedToolsListResult(),
@@ -416,7 +418,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                         return
                     }
-                    if transform.method == "tools/list",
+                    if transform.isCacheableToolsListRequest,
                        let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
                        let resultAny = object["result"],
                        let result = JSONValue(any: resultAny) {
@@ -612,6 +614,7 @@ struct RequestTransform {
     let idKey: String?
     let method: String?
     let originalId: RPCId?
+    let isCacheableToolsListRequest: Bool
 }
 
 enum RequestInspector {
@@ -623,6 +626,8 @@ enum RequestInspector {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
             let method = object["method"] as? String
+            let isCacheableToolsListRequest = (method == "tools/list")
+                && ToolsListCachePolicy.isCacheableParams(object["params"])
             if let id = object["id"], let rpcId = RPCId(any: id) {
                 let upstreamId = mapId(sessionId, rpcId)
                 object["id"] = upstreamId
@@ -633,7 +638,8 @@ enum RequestInspector {
                     isBatch: false,
                     idKey: rpcId.key,
                     method: method,
-                    originalId: rpcId
+                    originalId: rpcId,
+                    isCacheableToolsListRequest: isCacheableToolsListRequest
                 )
             }
             let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
@@ -643,7 +649,8 @@ enum RequestInspector {
                 isBatch: false,
                 idKey: nil,
                 method: method,
-                originalId: nil
+                originalId: nil,
+                isCacheableToolsListRequest: isCacheableToolsListRequest
             )
         }
 
@@ -669,7 +676,8 @@ enum RequestInspector {
                 isBatch: true,
                 idKey: nil,
                 method: nil,
-                originalId: nil
+                originalId: nil,
+                isCacheableToolsListRequest: false
             )
         }
 
@@ -679,7 +687,18 @@ enum RequestInspector {
             isBatch: false,
             idKey: nil,
             method: nil,
-            originalId: nil
+            originalId: nil,
+            isCacheableToolsListRequest: false
         )
+    }
+}
+
+fileprivate enum ToolsListCachePolicy {
+    static func isCacheableParams(_ params: Any?) -> Bool {
+        guard let params else { return true }
+        if params is NSNull { return true }
+        if let object = params as? [String: Any] { return object.isEmpty }
+        if let array = params as? [Any] { return array.isEmpty }
+        return false
     }
 }

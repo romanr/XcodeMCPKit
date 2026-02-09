@@ -327,6 +327,65 @@ import Testing
     #expect(sessionManager.assignedUpstreamIdCount() == 0)
 }
 
+@Test func httpToolsListForwardsWhenParamsArePresentEvenIfCacheExists() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config)
+    sessionManager.setCachedToolsListResult(
+        JSONValue(any: ["tools": [Any]()])!
+    )
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    // Initialize to establish a session id.
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
+    #expect(sessionId?.isEmpty == false)
+
+    // tools/list with params should not be served from cache.
+    let toolsPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": [
+            "cursor": "cursor-1",
+        ],
+    ]
+    let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
+
+    var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    toolsHead.headers.add(name: "Accept", value: "application/json")
+    toolsHead.headers.add(name: "Content-Type", value: "application/json")
+    toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionId!)
+    var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
+    toolsBody.writeBytes(toolsData)
+    try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    #expect(sessionManager.sentUpstreamCount() == 1)
+    #expect(sessionManager.assignedUpstreamIdCount() == 1)
+}
+
 @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()

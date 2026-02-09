@@ -125,8 +125,27 @@ actor UpstreamProcess: UpstreamClient {
     private func handleStdoutData(_ data: Data) {
         let messages = framer.append(data)
         for message in messages {
+            guard isValidJSONPayload(message) else {
+                if let text = String(data: message, encoding: .utf8) {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        let preview = String(trimmed.prefix(200))
+                        logger.warning("Dropping non-JSON upstream stdout", metadata: ["preview": "\(preview)"])
+                    }
+                } else {
+                    logger.warning("Dropping non-UTF8 upstream stdout", metadata: ["bytes": "\(message.count)"])
+                }
+                continue
+            }
             continuation.yield(.message(message))
         }
+    }
+
+    private func isValidJSONPayload(_ data: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return false
+        }
+        return json is [String: Any] || json is [Any]
     }
 
     private func handleTermination(status: Int32) {

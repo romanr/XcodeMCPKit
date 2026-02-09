@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import NIOHTTP1
 import NIOConcurrencyHelpers
@@ -9,6 +10,7 @@ final class SSEHub: Sendable {
     }
 
     private let state = NIOLockedValueBox(State())
+    private let logger: Logger = ProxyLogging.make("sse")
 
     var hasClients: Bool {
         state.withLockedValue { !$0.clients.isEmpty }
@@ -27,7 +29,10 @@ final class SSEHub: Sendable {
     }
 
     func broadcast(_ data: Data) {
-        let payload = "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        guard let payload = SSECodec.encodeDataEvent(data) else {
+            logger.warning("Dropping non-UTF8 SSE payload", metadata: ["bytes": "\(data.count)"])
+            return
+        }
         let channels = state.withLockedValue { Array($0.clients.values) }
         for channel in channels {
             channel.eventLoop.execute {

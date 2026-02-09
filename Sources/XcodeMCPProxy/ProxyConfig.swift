@@ -26,6 +26,7 @@ public struct ProxyConfig: Sendable {
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
+    public var prewarmToolsList: Bool
 
     public init(
         listenHost: String,
@@ -40,7 +41,8 @@ public struct ProxyConfig: Sendable {
         eagerInitialize: Bool = true,
         transport: ProxyTransport = .http,
         stdioUpstreamURL: URL? = nil,
-        stdioUpstreamSource: StdioUpstreamSource? = nil
+        stdioUpstreamSource: StdioUpstreamSource? = nil,
+        prewarmToolsList: Bool = true
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -55,6 +57,7 @@ public struct ProxyConfig: Sendable {
         self.transport = transport
         self.stdioUpstreamURL = stdioUpstreamURL
         self.stdioUpstreamSource = stdioUpstreamSource
+        self.prewarmToolsList = prewarmToolsList
     }
 }
 
@@ -199,10 +202,8 @@ public struct CLIParser {
                 stdioUpstreamURL = resolved.url
                 stdioUpstreamSource = resolved.source
                 index += 1
-            case "-h", "--help":
-                throw CLIError.message(usage())
             default:
-                throw CLIError.message("Unknown argument: \(arg)\n\n\(usage())")
+                throw CLIError.message("Unknown argument: \(arg)")
             }
         }
 

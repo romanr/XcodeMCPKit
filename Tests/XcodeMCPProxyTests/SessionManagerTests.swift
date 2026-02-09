@@ -24,9 +24,10 @@ import Testing
         on: eventLoop
     )
 
-    await Task.yield()
+    try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
     let sent = await upstream.sent()
     #expect(sent.count == 1)
+    guard sent.count == 1 else { return }
 
     let upstreamId = try extractUpstreamId(from: sent[0])
     let response = try makeInitializeResponse(id: upstreamId)
@@ -54,7 +55,7 @@ import Testing
         requestObject: request,
         on: eventLoop
     )
-    await Task.yield()
+    try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
     #expect((await upstream.sent()).count == 1)
 
     try await Task.sleep(nanoseconds: 1_500_000_000)
@@ -71,7 +72,7 @@ import Testing
         requestObject: makeInitializeRequest(id: 2),
         on: eventLoop
     )
-    await Task.yield()
+    try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
     #expect((await upstream.sent()).count == 2)
 }
 
@@ -151,11 +152,13 @@ import Testing
     _ = try await init1.get()
 
     // Wait for notifications/initialized.
-    try await waitForSentCount(upstream, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
     // Simulate primary upstream dying after init succeeded.
     await upstream.yield(.exit(1))
-    await Task.yield()
+    try await waitForCondition(timeoutSeconds: 2) {
+        manager.isInitialized() == false
+    }
 
     // A new downstream initialize must trigger a new upstream initialize (no cached response).
     let init2 = manager.registerInitialize(
@@ -163,7 +166,7 @@ import Testing
         requestObject: makeInitializeRequest(id: 2),
         on: eventLoop
     )
-    try await waitForSentCount(upstream, count: 3, timeoutSeconds: 1)
+    try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
     let upstreamId2 = try extractUpstreamId(from: (await upstream.sent())[2])
     await upstream.yield(.message(try makeInitializeResponse(id: upstreamId2)))
     _ = try await init2.get()
@@ -191,14 +194,14 @@ import Testing
     _ = try await init1.get()
 
     // Warm init -> upstream1
-    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
     let init1Messages = await upstream1.sent()
     let upstreamId1 = try extractUpstreamId(from: init1Messages[0])
     await upstream1.yield(.message(try makeInitializeResponse(id: upstreamId1)))
 
     // Wait for per-upstream notifications/initialized.
-    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 1)
-    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
     // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
     await upstream0.yield(.exit(1))
@@ -214,7 +217,7 @@ import Testing
         requestObject: makeInitializeRequest(id: 2),
         on: eventLoop
     )
-    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
     let upstreamId2 = try extractUpstreamId(from: (await upstream0.sent())[2])
     await upstream0.yield(.message(try makeInitializeResponse(id: upstreamId2)))
     _ = try await init2.get()
@@ -230,25 +233,25 @@ import Testing
     let _ = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
 
     // Initialize both upstreams.
-    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
     let init0 = await upstream0.sent()
     let init0Id = try extractUpstreamId(from: init0[0])
     await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
 
-    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
     let init1 = await upstream1.sent()
     let init1Id = try extractUpstreamId(from: init1[0])
     await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
 
     // Wait for per-upstream notifications/initialized.
-    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 1)
-    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
     // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
     await upstream0.yield(.exit(1))
 
     // Primary warm init should be attempted, but we simulate it failing.
-    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
     let retry = await upstream0.sent()
     let retryId = try extractUpstreamId(from: retry[2])
     let errorResponse: [String: Any] = [
@@ -264,7 +267,7 @@ import Testing
 
     // Now simulate the last initialized upstream dying too. Eager init should kick the global init path again.
     await upstream1.yield(.exit(1))
-    try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
 }
 
 @Test func sessionManagerRoutesRequestsRoundRobinAcrossUpstreams() async throws {
@@ -277,20 +280,20 @@ import Testing
     let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
 
     // Eager init -> upstream0
-    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
     let init0 = await upstream0.sent()
     let init0Id = try extractUpstreamId(from: init0[0])
     await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
 
     // Warm init -> upstream1
-    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
     let init1 = await upstream1.sent()
     let init1Id = try extractUpstreamId(from: init1[0])
     await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
 
     // Wait for per-upstream notifications/initialized.
-    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 1)
-    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
     let sessionId = "session-1"
     let session = manager.session(id: sessionId)
@@ -346,16 +349,16 @@ import Testing
     let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
 
     // Initialize both upstreams.
-    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
     let init0 = await upstream0.sent()
     await upstream0.yield(.message(try makeInitializeResponse(id: try extractUpstreamId(from: init0[0]))))
 
-    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 1)
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
     let init1 = await upstream1.sent()
     await upstream1.yield(.message(try makeInitializeResponse(id: try extractUpstreamId(from: init1[0]))))
 
-    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 1)
-    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 1)
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
     let sessionId = "session-1"
     let session = manager.session(id: sessionId)
@@ -397,7 +400,8 @@ private func makeConfig(eagerInitialize: Bool, requestTimeout: TimeInterval) -> 
         upstreamSessionID: nil,
         maxBodyBytes: 1024,
         requestTimeout: requestTimeout,
-        eagerInitialize: eagerInitialize
+        eagerInitialize: eagerInitialize,
+        prewarmToolsList: false
     )
 }
 
@@ -461,6 +465,31 @@ private func waitForSentCount(
         }
         try await Task.sleep(nanoseconds: 50_000_000)
     }
+    let actual = await upstream.sent().count
+    throw WaitForSentCountError.timeout(expected: count, actual: actual)
+}
+
+private enum WaitForSentCountError: Error {
+    case timeout(expected: Int, actual: Int)
+}
+
+private func waitForCondition(
+    timeoutSeconds: UInt64,
+    pollNanoseconds: UInt64 = 50_000_000,
+    _ condition: @escaping @Sendable () -> Bool
+) async throws {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    while Date() < deadline {
+        if condition() {
+            return
+        }
+        try await Task.sleep(nanoseconds: pollNanoseconds)
+    }
+    throw WaitForConditionError.timeout
+}
+
+private enum WaitForConditionError: Error {
+    case timeout
 }
 
 private func methodName(from data: Data) -> String? {

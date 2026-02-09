@@ -7,7 +7,7 @@ Designed so the Xcode permission dialog appears once when the proxy starts.
 
 ## Quick Start
 
-1. Start the proxy
+1. Start the proxy server
    ```bash
    xcode-mcp-proxy-server
    ```
@@ -23,20 +23,22 @@ See [Architecture](Docs/architecture.md) for the process overview.
 swift run -c release xcode-mcp-proxy-install
 ```
 
-Replace `xcrun mcpbridge` with `xcode-mcp-proxy`:
+Replace `xcrun mcpbridge` with one of the following:
 
-**Codex**
+### Codex
 
 ```bash
 codex mcp remove xcode
-codex mcp add xcode -- xcode-mcp-proxy --stdio
+codex mcp add xcode --url http://localhost:8765/mcp
+# or
+codex mcp add xcode -- xcode-mcp-proxy
 ```
 
-**Claude Code**
+### Claude Code
 
 ```bash
 claude mcp remove xcode
-claude mcp add --transport stdio xcode -- xcode-mcp-proxy --stdio
+claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 ```
 
 By default, `xcode-mcp-proxy` and `xcode-mcp-proxy-server` are installed to `~/.local/bin`. Add it to your `PATH` if needed.
@@ -56,7 +58,7 @@ To change the destination:
 
 ## Usage
 
-### Server
+### Proxy Server: `xcode-mcp-proxy-server`
 
 See Quick Start for how to launch.
 
@@ -65,11 +67,11 @@ See Quick Start for how to launch.
 - command: `xcrun`
 - args: `mcpbridge`
 - upstream processes: `1` (spawns multiple `mcpbridge` processes when increased)
-- listen: `localhost:0` (auto-assign port)
+- listen: `localhost:8765`
 - request timeout: `300` seconds (`0` disables)
 - max body size: `1048576` bytes
 - initialization: eager at startup
-- mode: HTTP by default; STDIO adapter when `--stdio` is set
+- discovery: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
 
 #### Environment Variables
 
@@ -94,7 +96,20 @@ Note: when using `--upstream-processes` > 1, fixing the session id via `--sessio
 | `--max-body-bytes n` | Max request body size |
 | `--request-timeout seconds` | Request timeout (`0` disables) |
 | `--lazy-init` | Delay initialization until first request |
-| `--stdio` | Run in STDIO mode |
+| `--force-restart` | If the listen port is in use, terminate an existing `xcode-mcp-proxy-server` and restart |
+
+### Adapter: `xcode-mcp-proxy`
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `--request-timeout seconds` | HTTP request timeout (`0` disables) |
+| `--url url` | Explicit upstream URL (example: `http://localhost:9000/mcp`) |
+
+#### Environment Variables
+
+- `XCODE_MCP_PROXY_ENDPOINT` (override upstream URL; `--url` takes precedence)
 
 ## Troubleshooting
 

@@ -384,13 +384,18 @@ private func detectExistingProxyServerPIDs(port: Int) -> [Int] {
 
 private func isProxyServerProcess(pid: Int) -> Bool {
     guard pid > 0 else { return false }
-    guard let comm = firstLine(runCommand("/bin/ps", ["-p", "\(pid)", "-o", "comm="]))?
+    guard let commandLine = firstLine(runCommand("/bin/ps", ["-ww", "-p", "\(pid)", "-o", "command="]))?
         .trimmingCharacters(in: .whitespacesAndNewlines),
-        !comm.isEmpty else {
+        !commandLine.isEmpty else {
         return false
     }
-    // `comm` may be just the executable name, or a (possibly relative) path.
-    let name = URL(fileURLWithPath: comm).lastPathComponent
+
+    // `ps -o command` includes arguments; use the executable token to avoid false matches.
+    guard let executable = commandLine.split(whereSeparator: \.isWhitespace).first.map(String.init),
+          !executable.isEmpty else {
+        return false
+    }
+    let name = URL(fileURLWithPath: executable).lastPathComponent
     return name == "xcode-mcp-proxy-server"
 }
 

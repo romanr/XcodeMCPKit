@@ -407,6 +407,18 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
+        guard let payload = SSECodec.encodeDataEvent(data) else {
+            sendPlain(
+                on: channel,
+                status: .badGateway,
+                body: "invalid upstream response",
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+            return
+        }
+
         logResponse(requestLog, status: .ok, sessionId: sessionId)
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
@@ -417,10 +429,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
         channel.write(HTTPServerResponsePart.head(head), promise: nil)
 
-        var buffer = channel.allocator.buffer(capacity: data.count + 16)
-        buffer.writeString("data: ")
-        buffer.writeBytes(data)
-        buffer.writeString("\n\n")
+        var buffer = channel.allocator.buffer(capacity: payload.utf8.count)
+        buffer.writeString(payload)
         channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
         channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
         if !keepAlive {
@@ -482,7 +492,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func sendSSE(to channel: Channel, data: Data) {
-        let payload = "data: \(String(decoding: data, as: UTF8.self))\n\n"
+        guard let payload = SSECodec.encodeDataEvent(data) else {
+            logger.warning("Dropping non-UTF8 SSE payload", metadata: ["bytes": "\(data.count)"])
+            return
+        }
         channel.eventLoop.execute {
             guard channel.isActive else { return }
             var buffer = channel.allocator.buffer(capacity: payload.utf8.count)

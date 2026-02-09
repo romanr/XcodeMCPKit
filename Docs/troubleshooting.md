@@ -31,6 +31,19 @@ args = ["--stdio"]
 tool_timeout_sec = 300
 ```
 
+## Codex shows `Transport closed` (then hangs)
+If you see an error like:
+
+- `tools/call failed: Transport closed`
+
+it usually means the MCP server process (`xcode-mcp-proxy --stdio`) was terminated while Codex was waiting (often due to the default `tool_timeout_sec` being too short for slow Xcode operations).
+
+- Set `tool_timeout_sec` (see above) to a value that covers the slowest Xcode tool calls you expect.
+- Ensure the central proxy (`xcode-mcp-proxy-server`) is running and the discovery file is fresh: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
+- If it keeps happening, restart the local processes:
+  - `pkill -f xcode-mcp-proxy`
+  - `pkill -f mcpbridge`
+
 ## Xcode dialog does not appear
 Make sure `--lazy-init` is not set (when enabled, the dialog appears on the first request instead of at startup).
 

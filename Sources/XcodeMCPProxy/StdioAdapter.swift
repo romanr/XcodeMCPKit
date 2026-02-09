@@ -182,10 +182,20 @@ public actor StdioAdapter {
             throw AdapterError.httpStatus(http.statusCode)
         }
 
+        var decoder = SSEDecoder()
         for try await line in bytes.lines {
             if Task.isCancelled { break }
-            guard let payload = parseSSELine(line) else { continue }
+            guard let payload = decoder.feed(line: line) else { continue }
+            guard isValidJSONPayload(payload) else {
+                logger.warning("Dropping invalid SSE payload", metadata: ["bytes": "\(payload.count)"])
+                continue
+            }
             await outputWriter.send(payload)
+        }
+
+        // If the stream ends without a terminating blank line, flush any buffered event.
+        if let tail = decoder.flushIfNeeded(), isValidJSONPayload(tail) {
+            await outputWriter.send(tail)
         }
     }
 
@@ -199,17 +209,6 @@ public actor StdioAdapter {
         } else {
             request.timeoutInterval = .infinity
         }
-    }
-
-    private func parseSSELine(_ line: String) -> Data? {
-        guard line.hasPrefix("data:") else { return nil }
-        let index = line.index(line.startIndex, offsetBy: 5)
-        var payload = line[index...]
-        if payload.first == " " {
-            payload = payload.dropFirst()
-        }
-        guard !payload.isEmpty else { return nil }
-        return Data(payload.utf8)
     }
 
     private func isValidJSONPayload(_ data: Data) -> Bool {

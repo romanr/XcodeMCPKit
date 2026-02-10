@@ -516,11 +516,155 @@ import Testing
     #expect(templates?.isEmpty == true)
 }
 
+@Test func httpResourcesListRewritesMethodNotFoundErrorToEmptyArrayAfterInit() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config) { method, originalId in
+        #expect(method == "resources/list")
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "error": [
+                "code": -32601,
+                "message": "Method not found",
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    // Initialize to establish a session id.
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
+    #expect(sessionId?.isEmpty == false)
+
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 123,
+        "method": "resources/list",
+        "params": [String: Any](),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: sessionId!)
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    #expect(object?["error"] == nil)
+    let result = object?["result"] as? [String: Any]
+    let resources = result?["resources"] as? [Any]
+    #expect(resources?.isEmpty == true)
+}
+
+@Test func httpResourcesListDoesNotMaskNonMethodNotFoundErrorsAfterInit() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config) { method, originalId in
+        #expect(method == "resources/list")
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "error": [
+                "code": -32000,
+                "message": "permission denied",
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    // Initialize to establish a session id.
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
+    #expect(sessionId?.isEmpty == false)
+
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 123,
+        "method": "resources/list",
+        "params": [String: Any](),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: sessionId!)
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    let error = object?["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32000)
+    #expect(object?["result"] == nil)
+}
+
 private enum HTTPTestError: Error {
     case missingResponseHead
 }
 
 private final class TestSessionManager: SessionManaging {
+    private struct UpstreamMapping: Sendable {
+        let sessionId: String
+        let originalId: RPCId
+    }
+
     private struct State: Sendable {
         var sessions: [String: SessionContext] = [:]
         var nextUpstreamId: Int64 = 1
@@ -528,13 +672,19 @@ private final class TestSessionManager: SessionManaging {
         var initialized = false
         var cachedToolsList: JSONValue?
         var upstreamSendCount = 0
+        var upstreamIdMapping: [Int64: UpstreamMapping] = [:]
     }
 
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
+    private let upstreamResponder: (@Sendable (_ method: String, _ originalId: RPCId) throws -> Data)?
 
-    init(config: ProxyConfig) {
+    init(
+        config: ProxyConfig,
+        upstreamResponder: (@Sendable (_ method: String, _ originalId: RPCId) throws -> Data)? = nil
+    ) {
         self.config = config
+        self.upstreamResponder = upstreamResponder
     }
 
     func session(id: String) -> SessionContext {
@@ -607,6 +757,7 @@ private final class TestSessionManager: SessionManaging {
             state.assignUpstreamIdCount += 1
             let id = state.nextUpstreamId
             state.nextUpstreamId += 1
+            state.upstreamIdMapping[id] = UpstreamMapping(sessionId: sessionId, originalId: originalId)
             return id
         }
     }
@@ -615,6 +766,22 @@ private final class TestSessionManager: SessionManaging {
         state.withLockedValue { state in
             state.upstreamSendCount += 1
         }
+
+        guard let upstreamResponder else { return }
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+              let method = object["method"] as? String,
+              let upstreamIdValue = object["id"] else {
+            return
+        }
+        let upstreamId = (upstreamIdValue as? NSNumber)?.int64Value ?? (upstreamIdValue as? Int64)
+        guard let upstreamId,
+              let mapping = state.withLockedValue({ $0.upstreamIdMapping[upstreamId] }),
+              let responseData = try? upstreamResponder(method, mapping.originalId) else {
+            return
+        }
+
+        let session = self.session(id: mapping.sessionId)
+        session.router.handleIncoming(responseData)
     }
 
     func sentUpstreamCount() -> Int {

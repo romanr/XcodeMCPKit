@@ -540,9 +540,23 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let expectedKey = (method == "resources/list") ? "resources" : "resourceTemplates"
 
-        if let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any],
-           let result = object["result"] as? [String: Any],
+        guard let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any] else {
+            return upstreamData
+        }
+
+        if let result = object["result"] as? [String: Any],
            result[expectedKey] is [Any] {
+            return upstreamData
+        }
+
+        // Only rewrite the standard JSON-RPC "Method not found" error (-32601).
+        // Any other upstream error should pass through unchanged.
+        if let error = object["error"] as? [String: Any] {
+            let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int)
+            guard code == -32601 else {
+                return upstreamData
+            }
+        } else {
             return upstreamData
         }
 

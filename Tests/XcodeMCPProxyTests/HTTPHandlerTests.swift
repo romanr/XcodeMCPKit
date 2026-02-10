@@ -442,6 +442,80 @@ import Testing
     #expect(toolsResponse.head.headers.first(name: "Content-Type") == "application/json")
 }
 
+@Test func httpResourcesListReturnsEmptyArray() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config)
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "resources/list",
+        "params": [String: Any](),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+    #expect(response.head.headers.first(name: "Content-Type") == "application/json")
+
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    let responseId = (object?["id"] as? NSNumber)?.intValue
+    #expect(responseId == 1)
+    let result = object?["result"] as? [String: Any]
+    let resources = result?["resources"] as? [Any]
+    #expect(resources?.isEmpty == true)
+}
+
+@Test func httpResourceTemplatesListReturnsEmptyArray() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config)
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "resources/templates/list",
+        "params": [String: Any](),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+    #expect(response.head.headers.first(name: "Content-Type") == "application/json")
+
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    let responseId = (object?["id"] as? NSNumber)?.intValue
+    #expect(responseId == 1)
+    let result = object?["result"] as? [String: Any]
+    let templates = result?["resourceTemplates"] as? [Any]
+    #expect(templates?.isEmpty == true)
+}
+
 private enum HTTPTestError: Error {
     case missingResponseHead
 }

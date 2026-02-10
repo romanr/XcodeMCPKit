@@ -310,6 +310,50 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 return
             }
 
+            // Xcode MCP (via `xcrun mcpbridge`) currently doesn't implement the MCP Resources APIs.
+            // Some clients still probe `resources/list` and `resources/templates/list` unconditionally,
+            // and Xcode returns a tool-style error payload that doesn't match the expected schema.
+            // To keep clients happy, serve an empty list response locally.
+            if method == "resources/list" || method == "resources/templates/list" {
+                guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
+                    sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
+                    return
+                }
+
+                let sessionId = headerSessionId ?? UUID().uuidString
+                if let headerSessionId, headerSessionExists == false {
+                    _ = sessionManager.session(id: headerSessionId)
+                }
+
+                let result: [String: Any]
+                if method == "resources/list" {
+                    result = [
+                        "resources": [Any](),
+                    ]
+                } else {
+                    result = [
+                        "resourceTemplates": [Any](),
+                    ]
+                }
+
+                let response: [String: Any] = [
+                    "jsonrpc": "2.0",
+                    "id": originalId.value.foundationObject,
+                    "result": result,
+                ]
+                if JSONSerialization.isValidJSONObject(response),
+                   let data = try? JSONSerialization.data(withJSONObject: response, options: []) {
+                    if prefersEventStream {
+                        sendSingleSSE(on: context.channel, data: data, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
+                    } else {
+                        var out = context.channel.allocator.buffer(capacity: data.count)
+                        out.writeBytes(data)
+                        sendJSON(on: context.channel, buffer: out, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
+                    }
+                    return
+                }
+            }
+
             // Serve cached tools/list only for the canonical no-params request.
             // Some clients use params for pagination; serving a cached first page would be incorrect.
             if method == "tools/list",

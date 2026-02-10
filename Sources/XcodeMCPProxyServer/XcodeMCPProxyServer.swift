@@ -301,7 +301,7 @@ private func isAddressAlreadyInUse(_ error: Error) -> Bool {
 }
 
 private func writePortInUseError(host: String, port: Int) {
-    let pids = detectExistingProxyServerPIDs(port: port)
+    let pids = detectExistingProxyServerPIDs(host: host, port: port)
 
     let displayHost: String = {
         // Avoid `::1:8765` ambiguity by bracketing IPv6 literals.
@@ -333,19 +333,21 @@ private func writePortInUseError(host: String, port: Int) {
 @discardableResult
 private func terminateExistingProxyServerIfNeeded(host: String, port: Int) -> Bool {
     // Prefer the discovery record (only present when the listener is our own proxy server).
-    if let record = Discovery.read(), record.port == port {
+    if let record = Discovery.read(),
+       record.port == port,
+       hostMatches(requestedHost: host, actualHost: record.host) {
         let currentPID = Int(ProcessInfo.processInfo.processIdentifier)
         if record.pid != currentPID, isProxyServerProcess(pid: record.pid) {
             writeError("warning: port \(port) is already in use by xcode-mcp-proxy-server (pid: \(record.pid)); terminating it.")
             if terminate(pid: record.pid) {
-                waitForPortToBeFree(port: port, timeout: 2.0)
+                waitForPortToBeFree(host: host, port: port, timeout: 2.0)
                 return true
             }
         }
     }
 
     // Fallback: detect listeners on the port (only terminate our own proxy server process).
-    let pids = listeningPIDs(onTCPPort: port)
+    let pids = listeningPIDs(onTCPPort: port, matchingHost: host)
     guard !pids.isEmpty else { return false }
 
     let currentPID = Int(ProcessInfo.processInfo.processIdentifier)
@@ -358,22 +360,24 @@ private func terminateExistingProxyServerIfNeeded(host: String, port: Int) -> Bo
         }
     }
     if didTerminate {
-        waitForPortToBeFree(port: port, timeout: 2.0)
+        waitForPortToBeFree(host: host, port: port, timeout: 2.0)
     }
     return didTerminate
 }
 
-private func detectExistingProxyServerPIDs(port: Int) -> [Int] {
+private func detectExistingProxyServerPIDs(host: String, port: Int) -> [Int] {
     var pids: [Int] = []
     pids.reserveCapacity(4)
 
-    if let record = Discovery.read(), record.port == port {
+    if let record = Discovery.read(),
+       record.port == port,
+       hostMatches(requestedHost: host, actualHost: record.host) {
         if isProxyServerProcess(pid: record.pid) {
             pids.append(record.pid)
         }
     }
 
-    for pid in listeningPIDs(onTCPPort: port) where isProxyServerProcess(pid: pid) {
+    for pid in listeningPIDs(onTCPPort: port, matchingHost: host) where isProxyServerProcess(pid: pid) {
         pids.append(pid)
     }
 
@@ -397,6 +401,99 @@ private func isProxyServerProcess(pid: Int) -> Bool {
     }
     let name = URL(fileURLWithPath: executable).lastPathComponent
     return name == "xcode-mcp-proxy-server"
+}
+
+private func normalizeHost(_ host: String) -> String {
+    var value = host.trimmingCharacters(in: .whitespacesAndNewlines)
+    if value.hasPrefix("["), value.hasSuffix("]") {
+        value = String(value.dropFirst().dropLast())
+    }
+    return value.lowercased()
+}
+
+private func isWildcardHost(_ host: String) -> Bool {
+    let value = normalizeHost(host)
+    return value.isEmpty || value == "*" || value == "0.0.0.0" || value == "::"
+}
+
+private func hostMatches(requestedHost: String, actualHost: String) -> Bool {
+    let requested = normalizeHost(requestedHost)
+    let actual = normalizeHost(actualHost)
+
+    // Wildcard listeners (e.g. *:port / 0.0.0.0:port / [::]:port) conflict with any specific host bind.
+    if isWildcardHost(requested) { return true }
+    if isWildcardHost(actual) { return true }
+
+    // Treat localhost as either loopback.
+    if requested == "localhost" {
+        return actual == "localhost" || actual == "127.0.0.1" || actual == "::1"
+    }
+    if actual == "localhost" {
+        return requested == "localhost" || requested == "127.0.0.1" || requested == "::1"
+    }
+
+    return requested == actual
+}
+
+private func extractListenerHost(fromLsofName name: String) -> String? {
+    // Example `-Fn` value: "TCP 127.0.0.1:8765 (LISTEN)" / "TCP [::1]:8765 (LISTEN)" / "TCP *:8765 (LISTEN)"
+    guard name.hasPrefix("TCP ") else { return nil }
+    let rest = name.dropFirst(4)
+    guard let endpoint = rest.split(whereSeparator: \.isWhitespace).first else { return nil }
+    let endpointString = String(endpoint)
+    if endpointString.hasPrefix("["),
+       let close = endpointString.firstIndex(of: "]") {
+        let start = endpointString.index(after: endpointString.startIndex)
+        return String(endpointString[start..<close])
+    }
+    guard let colon = endpointString.lastIndex(of: ":") else { return nil }
+    return String(endpointString[..<colon])
+}
+
+private func listeningPIDs(onTCPPort port: Int, matchingHost host: String) -> [Int] {
+    // If we can't constrain by host (or the bind is wildcard), fall back to port-only detection.
+    if isWildcardHost(host) {
+        return listeningPIDs(onTCPPort: port)
+    }
+
+    // macOS: lsof lives in /usr/sbin. If it fails, return empty and let the bind error surface.
+    guard let output = runCommand("/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpn"]) else {
+        return []
+    }
+
+    var pids: [Int] = []
+    pids.reserveCapacity(4)
+
+    var currentPID: Int?
+    var currentMatched = false
+
+    func flush() {
+        if let pid = currentPID, currentMatched {
+            pids.append(pid)
+        }
+    }
+
+    for rawLine in output.split(whereSeparator: \.isNewline) {
+        guard let first = rawLine.first else { continue }
+        if first == "p" {
+            flush()
+            currentPID = Int(rawLine.dropFirst())
+            currentMatched = false
+            continue
+        }
+        if first == "n" {
+            let name = String(rawLine.dropFirst())
+            if let listenerHost = extractListenerHost(fromLsofName: name),
+               hostMatches(requestedHost: host, actualHost: listenerHost) {
+                currentMatched = true
+            }
+        }
+    }
+    flush()
+
+    // Keep order stable while removing duplicates.
+    var seen = Set<Int>()
+    return pids.filter { seen.insert($0).inserted }
 }
 
 private func listeningPIDs(onTCPPort port: Int) -> [Int] {
@@ -449,10 +546,10 @@ private func waitForProcessExit(pid: Int, timeout: TimeInterval) -> Bool {
     return !isProcessAlive(pid)
 }
 
-private func waitForPortToBeFree(port: Int, timeout: TimeInterval) {
+private func waitForPortToBeFree(host: String, port: Int, timeout: TimeInterval) {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-        if listeningPIDs(onTCPPort: port).isEmpty {
+        if listeningPIDs(onTCPPort: port, matchingHost: host).isEmpty {
             return
         }
         Thread.sleep(forTimeInterval: 0.05)

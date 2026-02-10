@@ -50,6 +50,7 @@ final class SessionManager: Sendable, SessionManaging {
     private struct ToolsListState: Sendable {
         var cachedResult: JSONValue?
         var warmupInFlight = false
+        var didRefreshThisProcess = false
     }
 
     private struct SessionState: Sendable {
@@ -214,7 +215,12 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     func cachedToolsListResult() -> JSONValue? {
-        toolsListState.withLockedValue { $0.cachedResult }
+        toolsListState.withLockedValue { state in
+            // We seed the cache from disk, but treat it as stale until we've successfully refreshed
+            // tools/list at least once in the current process.
+            guard state.didRefreshThisProcess else { return nil }
+            return state.cachedResult
+        }
     }
 
     func setCachedToolsListResult(_ result: JSONValue) {
@@ -222,6 +228,7 @@ final class SessionManager: Sendable, SessionManaging {
         toolsListState.withLockedValue { state in
             if isValid {
                 state.cachedResult = result
+                state.didRefreshThisProcess = true
             }
             state.warmupInFlight = false
         }

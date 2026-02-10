@@ -311,10 +311,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
 
             // Xcode MCP (via `xcrun mcpbridge`) currently doesn't implement the MCP Resources APIs.
-            // Some clients still probe `resources/list` and `resources/templates/list` unconditionally,
-            // and Xcode returns a tool-style error payload that doesn't match the expected schema.
-            // To keep clients happy, serve an empty list response locally.
-            if method == "resources/list" || method == "resources/templates/list" {
+            // Some clients still probe `resources/list` and `resources/templates/list` unconditionally.
+            //
+            // If the proxy hasn't been initialized yet, we can't reliably forward these requests. Serve an
+            // empty list response locally so clients don't choke on unsupported-method errors.
+            if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
                 guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
                     sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
                     return
@@ -462,17 +463,22 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                         return
                     }
+                    let responseData = self.rewriteUnsupportedResourcesListResponseIfNeeded(
+                        method: transform.method,
+                        originalId: transform.originalId,
+                        upstreamData: data
+                    )
                     if transform.isCacheableToolsListRequest,
-                       let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                       let object = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
                        let resultAny = object["result"],
                        let result = JSONValue(any: resultAny) {
                         self.sessionManager.setCachedToolsListResult(result)
                     }
                     if prefersEventStream {
-                        self.sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
+                        self.sendSingleSSE(on: channel, data: responseData, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                     } else {
-                        var out = channel.allocator.buffer(capacity: data.count)
-                        out.writeBytes(data)
+                        var out = channel.allocator.buffer(capacity: responseData.count)
+                        out.writeBytes(responseData)
                         self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                     }
                 case .failure:
@@ -519,6 +525,40 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         if !keepAlive {
             channel.close(promise: nil)
         }
+    }
+
+    private func rewriteUnsupportedResourcesListResponseIfNeeded(
+        method: String?,
+        originalId: RPCId?,
+        upstreamData: Data
+    ) -> Data {
+        guard let method,
+              method == "resources/list" || method == "resources/templates/list" else {
+            return upstreamData
+        }
+        guard let originalId else { return upstreamData }
+
+        let expectedKey = (method == "resources/list") ? "resources" : "resourceTemplates"
+
+        if let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any],
+           let result = object["result"] as? [String: Any],
+           result[expectedKey] is [Any] {
+            return upstreamData
+        }
+
+        let result: [String: Any] = (method == "resources/list")
+            ? ["resources": [Any]()]
+            : ["resourceTemplates": [Any]()]
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "result": result,
+        ]
+        guard JSONSerialization.isValidJSONObject(response),
+              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            return upstreamData
+        }
+        return data
     }
 
     private func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {

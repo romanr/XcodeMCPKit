@@ -749,9 +749,19 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
+    private func makeUniqueToolsListWarmupSessionId() -> String {
+        // Clients can provide arbitrary Mcp-Session-Id values. Use a UUID-backed internal ID
+        // and ensure it doesn't match any active session so warmup can't evict real client state.
+        var candidate: String
+        repeat {
+            candidate = "__tools_list_warmup__:" + UUID().uuidString
+        } while hasSession(id: candidate)
+        return candidate
+    }
+
     private func warmToolsList() async {
-        let internalSessionId = "__tools_list_warmup__"
         let upstreamIndex = 0
+        let internalSessionId = makeUniqueToolsListWarmupSessionId()
 
         guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
             toolsListState.withLockedValue { $0.warmupInFlight = false }

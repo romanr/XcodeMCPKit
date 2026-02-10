@@ -367,6 +367,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 if headerSessionExists == false {
                     _ = sessionManager.session(id: headerSessionId)
                 }
+                // Even when tools/list is served from cache, pin the session so later upstream messages
+                // route consistently instead of fanning out across unpinned sessions.
+                _ = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
                 let response: [String: Any] = [
                     "jsonrpc": "2.0",
                     "id": originalId.value.foundationObject,

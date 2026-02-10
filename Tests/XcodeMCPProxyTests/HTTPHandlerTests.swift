@@ -325,6 +325,8 @@ import Testing
 
     #expect(sessionManager.sentUpstreamCount() == 0)
     #expect(sessionManager.assignedUpstreamIdCount() == 0)
+    #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+    #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
 }
 
 @Test func httpToolsListForwardsWhenParamsArePresentEvenIfCacheExists() async throws {
@@ -665,6 +667,11 @@ private final class TestSessionManager: SessionManaging {
         let originalId: RPCId
     }
 
+    private struct ChooseUpstreamCall: Sendable {
+        let sessionId: String
+        let shouldPin: Bool
+    }
+
     private struct State: Sendable {
         var sessions: [String: SessionContext] = [:]
         var nextUpstreamId: Int64 = 1
@@ -673,6 +680,7 @@ private final class TestSessionManager: SessionManaging {
         var cachedToolsList: JSONValue?
         var upstreamSendCount = 0
         var upstreamIdMapping: [Int64: UpstreamMapping] = [:]
+        var chooseUpstreamCalls: [ChooseUpstreamCall] = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -750,7 +758,14 @@ private final class TestSessionManager: SessionManaging {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
-    func chooseUpstreamIndex(sessionId _: String, shouldPin _: Bool) -> Int { 0 }
+    func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int {
+        state.withLockedValue { state in
+            state.chooseUpstreamCalls.append(
+                ChooseUpstreamCall(sessionId: sessionId, shouldPin: shouldPin)
+            )
+        }
+        return 0
+    }
 
     func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex _: Int) -> Int64 {
         state.withLockedValue { state in
@@ -790,6 +805,14 @@ private final class TestSessionManager: SessionManaging {
 
     func assignedUpstreamIdCount() -> Int {
         state.withLockedValue { $0.assignUpstreamIdCount }
+    }
+
+    func chooseUpstreamIndexCallCount() -> Int {
+        state.withLockedValue { $0.chooseUpstreamCalls.count }
+    }
+
+    func lastChooseUpstreamShouldPin() -> Bool {
+        state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
     }
 }
 

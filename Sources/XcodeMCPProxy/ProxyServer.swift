@@ -18,11 +18,20 @@ public final class ProxyServer {
     }
 
     public func run() async throws {
+        _ = try startAndWriteDiscovery()
+        try await wait()
+    }
+
+    public func startAndWriteDiscovery() throws -> (host: String, port: Int) {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
         writeDiscovery(resolvedHost: host, port: port)
         logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
+        return (host, port)
+    }
+
+    public func wait() async throws {
         try await waitForHTTP()
     }
 

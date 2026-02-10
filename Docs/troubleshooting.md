@@ -1,25 +1,45 @@
 # Troubleshooting
 
 ## `mcpbridge` cannot be executed
-`xcode-mcp-proxy` spawns `xcrun mcpbridge` as an upstream process.
+`xcode-mcp-proxy-server` spawns `xcrun mcpbridge` as an upstream process.
 If it fails:
 
 - Confirm Xcode is installed and selected (`xcode-select -p`).
 - Confirm `xcrun mcpbridge -h` works in Terminal.
 
 ## `MCP client ... timed out`
-Ensure the proxy is running. Increase `startup_timeout_sec` in the client config if needed.
+Ensure the proxy server is running. Increase `startup_timeout_sec` in the client config if needed.
+
+If you see an error like:
+
+- `timed out awaiting tools/list after 10s`
+
+it’s usually because the upstream (`xcrun mcpbridge` / Xcode) was slow on the first `tools/list`.
+
+- `xcode-mcp-proxy-server` prewarms and caches `tools/list` once it’s ready.
+- The cached tool list is stored at `~/Library/Caches/XcodeMCPProxy/tools-list.json` and reused on next startup.
 
 ## HTTP/SSE client cannot connect
-Ensure the proxy is running. If the server uses an auto-assigned port, check
-`~/Library/Caches/XcodeMCPProxy/endpoint.json`. Confirm `pid` is alive and
-`updatedAt` is recent; stale data should be ignored.
+- Ensure `xcode-mcp-proxy-server` is running.
+- Confirm the URL is correct (default: `http://localhost:8765/mcp`).
+- If you changed the listen address/port, check the discovery file: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
+- Confirm `pid` is alive and `updatedAt` is recent; stale data should be ignored.
+
+## `Address already in use` / `errno: 48`
+Another process is already listening on the same port (default: `8765`).
+
+- Stop the existing proxy server and retry:
+  - `pkill -x xcode-mcp-proxy-server`
+- Or rerun with `--force-restart` to terminate an existing `xcode-mcp-proxy-server` automatically:
+  - `xcode-mcp-proxy-server --force-restart`
 
 ## STDIO adapter cannot connect
-Ensure the HTTP proxy is running.
-If the server uses an auto-assigned port, confirm the discovery file exists at
-`~/Library/Caches/XcodeMCPProxy/endpoint.json`, or set `XCODE_MCP_PROXY_ENDPOINT`
-to the server URL (for example: `http://localhost:9000/mcp`).
+Ensure the proxy server is running and you are launching the adapter with `xcode-mcp-proxy`.
+If you changed the server URL, pass it explicitly:
+
+- `xcode-mcp-proxy --url http://localhost:9000/mcp`
+
+or set `XCODE_MCP_PROXY_ENDPOINT` to the server URL. The discovery file should exist at `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
 
 ## Codex `tools/call` times out after 60 seconds
 Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is client-side and separate from the proxy `--request-timeout`).
@@ -27,7 +47,15 @@ Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is client-side and s
 ```toml
 [mcp_servers.xcode]
 command = "xcode-mcp-proxy"
-args = ["--stdio"]
+args = []
+tool_timeout_sec = 300
+```
+
+If you configured Codex via `--url`, set `tool_timeout_sec` on the URL server entry instead:
+
+```toml
+[mcp_servers.xcode]
+url = "http://localhost:8765/mcp"
 tool_timeout_sec = 300
 ```
 
@@ -36,10 +64,10 @@ If you see an error like:
 
 - `tools/call failed: Transport closed`
 
-it usually means the MCP server process (`xcode-mcp-proxy --stdio`) was terminated while Codex was waiting (often due to the default `tool_timeout_sec` being too short for slow Xcode operations).
+it usually means the MCP server process (`xcode-mcp-proxy`) was terminated while Codex was waiting (often due to the default `tool_timeout_sec` being too short for slow Xcode operations).
 
 - Set `tool_timeout_sec` (see above) to a value that covers the slowest Xcode tool calls you expect.
-- Ensure the central proxy (`xcode-mcp-proxy-server`) is running and the discovery file is fresh: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
+- Ensure the proxy server (`xcode-mcp-proxy-server`) is running and the discovery file is fresh: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
 - If it keeps happening, restart the local processes:
   - `pkill -f xcode-mcp-proxy`
   - `pkill -f mcpbridge`

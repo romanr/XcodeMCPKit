@@ -21,7 +21,8 @@ Important: results vary significantly depending on Xcode state (indexing/build a
 - RAM: `32 GiB` (`hw.memsize=34359738368`)
 
 ## Servers Used
-Both servers were started with an auto-selected port (default `--listen localhost:0`).
+Both servers were started with an auto-selected port (`--listen localhost:0`).
+Note: the current default listen is `localhost:8765`; pass `--listen localhost:0` to reproduce this setup.
 
 - upstream=4:
   - endpoint: `http://localhost:65341/mcp`

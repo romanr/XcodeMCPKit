@@ -6,73 +6,88 @@ import Testing
 
 @Test func httpConcurrentInitializeRequests() async throws {
     let server = try TestHTTPServer.start()
-    defer { Task { await server.shutdown() } }
     let url = server.url
 
-    let count = 20
-    let results = try await runConcurrentInitialize(url: url, count: count)
+    do {
+        let count = 20
+        let results = try await runConcurrentInitialize(url: url, count: count)
 
-    #expect(Set(results.0).count == count)
-    #expect(Set(results.1).count == count)
+        #expect(Set(results.0).count == count)
+        #expect(Set(results.1).count == count)
+    } catch {
+        await server.shutdown()
+        throw error
+    }
+    await server.shutdown()
 }
 
 @Test func httpConcurrentInitializeStress() async throws {
     let count = Int(ProcessInfo.processInfo.environment["MCP_CONCURRENCY_STRESS_COUNT"] ?? "50") ?? 50
     let server = try TestHTTPServer.start()
-    defer { Task { await server.shutdown() } }
     let url = server.url
 
-    let results = try await runConcurrentInitialize(url: url, count: count)
+    do {
+        let results = try await runConcurrentInitialize(url: url, count: count)
 
-    #expect(Set(results.0).count == count)
-    #expect(Set(results.1).count == count)
+        #expect(Set(results.0).count == count)
+        #expect(Set(results.1).count == count)
+    } catch {
+        await server.shutdown()
+        throw error
+    }
+    await server.shutdown()
 }
 
 @Test func httpConcurrentRequestsShareSession() async throws {
     let server = try TestHTTPServer.start()
-    defer { Task { await server.shutdown() } }
     let url = server.url
 
-    let (initializeResponse, initializeBody) = try await postJSON(
-        url: url,
-        sessionId: nil,
-        payload: initializePayload(id: 1)
-    )
-    guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id") else {
-        throw ConcurrencyTestError.missingSessionId
-    }
-    let initId = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
-    #expect(initId == 1)
+    do {
+        let (initializeResponse, initializeBody) = try await postJSON(
+            url: url,
+            sessionId: nil,
+            payload: initializePayload(id: 1)
+        )
+        guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id") else {
+            throw ConcurrencyTestError.missingSessionId
+        }
+        let initId = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
+        #expect(initId == 1)
 
-    let count = 20
-    let responseIds = try await withThrowingTaskGroup(of: Int.self) { group in
-        for index in 0..<count {
-            group.addTask {
-                let payload: [String: Any] = [
-                    "jsonrpc": "2.0",
-                    "id": index + 100,
-                    "method": "tools/list",
-                ]
-                let (response, body) = try await postJSON(
-                    url: url,
-                    sessionId: sessionId,
-                    payload: payload
-                )
-                guard response.statusCode == 200 else {
-                    throw ConcurrencyTestError.invalidResponse
+        let count = 20
+        let responseIds = try await withThrowingTaskGroup(of: Int.self) { group in
+            for index in 0..<count {
+                group.addTask {
+                    let payload: [String: Any] = [
+                        "jsonrpc": "2.0",
+                        "id": index + 100,
+                        "method": "tools/list",
+                    ]
+                    let (response, body) = try await postJSON(
+                        url: url,
+                        sessionId: sessionId,
+                        payload: payload
+                    )
+                    guard response.statusCode == 200 else {
+                        throw ConcurrencyTestError.invalidResponse
+                    }
+                    return (body["id"] as? NSNumber)?.intValue ?? -1
                 }
-                return (body["id"] as? NSNumber)?.intValue ?? -1
             }
+
+            var ids: [Int] = []
+            for try await responseId in group {
+                ids.append(responseId)
+            }
+            return ids
         }
 
-        var ids: [Int] = []
-        for try await responseId in group {
-            ids.append(responseId)
-        }
-        return ids
+        #expect(Set(responseIds).count == count)
+    } catch {
+        await server.shutdown()
+        throw error
     }
-
-    #expect(Set(responseIds).count == count)
+    await server.shutdown()
 }
 
 private enum ConcurrencyTestError: Error {

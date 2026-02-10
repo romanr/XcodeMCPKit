@@ -28,6 +28,8 @@ protocol SessionManaging: Sendable {
     func removeSession(id: String)
     func shutdown()
     func isInitialized() -> Bool
+    func cachedToolsListResult() -> JSONValue?
+    func setCachedToolsListResult(_ result: JSONValue)
     func registerInitialize(
         originalId: RPCId,
         requestObject: [String: Any],
@@ -43,6 +45,12 @@ final class SessionManager: Sendable, SessionManaging {
         let eventLoop: EventLoop
         let promise: EventLoopPromise<ByteBuffer>
         let originalId: RPCId
+    }
+
+    private struct ToolsListState: Sendable {
+        var cachedResult: JSONValue?
+        var warmupInFlight = false
+        var didRefreshThisProcess = false
     }
 
     private struct SessionState: Sendable {
@@ -69,6 +77,7 @@ final class SessionManager: Sendable, SessionManaging {
     private let idMapper: UpstreamIdMapper
     private let config: ProxyConfig
     let upstreams: [any UpstreamClient]
+    private let toolsListState = NIOLockedValueBox(ToolsListState())
 
     private struct UpstreamState: Sendable {
         var isInitialized = false
@@ -98,6 +107,11 @@ final class SessionManager: Sendable, SessionManaging {
         self.eventLoop = eventLoop
         self.upstreams = upstreams
         self.idMapper = UpstreamIdMapper(upstreamCount: upstreams.count)
+        if let cached = ToolsListCache.read() {
+            toolsListState.withLockedValue { state in
+                state.cachedResult = cached
+            }
+        }
         upstreamState.withLockedValue { state in
             state.upstreamStates = Array(repeating: UpstreamState(), count: upstreams.count)
             state.nextPick = 0
@@ -198,6 +212,29 @@ final class SessionManager: Sendable, SessionManaging {
 
     func isInitialized() -> Bool {
         initState.withLockedValue { $0.initResult != nil }
+    }
+
+    func cachedToolsListResult() -> JSONValue? {
+        toolsListState.withLockedValue { state in
+            // We seed the cache from disk, but treat it as stale until we've successfully refreshed
+            // tools/list at least once in the current process.
+            guard state.didRefreshThisProcess else { return nil }
+            return state.cachedResult
+        }
+    }
+
+    func setCachedToolsListResult(_ result: JSONValue) {
+        let isValid = ToolsListCache.isValidToolsListResult(result)
+        toolsListState.withLockedValue { state in
+            if isValid {
+                state.cachedResult = result
+                state.didRefreshThisProcess = true
+            }
+            state.warmupInFlight = false
+        }
+
+        guard isValid else { return }
+        Task.detached { ToolsListCache.write(result) }
     }
 
     func chooseUpstreamIndex(sessionId _: String) -> Int {
@@ -556,6 +593,9 @@ final class SessionManager: Sendable, SessionManaging {
         if update.shouldWarmSecondary {
             warmUpSecondaryUpstreams()
         }
+
+        // Warm tools/list once so HTTP clients (Codex startup) don't pay the first-hit penalty.
+        startToolsListWarmupIfNeeded()
     }
 
     private func encodeInitializeResponse(originalId: RPCId, result: JSONValue) -> ByteBuffer? {
@@ -694,6 +734,87 @@ final class SessionManager: Sendable, SessionManaging {
         for upstreamIndex in 1..<upstreams.count {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
+    }
+
+    private func startToolsListWarmupIfNeeded() {
+        guard config.prewarmToolsList else { return }
+
+        let shouldStart = toolsListState.withLockedValue { state -> Bool in
+            // Even when we have a persisted cache from a previous run, warm once per process start so the
+            // cache can be refreshed after Xcode upgrades or tool changes.
+            if state.warmupInFlight {
+                return false
+            }
+            state.warmupInFlight = true
+            return true
+        }
+        guard shouldStart else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            await self.warmToolsList()
+        }
+    }
+
+    private func makeUniqueToolsListWarmupSessionId() -> String {
+        // Clients can provide arbitrary Mcp-Session-Id values. Use a UUID-backed internal ID
+        // and ensure it doesn't match any active session so warmup can't evict real client state.
+        var candidate: String
+        repeat {
+            candidate = "__tools_list_warmup__:" + UUID().uuidString
+        } while hasSession(id: candidate)
+        return candidate
+    }
+
+    private func warmToolsList() async {
+        let upstreamIndex = 0
+        let internalSessionId = makeUniqueToolsListWarmupSessionId()
+
+        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+            toolsListState.withLockedValue { $0.warmupInFlight = false }
+            return
+        }
+
+        let originalId = RPCId(any: NSNumber(value: 1))!
+        let warmupSession = session(id: internalSessionId)
+        let future = warmupSession.router.registerRequest(idKey: originalId.key, on: eventLoop)
+        let upstreamId = assignUpstreamId(
+            sessionId: internalSessionId,
+            originalId: originalId,
+            upstreamIndex: upstreamIndex
+        )
+
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": upstreamId,
+            "method": "tools/list",
+        ]
+        guard JSONSerialization.isValidJSONObject(request),
+              let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
+            toolsListState.withLockedValue { $0.warmupInFlight = false }
+            removeSession(id: internalSessionId)
+            return
+        }
+
+        sendUpstream(requestData, upstreamIndex: upstreamIndex)
+
+        do {
+            var buffer = try await future.get()
+            guard let responseData = buffer.readData(length: buffer.readableBytes),
+                  let response = try JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
+                  let resultAny = response["result"],
+                  let result = JSONValue(any: resultAny) else {
+                toolsListState.withLockedValue { $0.warmupInFlight = false }
+                removeSession(id: internalSessionId)
+                return
+            }
+
+            setCachedToolsListResult(result)
+        } catch {
+            toolsListState.withLockedValue { $0.warmupInFlight = false }
+        }
+
+        removeSession(id: internalSessionId)
     }
 
     private func startUpstreamWarmInitialize(upstreamIndex: Int) {
@@ -890,4 +1011,51 @@ private struct UpstreamMapping: Sendable {
     let sessionId: String?
     let originalId: RPCId?
     let isInitialize: Bool
+}
+
+private enum ToolsListCache {
+    static var fileURL: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        return (base ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
+            .appendingPathComponent("tools-list.json")
+    }
+
+    static func read() -> JSONValue? {
+        guard let data = try? Data(contentsOf: fileURL) else {
+            return nil
+        }
+        guard let any = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return nil
+        }
+        guard let value = JSONValue(any: any), isValidToolsListResult(value) else {
+            return nil
+        }
+        return value
+    }
+
+    static func isValidToolsListResult(_ value: JSONValue) -> Bool {
+        guard case .object(let object) = value else { return false }
+        guard let toolsValue = object["tools"] else { return false }
+        if case .array = toolsValue {
+            return true
+        }
+        return false
+    }
+
+    static func write(_ result: JSONValue) {
+        let object = result.foundationObject
+        guard JSONSerialization.isValidJSONObject(object) else {
+            return
+        }
+
+        do {
+            let directory = fileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            try data.write(to: fileURL, options: [.atomic])
+        } catch {
+            // Best-effort cache; ignore failures.
+        }
+    }
 }

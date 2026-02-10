@@ -226,6 +226,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private func handlePost(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
         let wantsEventStream = acceptsEventStream(head.headers)
         let wantsJSON = acceptsJSON(head.headers)
+        // Prefer JSON when the client accepts both. Some MCP clients advertise
+        // `text/event-stream` but expect JSON for ordinary request/response calls
+        // such as `initialize` and `tools/list`.
+        let prefersEventStream = wantsEventStream && !wantsJSON
         guard wantsEventStream || wantsJSON else {
             sendPlain(
                 on: context.channel,
@@ -269,42 +273,72 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let headerSessionExists = headerSessionId.map { sessionManager.hasSession(id: $0) } ?? false
 
         if let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
-           let method = object["method"] as? String,
-           method == "initialize" {
-            guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
-                sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
+           let method = object["method"] as? String {
+            if method == "initialize" {
+                guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
+                    sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
+                    return
+                }
+                let sessionId = headerSessionId ?? UUID().uuidString
+                _ = sessionManager.session(id: sessionId)
+                let future = sessionManager.registerInitialize(
+                    originalId: originalId,
+                    requestObject: object,
+                    on: context.eventLoop
+                )
+                let keepAlive = head.isKeepAlive
+                let channel = context.channel
+                future.whenComplete { result in
+                    switch result {
+                    case .success(let buffer):
+                        var buffer = buffer
+                        guard let data = buffer.readData(length: buffer.readableBytes) else {
+                            self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                            return
+                        }
+                        if prefersEventStream {
+                            self.sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                        } else {
+                            var out = channel.allocator.buffer(capacity: data.count)
+                            out.writeBytes(data)
+                            self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                        }
+                    case .failure:
+                        self.sendPlain(on: channel, status: .gatewayTimeout, body: "upstream timeout", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                    }
+                }
                 return
             }
-            let sessionId = headerSessionId ?? UUID().uuidString
-            _ = sessionManager.session(id: sessionId)
-            let future = sessionManager.registerInitialize(
-                originalId: originalId,
-                requestObject: object,
-                on: context.eventLoop
-            )
-            let keepAlive = head.isKeepAlive
-            let prefersEventStream = wantsEventStream
-            let channel = context.channel
-            future.whenComplete { result in
-                switch result {
-                case .success(let buffer):
-                    var buffer = buffer
-                    guard let data = buffer.readData(length: buffer.readableBytes) else {
-                        self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
-                        return
-                    }
+
+            // Serve cached tools/list only for the canonical no-params request.
+            // Some clients use params for pagination; serving a cached first page would be incorrect.
+            if method == "tools/list",
+               ToolsListCachePolicy.isCacheableParams(object["params"]),
+               let headerSessionId,
+               sessionManager.isInitialized(),
+               let cachedResult = sessionManager.cachedToolsListResult(),
+               let originalIdValue = object["id"],
+               let originalId = RPCId(any: originalIdValue) {
+                if headerSessionExists == false {
+                    _ = sessionManager.session(id: headerSessionId)
+                }
+                let response: [String: Any] = [
+                    "jsonrpc": "2.0",
+                    "id": originalId.value.foundationObject,
+                    "result": cachedResult.foundationObject,
+                ]
+                if JSONSerialization.isValidJSONObject(response),
+                   let data = try? JSONSerialization.data(withJSONObject: response, options: []) {
                     if prefersEventStream {
-                        self.sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                        sendSingleSSE(on: context.channel, data: data, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
                     } else {
-                        var out = channel.allocator.buffer(capacity: data.count)
+                        var out = context.channel.allocator.buffer(capacity: data.count)
                         out.writeBytes(data)
-                        self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                        sendJSON(on: context.channel, buffer: out, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
                     }
-                case .failure:
-                    self.sendPlain(on: channel, status: .gatewayTimeout, body: "upstream timeout", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                    return
                 }
             }
-            return
         }
 
         if let headerSessionId, !headerSessionExists {
@@ -375,7 +409,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             sessionManager.sendUpstream(transform.upstreamData, upstreamIndex: upstreamIndex)
             let keepAlive = head.isKeepAlive
             let sessionIdCopy = sessionId
-            let prefersEventStream = wantsEventStream
             let channel = context.channel
             future.whenComplete { result in
                 switch result {
@@ -384,6 +417,12 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     guard let data = buffer.readData(length: buffer.readableBytes) else {
                         self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                         return
+                    }
+                    if transform.isCacheableToolsListRequest,
+                       let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                       let resultAny = object["result"],
+                       let result = JSONValue(any: resultAny) {
+                        self.sessionManager.setCachedToolsListResult(result)
                     }
                     if prefersEventStream {
                         self.sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
@@ -574,6 +613,8 @@ struct RequestTransform {
     let isBatch: Bool
     let idKey: String?
     let method: String?
+    let originalId: RPCId?
+    let isCacheableToolsListRequest: Bool
 }
 
 enum RequestInspector {
@@ -585,6 +626,8 @@ enum RequestInspector {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
             let method = object["method"] as? String
+            let isCacheableToolsListRequest = (method == "tools/list")
+                && ToolsListCachePolicy.isCacheableParams(object["params"])
             if let id = object["id"], let rpcId = RPCId(any: id) {
                 let upstreamId = mapId(sessionId, rpcId)
                 object["id"] = upstreamId
@@ -594,7 +637,9 @@ enum RequestInspector {
                     expectsResponse: true,
                     isBatch: false,
                     idKey: rpcId.key,
-                    method: method
+                    method: method,
+                    originalId: rpcId,
+                    isCacheableToolsListRequest: isCacheableToolsListRequest
                 )
             }
             let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
@@ -603,7 +648,9 @@ enum RequestInspector {
                 expectsResponse: false,
                 isBatch: false,
                 idKey: nil,
-                method: method
+                method: method,
+                originalId: nil,
+                isCacheableToolsListRequest: isCacheableToolsListRequest
             )
         }
 
@@ -628,7 +675,9 @@ enum RequestInspector {
                 expectsResponse: hasRequest,
                 isBatch: true,
                 idKey: nil,
-                method: nil
+                method: nil,
+                originalId: nil,
+                isCacheableToolsListRequest: false
             )
         }
 
@@ -637,7 +686,19 @@ enum RequestInspector {
             expectsResponse: false,
             isBatch: false,
             idKey: nil,
-            method: nil
+            method: nil,
+            originalId: nil,
+            isCacheableToolsListRequest: false
         )
+    }
+}
+
+fileprivate enum ToolsListCachePolicy {
+    static func isCacheableParams(_ params: Any?) -> Bool {
+        guard let params else { return true }
+        if params is NSNull { return true }
+        if let object = params as? [String: Any] { return object.isEmpty }
+        if let array = params as? [Any] { return array.isEmpty }
+        return false
     }
 }

@@ -404,7 +404,29 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId)
+        let shouldPinUpstream: Bool = {
+            guard let any = try? JSONSerialization.jsonObject(with: bodyData, options: []) else {
+                return false
+            }
+            if let object = any as? [String: Any] {
+                guard let method = object["method"] as? String, method != "initialize" else {
+                    return false
+                }
+                return object["id"] != nil && !(object["id"] is NSNull)
+            }
+            if let array = any as? [Any] {
+                for item in array {
+                    guard let object = item as? [String: Any] else { continue }
+                    guard let method = object["method"] as? String, method != "initialize" else { continue }
+                    if let id = object["id"], !(id is NSNull) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }()
+
+        let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: shouldPinUpstream)
 
         let transform: RequestTransform
         do {

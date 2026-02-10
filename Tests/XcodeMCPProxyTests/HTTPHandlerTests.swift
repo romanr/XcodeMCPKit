@@ -750,7 +750,7 @@ private final class TestSessionManager: SessionManaging {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
-    func chooseUpstreamIndex(sessionId _: String) -> Int { 0 }
+    func chooseUpstreamIndex(sessionId _: String, shouldPin _: Bool) -> Int { 0 }
 
     func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex _: Int) -> Int64 {
         state.withLockedValue { state in

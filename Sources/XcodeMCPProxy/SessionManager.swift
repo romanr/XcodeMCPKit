@@ -552,28 +552,71 @@ final class SessionManager: Sendable, SessionManaging {
         return nil
     }
 
+    private func isServerInitiatedMessage(_ value: Any) -> Bool {
+        if let object = value as? [String: Any] {
+            return object["method"] is String
+        }
+        if let array = value as? [Any] {
+            return array.contains { item in
+                guard let object = item as? [String: Any] else { return false }
+                return object["method"] is String
+            }
+        }
+        return false
+    }
+
     private func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
         // We have no id-based mapping for this upstream message, so we can't unambiguously route it to a
         // single session. To reduce cross-talk across multiple concurrent agents, only deliver it to
-        // sessions pinned to the same upstream.
-        let targets = sessionsState.withLockedValue { state in
-            state.sessions.values.compactMap { record in
-                record.pinnedUpstreamIndex == upstreamIndex ? record.context : nil
+        // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
+        // deliver server-initiated notifications/requests to unpinned sessions so they don't miss
+        // pre-pin messages.
+        let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue { state -> ([SessionContext], [SessionContext]) in
+            var pinned: [SessionContext] = []
+            var unpinned: [SessionContext] = []
+            pinned.reserveCapacity(state.sessions.count)
+            unpinned.reserveCapacity(state.sessions.count)
+            for record in state.sessions.values {
+                if record.pinnedUpstreamIndex == upstreamIndex {
+                    pinned.append(record.context)
+                } else if record.pinnedUpstreamIndex == nil {
+                    unpinned.append(record.context)
+                }
             }
+            return (pinned, unpinned)
         }
-        guard !targets.isEmpty else {
+
+        if !pinnedTargets.isEmpty {
+            for session in pinnedTargets {
+                session.router.handleIncoming(data)
+            }
+            return
+        }
+
+        if let any = try? JSONSerialization.jsonObject(with: data, options: []),
+           isServerInitiatedMessage(any),
+           !unpinnedTargets.isEmpty {
             logger.debug(
-                "Dropping unmapped upstream message (no pinned sessions)",
+                "Routing unmapped upstream message to unpinned sessions",
                 metadata: [
                     "upstream": .string("\(upstreamIndex)"),
                     "bytes": .string("\(data.count)"),
+                    "targets": .string("\(unpinnedTargets.count)"),
                 ]
             )
+            for session in unpinnedTargets {
+                session.router.handleIncoming(data)
+            }
             return
         }
-        for session in targets {
-            session.router.handleIncoming(data)
-        }
+
+        logger.debug(
+            "Dropping unmapped upstream message (no pinned sessions)",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "bytes": .string("\(data.count)"),
+            ]
+        )
     }
 
     private func startEagerInitializePrimary() {

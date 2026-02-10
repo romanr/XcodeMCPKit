@@ -407,6 +407,53 @@ import Testing
     #expect(receivedOther.isEmpty)
 }
 
+@Test func sessionManagerRoutesUnmappedNotificationsToUnpinnedSessionsWhenNoPinnedTargetsExist() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    // Create a session, but do not pin it yet.
+    let sessionId = "session-A"
+    let session = manager.session(id: sessionId)
+
+    // Ensure we're starting from a clean buffer state.
+    _ = session.router.drainBufferedNotifications()
+
+    let notification = try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/test",
+            "params": ["value": 1],
+        ],
+        options: []
+    )
+
+    await yieldMessage(notification, to: upstream0)
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let received = session.router.drainBufferedNotifications()
+    #expect(received.count == 1)
+    #expect(received.first == notification)
+}
+
 @Test func sessionManagerRepinsAfterUpstreamExit() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }

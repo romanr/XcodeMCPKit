@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import NIOConcurrencyHelpers
 
@@ -35,7 +36,7 @@ protocol SessionManaging: Sendable {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
-    func chooseUpstreamIndex(sessionId: String) -> Int
+    func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int
     func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64
     func sendUpstream(_ data: Data, upstreamIndex: Int)
 }
@@ -54,7 +55,12 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private struct SessionState: Sendable {
-        var sessions: [String: SessionContext] = [:]
+        struct SessionRecord: Sendable {
+            let context: SessionContext
+            var pinnedUpstreamIndex: Int?
+        }
+
+        var sessions: [String: SessionRecord] = [:]
     }
 
     private struct InitState: Sendable {
@@ -76,6 +82,7 @@ final class SessionManager: Sendable, SessionManaging {
     private let eventLoop: EventLoop
     private let idMapper: UpstreamIdMapper
     private let config: ProxyConfig
+    private let logger: Logger = ProxyLogging.make("session")
     let upstreams: [any UpstreamClient]
     private let toolsListState = NIOLockedValueBox(ToolsListState())
 
@@ -148,10 +155,10 @@ final class SessionManager: Sendable, SessionManaging {
     func session(id: String) -> SessionContext {
         sessionsState.withLockedValue { state in
             if let existing = state.sessions[id] {
-                return existing
+                return existing.context
             }
             let context = SessionContext(id: id, config: config)
-            state.sessions[id] = context
+            state.sessions[id] = SessionState.SessionRecord(context: context, pinnedUpstreamIndex: nil)
             return context
         }
     }
@@ -164,7 +171,7 @@ final class SessionManager: Sendable, SessionManaging {
 
     func removeSession(id: String) {
         let context = sessionsState.withLockedValue { state in
-            state.sessions.removeValue(forKey: id)
+            state.sessions.removeValue(forKey: id)?.context
         }
         context?.notificationHub.closeAll()
     }
@@ -237,8 +244,29 @@ final class SessionManager: Sendable, SessionManaging {
         Task.detached { ToolsListCache.write(result) }
     }
 
-    func chooseUpstreamIndex(sessionId _: String) -> Int {
-        upstreamState.withLockedValue { state in
+    func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int {
+        // If we already pinned this session to an initialized upstream, always stick to it.
+        // This reduces cross-talk between multiple concurrent clients sharing the same proxy.
+        var pinned = sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.pinnedUpstreamIndex
+        }
+        if let pinnedIndex = pinned {
+            let isInitialized = upstreamState.withLockedValue { state in
+                guard pinnedIndex >= 0, pinnedIndex < state.upstreamStates.count else { return false }
+                return state.upstreamStates[pinnedIndex].isInitialized
+            }
+            if isInitialized {
+                return pinnedIndex
+            }
+
+            // Upstream is no longer usable; clear the pin so we can re-pick.
+            sessionsState.withLockedValue { state in
+                state.sessions[sessionId]?.pinnedUpstreamIndex = nil
+            }
+            pinned = nil
+        }
+
+        let chosen = upstreamState.withLockedValue { state in
             let count = state.upstreamStates.count
             guard count > 0 else { return 0 }
 
@@ -253,6 +281,16 @@ final class SessionManager: Sendable, SessionManaging {
             }
             return 0
         }
+
+        // Only persist the pin when asked. We typically pin on the first non-initialize JSON-RPC request
+        // (method + id), not on notifications.
+        if pinned == nil, shouldPin {
+            sessionsState.withLockedValue { state in
+                state.sessions[sessionId]?.pinnedUpstreamIndex = chosen
+            }
+        }
+
+        return chosen
     }
 
     func registerInitialize(
@@ -330,7 +368,7 @@ final class SessionManager: Sendable, SessionManaging {
 
     private func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            broadcastToAllSessions(data)
+            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
             return
         }
 
@@ -382,7 +420,7 @@ final class SessionManager: Sendable, SessionManaging {
             }
         }
 
-        broadcastToAllSessions(data)
+        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
     }
 
     private func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
@@ -421,6 +459,23 @@ final class SessionManager: Sendable, SessionManaging {
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
         idMapper.reset(upstreamIndex: upstreamIndex)
+
+        // Any sessions pinned to this upstream can no longer rely on it. Clear their pin so the next
+        // request will re-pick a live upstream.
+        let clearedPins = sessionsState.withLockedValue { state -> Int in
+            let keys = Array(state.sessions.keys)
+            var cleared = 0
+            for key in keys {
+                if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
+                    state.sessions[key]?.pinnedUpstreamIndex = nil
+                    cleared += 1
+                }
+            }
+            return cleared
+        }
+        if clearedPins > 0 {
+            logger.debug("Cleared pinned sessions for exited upstream", metadata: ["upstream": .string("\(upstreamIndex)"), "cleared": .string("\(clearedPins)")])
+        }
 
         // If an upstream dies after a successful global initialize and there are no remaining
         // initialized upstreams, drop the cached init result. Otherwise, new downstream initialize
@@ -497,13 +552,71 @@ final class SessionManager: Sendable, SessionManaging {
         return nil
     }
 
-    private func broadcastToAllSessions(_ data: Data) {
-        let snapshot = sessionsState.withLockedValue { state in
-            Array(state.sessions.values)
+    private func isServerInitiatedMessage(_ value: Any) -> Bool {
+        if let object = value as? [String: Any] {
+            return object["method"] is String
         }
-        for session in snapshot {
-            session.router.handleIncoming(data)
+        if let array = value as? [Any] {
+            return array.contains { item in
+                guard let object = item as? [String: Any] else { return false }
+                return object["method"] is String
+            }
         }
+        return false
+    }
+
+    private func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+        // We have no id-based mapping for this upstream message, so we can't unambiguously route it to a
+        // single session. To reduce cross-talk across multiple concurrent agents, only deliver it to
+        // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
+        // deliver server-initiated notifications/requests to unpinned sessions so they don't miss
+        // pre-pin messages.
+        let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue { state -> ([SessionContext], [SessionContext]) in
+            var pinned: [SessionContext] = []
+            var unpinned: [SessionContext] = []
+            pinned.reserveCapacity(state.sessions.count)
+            unpinned.reserveCapacity(state.sessions.count)
+            for record in state.sessions.values {
+                if record.pinnedUpstreamIndex == upstreamIndex {
+                    pinned.append(record.context)
+                } else if record.pinnedUpstreamIndex == nil {
+                    unpinned.append(record.context)
+                }
+            }
+            return (pinned, unpinned)
+        }
+
+        if !pinnedTargets.isEmpty {
+            for session in pinnedTargets {
+                session.router.handleIncoming(data)
+            }
+            return
+        }
+
+        if let any = try? JSONSerialization.jsonObject(with: data, options: []),
+           isServerInitiatedMessage(any),
+           !unpinnedTargets.isEmpty {
+            logger.debug(
+                "Routing unmapped upstream message to unpinned sessions",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                    "targets": .string("\(unpinnedTargets.count)"),
+                ]
+            )
+            for session in unpinnedTargets {
+                session.router.handleIncoming(data)
+            }
+            return
+        }
+
+        logger.debug(
+            "Dropping unmapped upstream message (no pinned sessions)",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "bytes": .string("\(data.count)"),
+            ]
+        )
     }
 
     private func startEagerInitializePrimary() {

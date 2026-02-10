@@ -211,6 +211,13 @@ import Testing
     await upstream1.yield(.exit(1))
     await Task.yield()
 
+    // Ensure the cached init result is cleared before asserting that a new downstream initialize
+    // triggers a fresh upstream initialize. This avoids race/flakiness where the exit event hasn't
+    // been processed yet on the event loop.
+    try await waitForCondition(timeoutSeconds: 2) {
+        manager.isInitialized() == false
+    }
+
     // A new downstream initialize must trigger a new upstream initialize (no cached response).
     let init2 = manager.registerInitialize(
         originalId: RPCId(any: NSNumber(value: 2))!,
@@ -270,7 +277,7 @@ import Testing
     try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
 }
 
-@Test func sessionManagerRoutesRequestsRoundRobinAcrossUpstreams() async throws {
+@Test func sessionManagerPinsSessionsRoundRobinAcrossUpstreams() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }
     let eventLoop = group.next()
@@ -295,27 +302,29 @@ import Testing
     try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
     try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-    let sessionId = "session-1"
-    let session = manager.session(id: sessionId)
+    let sessionIdA = "session-A"
+    let sessionIdB = "session-B"
+    let sessionA = manager.session(id: sessionIdA)
+    let sessionB = manager.session(id: sessionIdB)
 
     let originalA = RPCId(any: NSNumber(value: 100))!
     let originalB = RPCId(any: NSNumber(value: 101))!
 
-    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionId)
-    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionId)
+    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
+    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true)
     #expect(upstreamIndexA != upstreamIndexB)
 
-    let futureA = session.router.registerRequest(idKey: originalA.key, on: eventLoop)
+    let futureA = sessionA.router.registerRequest(idKey: originalA.key, on: eventLoop)
     let upstreamIdA = manager.assignUpstreamId(
-        sessionId: sessionId,
+        sessionId: sessionIdA,
         originalId: originalA,
         upstreamIndex: upstreamIndexA
     )
     manager.sendUpstream(try makeToolListRequest(id: upstreamIdA), upstreamIndex: upstreamIndexA)
 
-    let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
+    let futureB = sessionB.router.registerRequest(idKey: originalB.key, on: eventLoop)
     let upstreamIdB = manager.assignUpstreamId(
-        sessionId: sessionId,
+        sessionId: sessionIdB,
         originalId: originalB,
         upstreamIndex: upstreamIndexB
     )
@@ -337,6 +346,155 @@ import Testing
     let methods1 = await upstream1.sent().compactMap(methodName(from:))
     #expect(methods0.filter { $0 == "tools/list" }.count == 1)
     #expect(methods1.filter { $0 == "tools/list" }.count == 1)
+}
+
+@Test func sessionManagerRoutesUnmappedNotificationsToPinnedSessionsOnly() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    // Create two sessions and pin them to different upstreams.
+    let sessionIdA = "session-A"
+    let sessionIdB = "session-B"
+    let sessionA = manager.session(id: sessionIdA)
+    let sessionB = manager.session(id: sessionIdB)
+
+    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
+    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true)
+    #expect(upstreamIndexA != upstreamIndexB)
+
+    // Ensure we're starting from a clean buffer state.
+    _ = sessionA.router.drainBufferedNotifications()
+    _ = sessionB.router.drainBufferedNotifications()
+
+    let notification = try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/test",
+            "params": ["value": 1],
+        ],
+        options: []
+    )
+
+    await yieldMessage(notification, to: upstream0)
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let pinnedTo0 = upstreamIndexA == 0 ? sessionA : sessionB
+    let notPinnedTo0 = upstreamIndexA == 0 ? sessionB : sessionA
+
+    let receivedPinned = pinnedTo0.router.drainBufferedNotifications()
+    let receivedOther = notPinnedTo0.router.drainBufferedNotifications()
+    #expect(receivedPinned.count == 1)
+    #expect(receivedPinned.first == notification)
+    #expect(receivedOther.isEmpty)
+}
+
+@Test func sessionManagerRoutesUnmappedNotificationsToUnpinnedSessionsWhenNoPinnedTargetsExist() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    // Create a session, but do not pin it yet.
+    let sessionId = "session-A"
+    let session = manager.session(id: sessionId)
+
+    // Ensure we're starting from a clean buffer state.
+    _ = session.router.drainBufferedNotifications()
+
+    let notification = try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/test",
+            "params": ["value": 1],
+        ],
+        options: []
+    )
+
+    await yieldMessage(notification, to: upstream0)
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let received = session.router.drainBufferedNotifications()
+    #expect(received.count == 1)
+    #expect(received.first == notification)
+}
+
+@Test func sessionManagerRepinsAfterUpstreamExit() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    // Pin two sessions to different upstreams.
+    let sessionIdA = "session-A"
+    let sessionIdB = "session-B"
+    _ = manager.session(id: sessionIdA)
+    _ = manager.session(id: sessionIdB)
+
+    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
+    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true)
+    #expect(upstreamIndexA != upstreamIndexB)
+
+    let pinnedTo1SessionId = upstreamIndexA == 1 ? sessionIdA : sessionIdB
+    #expect(manager.chooseUpstreamIndex(sessionId: pinnedTo1SessionId, shouldPin: true) == 1)
+
+    await upstream1.yield(.exit(1))
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let repinned = manager.chooseUpstreamIndex(sessionId: pinnedTo1SessionId, shouldPin: true)
+    #expect(repinned == 0)
 }
 
 @Test func sessionManagerExitClearsMappingsAndKeepsServingOnOtherUpstreams() async throws {
@@ -374,7 +532,7 @@ import Testing
     // The proxy should continue serving on upstream0.
     let originalB = RPCId(any: NSNumber(value: 201))!
     let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
-    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionId)
+    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true)
     #expect(upstreamIndexB == 0)
     let upstreamIdB = manager.assignUpstreamId(sessionId: sessionId, originalId: originalB, upstreamIndex: upstreamIndexB)
     manager.sendUpstream(try makeToolListRequest(id: upstreamIdB), upstreamIndex: upstreamIndexB)

@@ -979,6 +979,13 @@ final class SessionManager: Sendable, SessionManaging {
             toolsListState.withLockedValue { $0.warmupInFlight = false }
         }
 
+        // Intentionally keep the background tools/list refresh fail-fast.
+        //
+        // This code path is stale-while-revalidate: callers already got a cached tools/list response.
+        // Using a long `config.requestTimeout` here would let slow/hung upstreams hold refresh (and
+        // upstream health feedback) hostage, increasing startup latency and routing churn.
+        //
+        // Forwarded client requests still use `config.requestTimeout`; this refresh is best-effort.
         let refreshTimeout: TimeAmount = .seconds(5)
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         let internalSessionId = toolsListInternalSessionId()

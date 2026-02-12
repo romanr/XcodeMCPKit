@@ -184,6 +184,15 @@ actor UpstreamProcess: UpstreamClient {
         guard !isStopping else {
             return
         }
+
+        // If we're terminating an old process (e.g. via requestRestart) and a replacement process is
+        // already running, suppress the exit event. Otherwise, SessionManager will treat this as an
+        // upstream outage and clear pins/mappings for an upstream that is actually healthy.
+        if wasTerminating, process != nil {
+            logger.debug("Upstream process exited (superseded)", metadata: ["status": "\(status)"])
+            return
+        }
+
         logger.warning("Upstream process exited", metadata: ["status": "\(status)"])
         continuation.yield(.exit(status))
         // If a replacement process is already running, don't schedule another restart.

@@ -49,6 +49,23 @@ actor UpstreamProcess: UpstreamClient {
         continuation.finish()
     }
 
+    func requestRestart() async {
+        guard !isStopping else { return }
+        restartTask?.cancel()
+        restartTask = nil
+
+        // If we're already down (or never started), just start immediately.
+        if process == nil {
+            startLocked()
+            return
+        }
+
+        logger.warning("Upstream restart requested")
+        restartDelay = config.restartInitialDelay
+        stopLocked()
+        // The termination handler will emit an .exit event and schedule a restart.
+    }
+
     func send(_ data: Data) async {
         if process == nil {
             startLocked()

@@ -327,9 +327,10 @@ import Testing
     #expect(sessionManager.assignedUpstreamIdCount() == 0)
     #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
     #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+    #expect(sessionManager.refreshToolsListCallCount() == 1)
 }
 
-@Test func httpToolsListForwardsWhenParamsArePresentEvenIfCacheExists() async throws {
+@Test func httpToolsListUsesCachedResultWhenParamsArePresent() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
@@ -363,7 +364,7 @@ import Testing
     let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
     #expect(sessionId?.isEmpty == false)
 
-    // tools/list with params should not be served from cache.
+    // tools/list with params should still be served from cache (Codex startup stability).
     let toolsPayload: [String: Any] = [
         "jsonrpc": "2.0",
         "id": 2,
@@ -384,8 +385,22 @@ import Testing
     try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-    #expect(sessionManager.sentUpstreamCount() == 1)
-    #expect(sessionManager.assignedUpstreamIdCount() == 1)
+    let toolsResponse = try collectResponse(from: channel)
+    #expect(toolsResponse.head.status == .ok)
+
+    let responseObject = try JSONSerialization.jsonObject(with: Data(toolsResponse.body.utf8), options: []) as? [String: Any]
+    let responseId = (responseObject?["id"] as? NSNumber)?.intValue
+    #expect(responseId == 2)
+
+    let result = responseObject?["result"] as? [String: Any]
+    let tools = result?["tools"] as? [Any]
+    #expect(tools?.count == 0)
+
+    #expect(sessionManager.sentUpstreamCount() == 0)
+    #expect(sessionManager.assignedUpstreamIdCount() == 0)
+    #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+    #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+    #expect(sessionManager.refreshToolsListCallCount() == 1)
 }
 
 @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
@@ -678,6 +693,7 @@ private final class TestSessionManager: SessionManaging {
         var assignUpstreamIdCount = 0
         var initialized = false
         var cachedToolsList: JSONValue?
+        var refreshToolsListCalls = 0
         var upstreamSendCount = 0
         var upstreamIdMapping: [Int64: UpstreamMapping] = [:]
         var chooseUpstreamCalls: [ChooseUpstreamCall] = []
@@ -734,6 +750,12 @@ private final class TestSessionManager: SessionManaging {
     func setCachedToolsListResult(_ result: JSONValue) {
         state.withLockedValue { state in
             state.cachedToolsList = result
+        }
+    }
+
+    func refreshToolsListIfNeeded() {
+        state.withLockedValue { state in
+            state.refreshToolsListCalls += 1
         }
     }
 
@@ -813,6 +835,10 @@ private final class TestSessionManager: SessionManaging {
 
     func lastChooseUpstreamShouldPin() -> Bool {
         state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
+    }
+
+    func refreshToolsListCallCount() -> Int {
+        state.withLockedValue { $0.refreshToolsListCalls }
     }
 }
 

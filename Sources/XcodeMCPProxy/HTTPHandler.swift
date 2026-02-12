@@ -355,10 +355,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
 
-            // Serve cached tools/list only for the canonical no-params request.
-            // Some clients use params for pagination; serving a cached first page would be incorrect.
+            // Serve cached tools/list regardless of params. Some clients attach pagination-like params,
+            // but Codex startup expects a full tool list quickly; stability wins over strict pagination.
             if method == "tools/list",
-               ToolsListCachePolicy.isCacheableParams(object["params"]),
                let headerSessionId,
                sessionManager.isInitialized(),
                let cachedResult = sessionManager.cachedToolsListResult(),
@@ -367,9 +366,23 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 if headerSessionExists == false {
                     _ = sessionManager.session(id: headerSessionId)
                 }
+                let hasParams: Bool = {
+                    guard let params = object["params"] else { return false }
+                    return !(params is NSNull)
+                }()
                 // Even when tools/list is served from cache, pin the session so later upstream messages
                 // route consistently instead of fanning out across unpinned sessions.
-                _ = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
+                let pinnedUpstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
+                logger.debug(
+                    "tools/list cache hit",
+                    metadata: [
+                        "session": .string(headerSessionId),
+                        "has_params": .string(hasParams ? "true" : "false"),
+                        "pinned_upstream": .string("\(pinnedUpstreamIndex)"),
+                    ]
+                )
+                // Refresh in the background (stale-while-revalidate).
+                sessionManager.refreshToolsListIfNeeded()
                 let response: [String: Any] = [
                     "jsonrpc": "2.0",
                     "id": originalId.value.foundationObject,
@@ -447,6 +460,22 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         } catch {
             sendPlain(on: context.channel, status: .badRequest, body: "invalid json", keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             return
+        }
+
+        if transform.method == "tools/list" {
+            let hasCache = sessionManager.cachedToolsListResult() != nil
+            let params = (try? JSONSerialization.jsonObject(with: bodyData, options: []))
+                .flatMap { $0 as? [String: Any] }?["params"]
+            let hasParams = params != nil && !(params is NSNull)
+            logger.debug(
+                "tools/list cache miss; forwarding upstream",
+                metadata: [
+                    "session": .string(sessionId),
+                    "has_cache": .string(hasCache ? "true" : "false"),
+                    "has_params": .string(hasParams ? "true" : "false"),
+                    "upstream": .string("\(upstreamIndex)"),
+                ]
+            )
         }
 
         if headerSessionId == nil {

@@ -13,15 +13,17 @@ final class StdioFramer {
                 messages.append(message)
                 continue
             }
-            let lines = nextNDJSONMessages()
-            if lines.isEmpty {
-                if let message = nextJSONValueMessage() {
-                    messages.append(message)
-                    continue
-                }
-                break
+            if let message = nextJSONValueMessage() {
+                messages.append(message)
+                continue
             }
-            messages.append(contentsOf: lines)
+            if trimLeadingWhitespace() {
+                continue
+            }
+            if dropLeadingNonJSONLine() {
+                continue
+            }
+            break
         }
 
         return messages
@@ -61,29 +63,6 @@ final class StdioFramer {
         let message = buffer.subdata(in: bodyRange)
         buffer.removeSubrange(0..<(headerEndIndex + length))
         return message
-    }
-
-    private func nextNDJSONMessages() -> [Data] {
-        guard let lastNewline = buffer.lastIndex(of: 0x0A) else { return [] }
-        let endIndex = buffer.index(after: lastNewline)
-        let completeData = buffer.subdata(in: 0..<endIndex)
-        buffer.removeSubrange(0..<endIndex)
-
-        var messages: [Data] = []
-        var startIndex = completeData.startIndex
-        for index in completeData.indices where completeData[index] == 0x0A {
-            let lineData = completeData.subdata(in: startIndex..<index)
-            startIndex = completeData.index(after: index)
-            let trimmed = trimTrailingCR(lineData)
-            if trimmed.isEmpty { continue }
-            messages.append(trimmed)
-        }
-        return messages
-    }
-
-    private func trimTrailingCR(_ data: Data) -> Data {
-        guard let last = data.last, last == 0x0D else { return data }
-        return data.dropLast()
     }
 
     private func nextJSONValueMessage() -> Data? {
@@ -133,6 +112,61 @@ final class StdioFramer {
         let message = buffer.subdata(in: startIndex..<messageEnd)
         buffer.removeSubrange(0..<messageEnd)
         return message
+    }
+
+    private func trimLeadingWhitespace() -> Bool {
+        guard !buffer.isEmpty else { return false }
+        var index = buffer.startIndex
+        while index < buffer.endIndex, isWhitespace(buffer[index]) {
+            index = buffer.index(after: index)
+        }
+        if index == buffer.startIndex {
+            return false
+        }
+        if index == buffer.endIndex {
+            buffer.removeAll(keepingCapacity: true)
+            return true
+        }
+        buffer.removeSubrange(0..<index)
+        return true
+    }
+
+    private func dropLeadingNonJSONLine() -> Bool {
+        guard !buffer.isEmpty else { return false }
+
+        // If we're at the start of a (possibly partial) Content-Length header, wait for more bytes.
+        if isPotentialContentLengthHeaderPrefix() {
+            return false
+        }
+
+        // If the first non-whitespace token looks like JSON, don't drop anything; we might just be
+        // waiting for the rest of a multi-line JSON value.
+        if let first = firstNonWhitespaceByte(), first == 0x7B || first == 0x5B {
+            return false
+        }
+
+        // Drop exactly one line of non-JSON stdout so we don't get stuck on accidental log output.
+        guard let newlineIndex = buffer.firstIndex(of: 0x0A) else { return false }
+        let dropEnd = buffer.index(after: newlineIndex)
+        buffer.removeSubrange(0..<dropEnd)
+        return true
+    }
+
+    private func firstNonWhitespaceByte() -> UInt8? {
+        var index = buffer.startIndex
+        while index < buffer.endIndex, isWhitespace(buffer[index]) {
+            index = buffer.index(after: index)
+        }
+        guard index < buffer.endIndex else { return nil }
+        return buffer[index]
+    }
+
+    private func isPotentialContentLengthHeaderPrefix() -> Bool {
+        let headerPrefix = "Content-Length"
+        let count = min(buffer.count, headerPrefix.utf8.count)
+        guard count > 0 else { return false }
+        guard let prefix = String(data: buffer.prefix(count), encoding: .utf8) else { return false }
+        return headerPrefix.lowercased().hasPrefix(prefix.lowercased())
     }
 
     private func isWhitespace(_ byte: UInt8) -> Bool {

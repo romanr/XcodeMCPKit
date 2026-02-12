@@ -617,6 +617,54 @@ final class SessionManager: Sendable, SessionManaging {
         // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
         // deliver server-initiated notifications/requests to unpinned sessions so they don't miss
         // pre-pin messages.
+        //
+        // Never forward unmapped JSON-RPC responses (no `method`) to sessions: if we dropped a mapping
+        // due to timeouts (e.g. a best-effort tools/list warmup) then a late response must not leak
+        // into active client streams.
+        guard let any = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            logger.debug(
+                "Dropping unmapped upstream message (invalid JSON)",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                ]
+            )
+            return
+        }
+
+        let serverInitiatedPayloads: [Data] = {
+            if let object = any as? [String: Any] {
+                guard object["method"] is String else { return [] }
+                return [data]
+            }
+            if let array = any as? [Any] {
+                var payloads: [Data] = []
+                payloads.reserveCapacity(array.count)
+                for item in array {
+                    guard let object = item as? [String: Any],
+                          object["method"] is String,
+                          JSONSerialization.isValidJSONObject(object),
+                          let encoded = try? JSONSerialization.data(withJSONObject: object, options: []) else {
+                        continue
+                    }
+                    payloads.append(encoded)
+                }
+                return payloads
+            }
+            return []
+        }()
+
+        guard !serverInitiatedPayloads.isEmpty else {
+            logger.debug(
+                "Dropping unmapped upstream response",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                ]
+            )
+            return
+        }
+
         let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue { state -> ([SessionContext], [SessionContext]) in
             var pinned: [SessionContext] = []
             var unpinned: [SessionContext] = []
@@ -633,15 +681,15 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         if !pinnedTargets.isEmpty {
-            for session in pinnedTargets {
-                session.router.handleIncoming(data)
+            for payload in serverInitiatedPayloads {
+                for session in pinnedTargets {
+                    session.router.handleIncoming(payload)
+                }
             }
             return
         }
 
-        if let any = try? JSONSerialization.jsonObject(with: data, options: []),
-           isServerInitiatedMessage(any),
-           !unpinnedTargets.isEmpty {
+        if !unpinnedTargets.isEmpty {
             logger.debug(
                 "Routing unmapped upstream message to unpinned sessions",
                 metadata: [
@@ -650,14 +698,16 @@ final class SessionManager: Sendable, SessionManaging {
                     "targets": .string("\(unpinnedTargets.count)"),
                 ]
             )
-            for session in unpinnedTargets {
-                session.router.handleIncoming(data)
+            for payload in serverInitiatedPayloads {
+                for session in unpinnedTargets {
+                    session.router.handleIncoming(payload)
+                }
             }
             return
         }
 
         logger.debug(
-            "Dropping unmapped upstream message (no pinned sessions)",
+            "Dropping unmapped upstream message (no target sessions)",
             metadata: [
                 "upstream": .string("\(upstreamIndex)"),
                 "bytes": .string("\(data.count)"),

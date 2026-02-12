@@ -454,6 +454,27 @@ import Testing
     #expect(received.first == notification)
 }
 
+@Test func sessionManagerDropsUnmappedResponsesEvenWhenPinnedTargetsExist() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+    let sessionId = "session-A"
+    let session = manager.session(id: sessionId)
+    _ = manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true)
+
+    _ = session.router.drainBufferedNotifications()
+
+    // Unmapped JSON-RPC response (no `method`) must never be routed to sessions.
+    await yieldMessage(try makeToolListResponse(id: 9_999_999), to: upstream)
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    #expect(session.router.drainBufferedNotifications().isEmpty)
+}
+
 @Test func sessionManagerPinsFallbackUpstreamEvenWhenUnhealthy() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }

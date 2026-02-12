@@ -779,8 +779,9 @@ enum RequestInspector {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
             let method = object["method"] as? String
+            // We intentionally treat tools/list as stable and cache it regardless of params.
+            // Some clients attach pagination-like params even when they expect the full list.
             let isCacheableToolsListRequest = (method == "tools/list")
-                && ToolsListCachePolicy.isCacheableParams(object["params"])
             if let id = object["id"], let rpcId = RPCId(any: id) {
                 let upstreamId = mapId(sessionId, rpcId)
                 object["id"] = upstreamId
@@ -843,15 +844,5 @@ enum RequestInspector {
             originalId: nil,
             isCacheableToolsListRequest: false
         )
-    }
-}
-
-fileprivate enum ToolsListCachePolicy {
-    static func isCacheableParams(_ params: Any?) -> Bool {
-        guard let params else { return true }
-        if params is NSNull { return true }
-        if let object = params as? [String: Any] { return object.isEmpty }
-        if let array = params as? [Any] { return array.isEmpty }
-        return false
     }
 }

@@ -939,11 +939,24 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String) {
+        let quarantineNs: UInt64 = 30 * 1_000_000_000
+        let quarantineUntil = nowUptimeNs &+ quarantineNs
+
+        var failures = 0
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            state.upstreamStates[upstreamIndex].unhealthyUntilUptimeNs = quarantineUntil
+            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures += 1
+            failures = state.upstreamStates[upstreamIndex].consecutiveToolsListFailures
+        }
+
         logger.debug(
             "tools/list warmup failed (best-effort)",
             metadata: [
                 "upstream": .string("\(upstreamIndex)"),
                 "reason": .string(reason),
+                "failures": .string("\(failures)"),
+                "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
                 "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )

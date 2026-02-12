@@ -51,3 +51,28 @@ import Testing
     guard parts.count == 1 else { return }
     #expect(String(data: parts[0], encoding: .utf8) == json)
 }
+
+@Test func stdioFramerDoesNotStallOnContentLengthLookingLogLine() async throws {
+    let framer = StdioFramer()
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":1}"
+    let payload = "Content-Length: 123\n\(json)"
+    let parts = framer.append(Data(payload.utf8))
+    #expect(parts.count == 1)
+    guard parts.count == 1 else { return }
+    #expect(String(data: parts[0], encoding: .utf8) == json)
+}
+
+@Test func stdioFramerKeepsWaitingForPartialContentLengthHeaderAcrossWrites() async throws {
+    let framer = StdioFramer()
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":1}"
+
+    let header = "Content-Length: \(json.utf8.count)\r\n"
+    let partsA = framer.append(Data(header.utf8))
+    #expect(partsA.isEmpty)
+
+    let rest = "\r\n\(json)"
+    let partsB = framer.append(Data(rest.utf8))
+    #expect(partsB.count == 1)
+    guard partsB.count == 1 else { return }
+    #expect(String(data: partsB[0], encoding: .utf8) == json)
+}

@@ -135,8 +135,38 @@ final class StdioFramer {
         guard !buffer.isEmpty else { return false }
 
         // If we're at the start of a (possibly partial) Content-Length header, wait for more bytes.
+        // NOTE: Upstreams sometimes print newline-delimited log lines that begin with "Content-Length".
+        // We must avoid stalling forever on such junk, but also preserve correct framing when a real
+        // Content-Length header arrives split across multiple writes.
         if isPotentialContentLengthHeaderPrefix() {
-            return false
+            let delimiterCRLF = Data("\r\n\r\n".utf8)
+            let delimiterLF = Data("\n\n".utf8)
+
+            // If we already have the header/body delimiter, this is a legitimate header; wait for the body.
+            if buffer.range(of: delimiterCRLF) != nil || buffer.range(of: delimiterLF) != nil {
+                return false
+            }
+
+            // No delimiter yet: if we haven't received even a newline, we're still in a partial line.
+            guard let firstNewlineIndex = buffer.firstIndex(of: 0x0A) else {
+                return false
+            }
+
+            // If we only have the first header line so far, keep waiting for the rest.
+            let afterNewline = buffer.index(after: firstNewlineIndex)
+            if afterNewline == buffer.endIndex {
+                return false
+            }
+
+            // If JSON appears before any delimiter, treat the leading line as junk and drop it so parsing can continue.
+            let hasJSONStartAfterNewline = buffer[afterNewline...].contains { $0 == 0x7B || $0 == 0x5B }
+            if !hasJSONStartAfterNewline {
+                // Otherwise, assume the header may still be arriving in pieces. This is bounded so we don't
+                // keep buffering unbounded junk forever.
+                if buffer.count < 8 * 1024 {
+                    return false
+                }
+            }
         }
 
         // If the first non-whitespace token looks like JSON, don't drop anything; we might just be

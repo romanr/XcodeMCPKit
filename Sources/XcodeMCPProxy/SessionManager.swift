@@ -326,7 +326,11 @@ final class SessionManager: Sendable, SessionManaging {
 
         // Only persist the pin when asked. We typically pin on the first non-initialize JSON-RPC request
         // (method + id), not on notifications.
-        if pinned == nil, shouldPin, chosen.isHealthy {
+        //
+        // Even if the chosen upstream is temporarily marked unhealthy (for example, after a best-effort
+        // tools/list warmup failure), pinning still improves session affinity for unmapped upstream
+        // messages and avoids broadcasting server-initiated traffic to unrelated unpinned sessions.
+        if pinned == nil, shouldPin {
             sessionsState.withLockedValue { state in
                 state.sessions[sessionId]?.pinnedUpstreamIndex = chosen.index
             }

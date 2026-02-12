@@ -51,8 +51,7 @@ final class SessionManager: Sendable, SessionManaging {
 
     private struct ToolsListState: Sendable {
         var cachedResult: JSONValue?
-        // Used for both the post-initialize warmup and stale-while-revalidate refreshes triggered
-        // by HTTP cache hits.
+        // Tracks a best-effort warmup to populate the in-memory tools/list cache once.
         var warmupInFlight = false
         var internalSessionId: String?
     }
@@ -240,6 +239,12 @@ final class SessionManager: Sendable, SessionManaging {
         guard isInitialized() else { return }
 
         let shouldStart = toolsListState.withLockedValue { state -> Bool in
+            // If we already cached a valid tool list, keep it stable for the lifetime of this proxy process.
+            // tools/list is not expected to change during normal operation, and background refreshes can cause
+            // upstream churn (including Xcode permission dialogs) when upstreams are slow or flaky.
+            if state.cachedResult != nil {
+                return false
+            }
             if state.warmupInFlight {
                 return false
             }
@@ -934,44 +939,14 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String) {
-        let quarantineNs: UInt64 = 30 * 1_000_000_000
-        let quarantineUntil = nowUptimeNs &+ quarantineNs
-
-        var failures = 0
-        var shouldRestart = false
-        upstreamState.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            state.upstreamStates[upstreamIndex].unhealthyUntilUptimeNs = quarantineUntil
-            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures += 1
-            failures = state.upstreamStates[upstreamIndex].consecutiveToolsListFailures
-            shouldRestart = failures >= 3
-            if shouldRestart {
-                // Reset so we don't spam restarts while the process is still terminating.
-                state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
-            }
-        }
-
-        let clearedPins = clearPinnedSessions(forUpstreamIndex: upstreamIndex)
         logger.debug(
-            "tools/list refresh failed; quarantining upstream",
+            "tools/list warmup failed (best-effort)",
             metadata: [
                 "upstream": .string("\(upstreamIndex)"),
                 "reason": .string(reason),
-                "failures": .string("\(failures)"),
-                "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
-                "cleared_pins": .string("\(clearedPins)"),
+                "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )
-
-        guard shouldRestart, upstreamIndex >= 0, upstreamIndex < upstreams.count else { return }
-        guard let process = upstreams[upstreamIndex] as? UpstreamProcess else { return }
-        logger.debug(
-            "Requesting upstream restart due to consecutive tools/list failures",
-            metadata: ["upstream": .string("\(upstreamIndex)")]
-        )
-        Task {
-            await process.requestRestart()
-        }
     }
 
     private func refreshToolsList() async {
@@ -979,13 +954,11 @@ final class SessionManager: Sendable, SessionManaging {
             toolsListState.withLockedValue { $0.warmupInFlight = false }
         }
 
-        // Intentionally keep the background tools/list refresh fail-fast.
+        // Intentionally keep the tools/list warmup fail-fast.
         //
-        // This code path is stale-while-revalidate: callers already got a cached tools/list response.
-        // Using a long `config.requestTimeout` here would let slow/hung upstreams hold refresh (and
-        // upstream health feedback) hostage, increasing startup latency and routing churn.
-        //
-        // Forwarded client requests still use `config.requestTimeout`; this refresh is best-effort.
+        // We only use this to populate the in-memory tools/list cache once. A long `config.requestTimeout`
+        // here would unnecessarily block warmup on slow/hung upstreams and can contribute to churn (and
+        // Xcode permission prompts) if callers retry aggressively.
         let refreshTimeout: TimeAmount = .seconds(5)
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         let internalSessionId = toolsListInternalSessionId()

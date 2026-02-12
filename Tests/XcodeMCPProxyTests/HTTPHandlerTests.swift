@@ -327,7 +327,7 @@ import Testing
     #expect(sessionManager.assignedUpstreamIdCount() == 0)
     #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
     #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
-    #expect(sessionManager.refreshToolsListCallCount() == 1)
+    #expect(sessionManager.refreshToolsListCallCount() == 0)
 }
 
 @Test func httpToolsListUsesCachedResultWhenParamsArePresent() async throws {
@@ -400,7 +400,7 @@ import Testing
     #expect(sessionManager.assignedUpstreamIdCount() == 0)
     #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
     #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
-    #expect(sessionManager.refreshToolsListCallCount() == 1)
+    #expect(sessionManager.refreshToolsListCallCount() == 0)
 }
 
 @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {

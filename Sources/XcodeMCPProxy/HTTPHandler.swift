@@ -381,8 +381,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         "pinned_upstream": .string("\(pinnedUpstreamIndex)"),
                     ]
                 )
-                // Refresh in the background (stale-while-revalidate).
-                sessionManager.refreshToolsListIfNeeded()
+                // Intentionally do not refresh tools/list in the background.
+                // Once we have a valid tool list, keeping it stable for the lifetime of the proxy
+                // avoids upstream churn (and Xcode permission prompts) caused by best-effort refreshes.
                 let response: [String: Any] = [
                     "jsonrpc": "2.0",
                     "id": originalId.value.foundationObject,

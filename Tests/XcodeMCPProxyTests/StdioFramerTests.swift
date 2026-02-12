@@ -76,3 +76,33 @@ import Testing
     guard partsB.count == 1 else { return }
     #expect(String(data: partsB[0], encoding: .utf8) == json)
 }
+
+@Test func stdioFramerRecoversFromBogusContentLengthBlock() async throws {
+    let framer = StdioFramer()
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":1}"
+    let payload = "Content-Length: 123\n\nsome log line\n\(json)"
+    let parts = framer.append(Data(payload.utf8))
+    #expect(parts.count == 1)
+    guard parts.count == 1 else { return }
+    #expect(String(data: parts[0], encoding: .utf8) == json)
+}
+
+@Test func stdioFramerRecoversFromBogusContentLengthShorterThanJSON() async throws {
+    let framer = StdioFramer()
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":1}"
+    let payload = "Content-Length: 5\r\n\r\n\(json)"
+    let parts = framer.append(Data(payload.utf8))
+    #expect(parts.count == 1)
+    guard parts.count == 1 else { return }
+    #expect(String(data: parts[0], encoding: .utf8) == json)
+}
+
+@Test func stdioFramerRecoversFromBogusContentLengthLongerThanJSON() async throws {
+    let framer = StdioFramer()
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":1}"
+    let payload = "Content-Length: 123\n\n\(json)"
+    let parts = framer.append(Data(payload.utf8))
+    #expect(parts.count == 1)
+    guard parts.count == 1 else { return }
+    #expect(String(data: parts[0], encoding: .utf8) == json)
+}

@@ -43,26 +43,27 @@ final class StdioFramer {
         guard let headerRange = headerEndRange else { return nil }
         let headerEndIndex = headerRange.upperBound
         let headerData = buffer.subdata(in: 0..<headerRange.lowerBound)
-        guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
-
-        var contentLength: Int?
-        for line in headerText.split(separator: "\n") {
-            let parts = line.split(separator: ":", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            if parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                .caseInsensitiveCompare("Content-Length") == .orderedSame {
-                contentLength = Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines))
-                break
-            }
-        }
-
-        guard let length = contentLength, length >= 0 else { return nil }
+        guard let headerText = String(data: headerData, encoding: .utf8),
+              let length = parseContentLength(from: headerText) else { return nil }
         guard buffer.count >= headerEndIndex + length else { return nil }
 
-        let bodyRange = headerEndIndex..<(headerEndIndex + length)
-        let message = buffer.subdata(in: bodyRange)
-        buffer.removeSubrange(0..<(headerEndIndex + length))
-        return message
+        let bodyEndIndex = headerEndIndex + length
+        let bodyRange = headerEndIndex..<bodyEndIndex
+
+        // Validate that the framed body looks like a single JSON value. If it doesn't, treat the
+        // Content-Length header as junk (e.g. upstream log output) and resync by dropping the header.
+        if let jsonStart = firstNonWhitespaceIndex(in: bodyRange),
+           buffer[jsonStart] == 0x7B || buffer[jsonStart] == 0x5B,
+           let jsonEndIndex = jsonValueEndIndex(from: jsonStart),
+           jsonEndIndex <= bodyEndIndex,
+           buffer[jsonEndIndex..<bodyEndIndex].allSatisfy({ isWhitespace($0) }) {
+            let message = buffer.subdata(in: bodyRange)
+            buffer.removeSubrange(0..<bodyEndIndex)
+            return message
+        }
+
+        buffer.removeSubrange(0..<headerEndIndex)
+        return nil
     }
 
     private func nextJSONValueMessage() -> Data? {
@@ -142,9 +143,36 @@ final class StdioFramer {
             let delimiterCRLF = Data("\r\n\r\n".utf8)
             let delimiterLF = Data("\n\n".utf8)
 
-            // If we already have the header/body delimiter, this is a legitimate header; wait for the body.
-            if buffer.range(of: delimiterCRLF) != nil || buffer.range(of: delimiterLF) != nil {
-                return false
+            if let headerRange = buffer.range(of: delimiterCRLF) ?? buffer.range(of: delimiterLF) {
+                let headerEndIndex = headerRange.upperBound
+                let headerData = buffer.subdata(in: 0..<headerRange.lowerBound)
+
+                if let headerText = String(data: headerData, encoding: .utf8),
+                   let length = parseContentLength(from: headerText) {
+                    if let bodyStart = firstNonWhitespaceIndex(from: headerEndIndex) {
+                        // If we have any bytes after the delimiter and it doesn't look like JSON,
+                        // treat the header as junk framing and resync.
+                        if buffer[bodyStart] != 0x7B && buffer[bodyStart] != 0x5B {
+                            buffer.removeSubrange(0..<headerEndIndex)
+                            return true
+                        }
+
+                        // If a full JSON value is already present after the delimiter, but it doesn't match
+                        // the declared Content-Length, treat this as junk framing and resync.
+                        if let jsonEndIndex = jsonValueEndIndex(from: bodyStart) {
+                            let observedLength = buffer.distance(from: headerEndIndex, to: jsonEndIndex)
+                            if observedLength != length {
+                                buffer.removeSubrange(0..<headerEndIndex)
+                                return true
+                            }
+                        }
+                    }
+
+                    // Otherwise, assume this is legitimate framing; wait for the body bytes.
+                    return false
+                }
+
+                // Delimiter is present but the header isn't parseable: fall back to line dropping below.
             }
 
             // No delimiter yet: if we haven't received even a newline, we're still in a partial line.
@@ -189,6 +217,80 @@ final class StdioFramer {
         }
         guard index < buffer.endIndex else { return nil }
         return buffer[index]
+    }
+
+    private func firstNonWhitespaceIndex(from startIndex: Data.Index) -> Data.Index? {
+        var index = startIndex
+        while index < buffer.endIndex, isWhitespace(buffer[index]) {
+            index = buffer.index(after: index)
+        }
+        guard index < buffer.endIndex else { return nil }
+        return index
+    }
+
+    private func firstNonWhitespaceIndex(in range: Range<Data.Index>) -> Data.Index? {
+        var index = range.lowerBound
+        while index < range.upperBound, isWhitespace(buffer[index]) {
+            index = buffer.index(after: index)
+        }
+        guard index < range.upperBound else { return nil }
+        return index
+    }
+
+    private func jsonValueEndIndex(from startIndex: Data.Index) -> Data.Index? {
+        var index = startIndex
+        guard index < buffer.endIndex else { return nil }
+        let first = buffer[index]
+        guard first == 0x7B || first == 0x5B else { return nil }
+
+        var depth = 0
+        var inString = false
+        var isEscaped = false
+        var endIndex: Data.Index?
+
+        while index < buffer.endIndex {
+            let byte = buffer[index]
+            if inString {
+                if isEscaped {
+                    isEscaped = false
+                } else if byte == 0x5C {
+                    isEscaped = true
+                } else if byte == 0x22 {
+                    inString = false
+                }
+            } else {
+                if byte == 0x22 {
+                    inString = true
+                } else if byte == 0x7B || byte == 0x5B {
+                    depth += 1
+                } else if byte == 0x7D || byte == 0x5D {
+                    depth -= 1
+                    if depth == 0 {
+                        endIndex = index
+                        break
+                    }
+                }
+            }
+            index = buffer.index(after: index)
+        }
+
+        guard let endIndex, depth == 0, !inString else { return nil }
+        return buffer.index(after: endIndex)
+    }
+
+    private func parseContentLength(from headerText: String) -> Int? {
+        for line in headerText.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            if parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("Content-Length") == .orderedSame {
+                guard let length = Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)), length >= 0 else {
+                    return nil
+                }
+                return length
+            }
+        }
+        return nil
     }
 
     private func isPotentialContentLengthHeaderPrefix() -> Bool {

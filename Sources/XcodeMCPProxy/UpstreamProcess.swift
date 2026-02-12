@@ -17,6 +17,7 @@ actor UpstreamProcess: UpstreamClient {
 
     private let config: Config
     private var process: Process?
+    private var terminatingProcess: Process?
     private var stdinPipe = Pipe()
     private var stdoutPipe = Pipe()
     private var stderrPipe = Pipe()
@@ -46,7 +47,25 @@ actor UpstreamProcess: UpstreamClient {
         restartTask?.cancel()
         restartTask = nil
         stopLocked()
+        terminatingProcess = nil
         continuation.finish()
+    }
+
+    func requestRestart() async {
+        guard !isStopping else { return }
+        restartTask?.cancel()
+        restartTask = nil
+
+        // If we're already down (or never started), just start immediately.
+        if process == nil {
+            startLocked()
+            return
+        }
+
+        logger.warning("Upstream restart requested")
+        restartDelay = config.restartInitialDelay
+        stopLocked()
+        // The termination handler will emit an .exit event and schedule a restart.
     }
 
     func send(_ data: Data) async {
@@ -99,7 +118,7 @@ actor UpstreamProcess: UpstreamClient {
 
         process.terminationHandler = { [weak self] proc in
             Task {
-                await self?.handleTermination(status: proc.terminationStatus)
+                await self?.handleTermination(process: proc, status: proc.terminationStatus)
             }
         }
 
@@ -117,6 +136,7 @@ actor UpstreamProcess: UpstreamClient {
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         if let process = process {
+            terminatingProcess = process
             process.terminate()
         }
         process = nil
@@ -148,14 +168,37 @@ actor UpstreamProcess: UpstreamClient {
         return json is [String: Any] || json is [Any]
     }
 
-    private func handleTermination(status: Int32) {
-        process = nil
+    private func handleTermination(process terminated: Process, status: Int32) {
+        let wasCurrent = process.map { terminated === $0 } ?? false
+        let wasTerminating = terminatingProcess.map { terminated === $0 } ?? false
+
+        if wasCurrent {
+            process = nil
+        } else if wasTerminating {
+            terminatingProcess = nil
+        } else {
+            // Stale termination for an older process we no longer track.
+            return
+        }
+
         guard !isStopping else {
             return
         }
+
+        // If we're terminating an old process (e.g. via requestRestart) and a replacement process is
+        // already running, suppress the exit event. Otherwise, SessionManager will treat this as an
+        // upstream outage and clear pins/mappings for an upstream that is actually healthy.
+        if wasTerminating, process != nil {
+            logger.debug("Upstream process exited (superseded)", metadata: ["status": "\(status)"])
+            return
+        }
+
         logger.warning("Upstream process exited", metadata: ["status": "\(status)"])
         continuation.yield(.exit(status))
-        scheduleRestart()
+        // If a replacement process is already running, don't schedule another restart.
+        if process == nil {
+            scheduleRestart()
+        }
     }
 
     private func handleStderrData(_ data: Data) {

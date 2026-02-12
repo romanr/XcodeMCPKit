@@ -31,6 +31,7 @@ protocol SessionManaging: Sendable {
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue)
+    func refreshToolsListIfNeeded()
     func registerInitialize(
         originalId: RPCId,
         requestObject: [String: Any],
@@ -50,8 +51,9 @@ final class SessionManager: Sendable, SessionManaging {
 
     private struct ToolsListState: Sendable {
         var cachedResult: JSONValue?
+        // Tracks a best-effort warmup to populate the in-memory tools/list cache once.
         var warmupInFlight = false
-        var didRefreshThisProcess = false
+        var internalSessionId: String?
     }
 
     private struct SessionState: Sendable {
@@ -92,6 +94,9 @@ final class SessionManager: Sendable, SessionManaging {
         var initTimeout: Scheduled<Void>?
         var didSendInitialized = false
         var initUpstreamId: Int64?
+        var unhealthyUntilUptimeNs: UInt64?
+        var consecutiveToolsListFailures: Int = 0
+        var lastToolsListSuccessUptimeNs: UInt64?
     }
 
     private struct UpstreamPoolState: Sendable {
@@ -114,11 +119,6 @@ final class SessionManager: Sendable, SessionManaging {
         self.eventLoop = eventLoop
         self.upstreams = upstreams
         self.idMapper = UpstreamIdMapper(upstreamCount: upstreams.count)
-        if let cached = ToolsListCache.read() {
-            toolsListState.withLockedValue { state in
-                state.cachedResult = cached
-            }
-        }
         upstreamState.withLockedValue { state in
             state.upstreamStates = Array(repeating: UpstreamState(), count: upstreams.count)
             state.nextPick = 0
@@ -223,39 +223,59 @@ final class SessionManager: Sendable, SessionManaging {
 
     func cachedToolsListResult() -> JSONValue? {
         toolsListState.withLockedValue { state in
-            // We seed the cache from disk, but treat it as stale until we've successfully refreshed
-            // tools/list at least once in the current process.
-            guard state.didRefreshThisProcess else { return nil }
             return state.cachedResult
         }
     }
 
     func setCachedToolsListResult(_ result: JSONValue) {
-        let isValid = ToolsListCache.isValidToolsListResult(result)
+        guard isValidToolsListResult(result) else { return }
         toolsListState.withLockedValue { state in
-            if isValid {
-                state.cachedResult = result
-                state.didRefreshThisProcess = true
-            }
-            state.warmupInFlight = false
+            state.cachedResult = result
         }
+    }
 
-        guard isValid else { return }
-        Task.detached { ToolsListCache.write(result) }
+    func refreshToolsListIfNeeded() {
+        guard config.prewarmToolsList else { return }
+        guard isInitialized() else { return }
+
+        let shouldStart = toolsListState.withLockedValue { state -> Bool in
+            // If we already cached a valid tool list, keep it stable for the lifetime of this proxy process.
+            // tools/list is not expected to change during normal operation, and background refreshes can cause
+            // upstream churn (including Xcode permission dialogs) when upstreams are slow or flaky.
+            if state.cachedResult != nil {
+                return false
+            }
+            if state.warmupInFlight {
+                return false
+            }
+            state.warmupInFlight = true
+            return true
+        }
+        guard shouldStart else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshToolsList()
+        }
     }
 
     func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int {
         // If we already pinned this session to an initialized upstream, always stick to it.
         // This reduces cross-talk between multiple concurrent clients sharing the same proxy.
+        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         var pinned = sessionsState.withLockedValue { state in
             state.sessions[sessionId]?.pinnedUpstreamIndex
         }
         if let pinnedIndex = pinned {
-            let isInitialized = upstreamState.withLockedValue { state in
+            let isUsable = upstreamState.withLockedValue { state in
                 guard pinnedIndex >= 0, pinnedIndex < state.upstreamStates.count else { return false }
-                return state.upstreamStates[pinnedIndex].isInitialized
+                if let until = state.upstreamStates[pinnedIndex].unhealthyUntilUptimeNs, until <= nowUptimeNs {
+                    state.upstreamStates[pinnedIndex].unhealthyUntilUptimeNs = nil
+                }
+                let upstream = state.upstreamStates[pinnedIndex]
+                return upstream.isInitialized && upstream.unhealthyUntilUptimeNs == nil
             }
-            if isInitialized {
+            if isUsable {
                 return pinnedIndex
             }
 
@@ -266,31 +286,57 @@ final class SessionManager: Sendable, SessionManaging {
             pinned = nil
         }
 
-        let chosen = upstreamState.withLockedValue { state in
+        let chosen = upstreamState.withLockedValue { state -> (index: Int, isHealthy: Bool) in
             let count = state.upstreamStates.count
-            guard count > 0 else { return 0 }
+            guard count > 0 else { return (0, true) }
 
             let rawStart = state.nextPick % count
             let start = rawStart >= 0 ? rawStart : rawStart + count
             state.nextPick &+= 1
+
+            // Prefer initialized and healthy upstreams.
             for offset in 0..<count {
                 let candidate = (start + offset) % count
-                if state.upstreamStates[candidate].isInitialized {
-                    return candidate
+                if !state.upstreamStates[candidate].isInitialized {
+                    continue
+                }
+                if let until = state.upstreamStates[candidate].unhealthyUntilUptimeNs, until <= nowUptimeNs {
+                    state.upstreamStates[candidate].unhealthyUntilUptimeNs = nil
+                }
+                if state.upstreamStates[candidate].unhealthyUntilUptimeNs == nil {
+                    return (candidate, true)
                 }
             }
-            return 0
+
+            // Fall back to any initialized upstream, even if temporarily unhealthy.
+            for offset in 0..<count {
+                let candidate = (start + offset) % count
+                if !state.upstreamStates[candidate].isInitialized {
+                    continue
+                }
+                if let until = state.upstreamStates[candidate].unhealthyUntilUptimeNs, until <= nowUptimeNs {
+                    state.upstreamStates[candidate].unhealthyUntilUptimeNs = nil
+                }
+                let healthy = state.upstreamStates[candidate].unhealthyUntilUptimeNs == nil
+                return (candidate, healthy)
+            }
+
+            return (0, true)
         }
 
         // Only persist the pin when asked. We typically pin on the first non-initialize JSON-RPC request
         // (method + id), not on notifications.
+        //
+        // Even if the chosen upstream is temporarily marked unhealthy (for example, after a best-effort
+        // tools/list warmup failure), pinning still improves session affinity for unmapped upstream
+        // messages and avoids broadcasting server-initiated traffic to unrelated unpinned sessions.
         if pinned == nil, shouldPin {
             sessionsState.withLockedValue { state in
-                state.sessions[sessionId]?.pinnedUpstreamIndex = chosen
+                state.sessions[sessionId]?.pinnedUpstreamIndex = chosen.index
             }
         }
 
-        return chosen
+        return chosen.index
     }
 
     func registerInitialize(
@@ -571,6 +617,54 @@ final class SessionManager: Sendable, SessionManaging {
         // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
         // deliver server-initiated notifications/requests to unpinned sessions so they don't miss
         // pre-pin messages.
+        //
+        // Never forward unmapped JSON-RPC responses (no `method`) to sessions: if we dropped a mapping
+        // due to timeouts (e.g. a best-effort tools/list warmup) then a late response must not leak
+        // into active client streams.
+        guard let any = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            logger.debug(
+                "Dropping unmapped upstream message (invalid JSON)",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                ]
+            )
+            return
+        }
+
+        let serverInitiatedPayloads: [Data] = {
+            if let object = any as? [String: Any] {
+                guard object["method"] is String else { return [] }
+                return [data]
+            }
+            if let array = any as? [Any] {
+                var payloads: [Data] = []
+                payloads.reserveCapacity(array.count)
+                for item in array {
+                    guard let object = item as? [String: Any],
+                          object["method"] is String,
+                          JSONSerialization.isValidJSONObject(object),
+                          let encoded = try? JSONSerialization.data(withJSONObject: object, options: []) else {
+                        continue
+                    }
+                    payloads.append(encoded)
+                }
+                return payloads
+            }
+            return []
+        }()
+
+        guard !serverInitiatedPayloads.isEmpty else {
+            logger.debug(
+                "Dropping unmapped upstream response",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                ]
+            )
+            return
+        }
+
         let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue { state -> ([SessionContext], [SessionContext]) in
             var pinned: [SessionContext] = []
             var unpinned: [SessionContext] = []
@@ -587,15 +681,15 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         if !pinnedTargets.isEmpty {
-            for session in pinnedTargets {
-                session.router.handleIncoming(data)
+            for payload in serverInitiatedPayloads {
+                for session in pinnedTargets {
+                    session.router.handleIncoming(payload)
+                }
             }
             return
         }
 
-        if let any = try? JSONSerialization.jsonObject(with: data, options: []),
-           isServerInitiatedMessage(any),
-           !unpinnedTargets.isEmpty {
+        if !unpinnedTargets.isEmpty {
             logger.debug(
                 "Routing unmapped upstream message to unpinned sessions",
                 metadata: [
@@ -604,14 +698,16 @@ final class SessionManager: Sendable, SessionManaging {
                     "targets": .string("\(unpinnedTargets.count)"),
                 ]
             )
-            for session in unpinnedTargets {
-                session.router.handleIncoming(data)
+            for payload in serverInitiatedPayloads {
+                for session in unpinnedTargets {
+                    session.router.handleIncoming(payload)
+                }
             }
             return
         }
 
         logger.debug(
-            "Dropping unmapped upstream message (no pinned sessions)",
+            "Dropping unmapped upstream message (no target sessions)",
             metadata: [
                 "upstream": .string("\(upstreamIndex)"),
                 "bytes": .string("\(data.count)"),
@@ -708,7 +804,7 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         // Warm tools/list once so HTTP clients (Codex startup) don't pay the first-hit penalty.
-        startToolsListWarmupIfNeeded()
+        refreshToolsListIfNeeded()
     }
 
     private func encodeInitializeResponse(originalId: RPCId, result: JSONValue) -> ByteBuffer? {
@@ -824,6 +920,9 @@ final class SessionManager: Sendable, SessionManaging {
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].didSendInitialized = false
             state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            state.upstreamStates[upstreamIndex].unhealthyUntilUptimeNs = nil
+            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
+            state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nil
             return timeout
         }
         timeout?.cancel()
@@ -849,48 +948,102 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
-    private func startToolsListWarmupIfNeeded() {
-        guard config.prewarmToolsList else { return }
-
-        let shouldStart = toolsListState.withLockedValue { state -> Bool in
-            // Even when we have a persisted cache from a previous run, warm once per process start so the
-            // cache can be refreshed after Xcode upgrades or tool changes.
-            if state.warmupInFlight {
-                return false
-            }
-            state.warmupInFlight = true
-            return true
+    private func toolsListInternalSessionId() -> String {
+        if let existing = toolsListState.withLockedValue({ $0.internalSessionId }) {
+            return existing
         }
-        guard shouldStart else { return }
 
-        Task { [weak self] in
-            guard let self else { return }
-            await self.warmToolsList()
-        }
-    }
-
-    private func makeUniqueToolsListWarmupSessionId() -> String {
         // Clients can provide arbitrary Mcp-Session-Id values. Use a UUID-backed internal ID
         // and ensure it doesn't match any active session so warmup can't evict real client state.
         var candidate: String
         repeat {
             candidate = "__tools_list_warmup__:" + UUID().uuidString
         } while hasSession(id: candidate)
-        return candidate
+
+        return toolsListState.withLockedValue { state in
+            if let existing = state.internalSessionId {
+                return existing
+            }
+            state.internalSessionId = candidate
+            return candidate
+        }
     }
 
-    private func warmToolsList() async {
-        let upstreamIndex = 0
-        let internalSessionId = makeUniqueToolsListWarmupSessionId()
+    private func clearPinnedSessions(forUpstreamIndex upstreamIndex: Int) -> Int {
+        sessionsState.withLockedValue { state -> Int in
+            let keys = Array(state.sessions.keys)
+            var cleared = 0
+            for key in keys {
+                if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
+                    state.sessions[key]?.pinnedUpstreamIndex = nil
+                    cleared += 1
+                }
+            }
+            return cleared
+        }
+    }
 
-        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+    private func markToolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64) {
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            state.upstreamStates[upstreamIndex].unhealthyUntilUptimeNs = nil
+            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
+            state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nowUptimeNs
+        }
+    }
+
+    private func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String) {
+        let quarantineNs: UInt64 = 30 * 1_000_000_000
+        let quarantineUntil = nowUptimeNs &+ quarantineNs
+
+        var failures = 0
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            state.upstreamStates[upstreamIndex].unhealthyUntilUptimeNs = quarantineUntil
+            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures += 1
+            failures = state.upstreamStates[upstreamIndex].consecutiveToolsListFailures
+        }
+
+        logger.debug(
+            "tools/list warmup failed (best-effort)",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "reason": .string(reason),
+                "failures": .string("\(failures)"),
+                "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
+                "uptime_ns": .string("\(nowUptimeNs)"),
+            ]
+        )
+    }
+
+    private func refreshToolsList() async {
+        defer {
             toolsListState.withLockedValue { $0.warmupInFlight = false }
+        }
+
+        // Intentionally keep the tools/list warmup fail-fast.
+        //
+        // We only use this to populate the in-memory tools/list cache once. A long `config.requestTimeout`
+        // here would unnecessarily block warmup on slow/hung upstreams and can contribute to churn (and
+        // Xcode permission prompts) if callers retry aggressively.
+        let refreshTimeout: TimeAmount = .seconds(5)
+        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let internalSessionId = toolsListInternalSessionId()
+        _ = session(id: internalSessionId)
+
+        let upstreamIndex = chooseUpstreamIndex(sessionId: internalSessionId, shouldPin: false)
+        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+            logger.debug("tools/list refresh: invalid upstream index", metadata: ["upstream": .string("\(upstreamIndex)")])
             return
         }
 
         let originalId = RPCId(any: NSNumber(value: 1))!
-        let warmupSession = session(id: internalSessionId)
-        let future = warmupSession.router.registerRequest(idKey: originalId.key, on: eventLoop)
+        let refreshSession = session(id: internalSessionId)
+        let future = refreshSession.router.registerRequest(
+            idKey: originalId.key,
+            on: eventLoop,
+            timeout: refreshTimeout
+        )
         let upstreamId = assignUpstreamId(
             sessionId: internalSessionId,
             originalId: originalId,
@@ -904,11 +1057,18 @@ final class SessionManager: Sendable, SessionManaging {
         ]
         guard JSONSerialization.isValidJSONObject(request),
               let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
-            toolsListState.withLockedValue { $0.warmupInFlight = false }
-            removeSession(id: internalSessionId)
+            idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+            markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "encode_request_failed")
             return
         }
 
+        logger.debug(
+            "tools/list refresh started",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "timeout": .string("\(refreshTimeout.nanoseconds)ns"),
+            ]
+        )
         sendUpstream(requestData, upstreamIndex: upstreamIndex)
 
         do {
@@ -916,18 +1076,32 @@ final class SessionManager: Sendable, SessionManaging {
             guard let responseData = buffer.readData(length: buffer.readableBytes),
                   let response = try JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
                   let resultAny = response["result"],
-                  let result = JSONValue(any: resultAny) else {
-                toolsListState.withLockedValue { $0.warmupInFlight = false }
-                removeSession(id: internalSessionId)
+                  let result = JSONValue(any: resultAny),
+                  isValidToolsListResult(result) else {
+                idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "invalid_response")
                 return
             }
 
+            markToolsListRefreshSucceeded(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs)
             setCachedToolsListResult(result)
+            logger.debug(
+                "tools/list refresh succeeded",
+                metadata: ["upstream": .string("\(upstreamIndex)"), "bytes": .string("\(responseData.count)")]
+            )
         } catch {
-            toolsListState.withLockedValue { $0.warmupInFlight = false }
+            idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+            markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "timeout")
         }
+    }
 
-        removeSession(id: internalSessionId)
+    private func isValidToolsListResult(_ value: JSONValue) -> Bool {
+        guard case .object(let object) = value else { return false }
+        guard let toolsValue = object["tools"] else { return false }
+        if case .array = toolsValue {
+            return true
+        }
+        return false
     }
 
     private func startUpstreamWarmInitialize(upstreamIndex: Int) {
@@ -1124,51 +1298,4 @@ private struct UpstreamMapping: Sendable {
     let sessionId: String?
     let originalId: RPCId?
     let isInitialize: Bool
-}
-
-private enum ToolsListCache {
-    static var fileURL: URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        return (base ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
-            .appendingPathComponent("tools-list.json")
-    }
-
-    static func read() -> JSONValue? {
-        guard let data = try? Data(contentsOf: fileURL) else {
-            return nil
-        }
-        guard let any = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return nil
-        }
-        guard let value = JSONValue(any: any), isValidToolsListResult(value) else {
-            return nil
-        }
-        return value
-    }
-
-    static func isValidToolsListResult(_ value: JSONValue) -> Bool {
-        guard case .object(let object) = value else { return false }
-        guard let toolsValue = object["tools"] else { return false }
-        if case .array = toolsValue {
-            return true
-        }
-        return false
-    }
-
-    static func write(_ result: JSONValue) {
-        let object = result.foundationObject
-        guard JSONSerialization.isValidJSONObject(object) else {
-            return
-        }
-
-        do {
-            let directory = fileURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-            try data.write(to: fileURL, options: [.atomic])
-        } catch {
-            // Best-effort cache; ignore failures.
-        }
-    }
 }

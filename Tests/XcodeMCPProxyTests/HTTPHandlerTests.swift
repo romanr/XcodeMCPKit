@@ -327,9 +327,10 @@ import Testing
     #expect(sessionManager.assignedUpstreamIdCount() == 0)
     #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
     #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+    #expect(sessionManager.refreshToolsListCallCount() == 0)
 }
 
-@Test func httpToolsListForwardsWhenParamsArePresentEvenIfCacheExists() async throws {
+@Test func httpToolsListUsesCachedResultWhenParamsArePresent() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()
     defer { _ = try? channel.finish() }
@@ -363,7 +364,7 @@ import Testing
     let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
     #expect(sessionId?.isEmpty == false)
 
-    // tools/list with params should not be served from cache.
+    // tools/list with params should still be served from cache (Codex startup stability).
     let toolsPayload: [String: Any] = [
         "jsonrpc": "2.0",
         "id": 2,
@@ -384,8 +385,114 @@ import Testing
     try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
+    let toolsResponse = try collectResponse(from: channel)
+    #expect(toolsResponse.head.status == .ok)
+
+    let responseObject = try JSONSerialization.jsonObject(with: Data(toolsResponse.body.utf8), options: []) as? [String: Any]
+    let responseId = (responseObject?["id"] as? NSNumber)?.intValue
+    #expect(responseId == 2)
+
+    let result = responseObject?["result"] as? [String: Any]
+    let tools = result?["tools"] as? [Any]
+    #expect(tools?.count == 0)
+
+    #expect(sessionManager.sentUpstreamCount() == 0)
+    #expect(sessionManager.assignedUpstreamIdCount() == 0)
+    #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+    #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+    #expect(sessionManager.refreshToolsListCallCount() == 0)
+}
+
+@Test func httpToolsListCachesResultOnMissWhenParamsArePresent() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config) { method, originalId in
+        #expect(method == "tools/list")
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "result": [
+                "tools": [Any](),
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    // Initialize to establish a session id.
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
+    #expect(sessionId?.isEmpty == false)
+
+    // tools/list should be forwarded on the first miss, then cached even with params.
+    let toolsPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": [
+            "cursor": "cursor-1",
+        ],
+    ]
+    let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
+
+    var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    toolsHead.headers.add(name: "Accept", value: "application/json")
+    toolsHead.headers.add(name: "Content-Type", value: "application/json")
+    toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionId!)
+    var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
+    toolsBody.writeBytes(toolsData)
+    try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let toolsResponse = try collectResponse(from: channel)
+    #expect(toolsResponse.head.status == .ok)
+    #expect(sessionManager.cachedToolsListResult() != nil)
     #expect(sessionManager.sentUpstreamCount() == 1)
-    #expect(sessionManager.assignedUpstreamIdCount() == 1)
+
+    // Second call should be served from cache (no upstream send).
+    let toolsPayload2: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/list",
+        "params": [
+            "cursor": "cursor-2",
+        ],
+    ]
+    let toolsData2 = try JSONSerialization.data(withJSONObject: toolsPayload2, options: [])
+    var toolsHead2 = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    toolsHead2.headers.add(name: "Accept", value: "application/json")
+    toolsHead2.headers.add(name: "Content-Type", value: "application/json")
+    toolsHead2.headers.add(name: "Mcp-Session-Id", value: sessionId!)
+    var toolsBody2 = channel.allocator.buffer(capacity: toolsData2.count)
+    toolsBody2.writeBytes(toolsData2)
+    try channel.writeInbound(HTTPServerRequestPart.head(toolsHead2))
+    try channel.writeInbound(HTTPServerRequestPart.body(toolsBody2))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let toolsResponse2 = try collectResponse(from: channel)
+    #expect(toolsResponse2.head.status == .ok)
+    #expect(sessionManager.sentUpstreamCount() == 1)
 }
 
 @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
@@ -678,6 +785,7 @@ private final class TestSessionManager: SessionManaging {
         var assignUpstreamIdCount = 0
         var initialized = false
         var cachedToolsList: JSONValue?
+        var refreshToolsListCalls = 0
         var upstreamSendCount = 0
         var upstreamIdMapping: [Int64: UpstreamMapping] = [:]
         var chooseUpstreamCalls: [ChooseUpstreamCall] = []
@@ -734,6 +842,12 @@ private final class TestSessionManager: SessionManaging {
     func setCachedToolsListResult(_ result: JSONValue) {
         state.withLockedValue { state in
             state.cachedToolsList = result
+        }
+    }
+
+    func refreshToolsListIfNeeded() {
+        state.withLockedValue { state in
+            state.refreshToolsListCalls += 1
         }
     }
 
@@ -813,6 +927,10 @@ private final class TestSessionManager: SessionManaging {
 
     func lastChooseUpstreamShouldPin() -> Bool {
         state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
+    }
+
+    func refreshToolsListCallCount() -> Int {
+        state.withLockedValue { $0.refreshToolsListCalls }
     }
 }
 

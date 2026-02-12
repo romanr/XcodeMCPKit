@@ -355,10 +355,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
 
-            // Serve cached tools/list only for the canonical no-params request.
-            // Some clients use params for pagination; serving a cached first page would be incorrect.
+            // Serve cached tools/list regardless of params. Some clients attach pagination-like params,
+            // but Codex startup expects a full tool list quickly; stability wins over strict pagination.
             if method == "tools/list",
-               ToolsListCachePolicy.isCacheableParams(object["params"]),
                let headerSessionId,
                sessionManager.isInitialized(),
                let cachedResult = sessionManager.cachedToolsListResult(),
@@ -367,9 +366,24 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 if headerSessionExists == false {
                     _ = sessionManager.session(id: headerSessionId)
                 }
+                let hasParams: Bool = {
+                    guard let params = object["params"] else { return false }
+                    return !(params is NSNull)
+                }()
                 // Even when tools/list is served from cache, pin the session so later upstream messages
                 // route consistently instead of fanning out across unpinned sessions.
-                _ = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
+                let pinnedUpstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
+                logger.debug(
+                    "tools/list cache hit",
+                    metadata: [
+                        "session": .string(headerSessionId),
+                        "has_params": .string(hasParams ? "true" : "false"),
+                        "pinned_upstream": .string("\(pinnedUpstreamIndex)"),
+                    ]
+                )
+                // Intentionally do not refresh tools/list in the background.
+                // Once we have a valid tool list, keeping it stable for the lifetime of the proxy
+                // avoids upstream churn (and Xcode permission prompts) caused by best-effort refreshes.
                 let response: [String: Any] = [
                     "jsonrpc": "2.0",
                     "id": originalId.value.foundationObject,
@@ -447,6 +461,22 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         } catch {
             sendPlain(on: context.channel, status: .badRequest, body: "invalid json", keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             return
+        }
+
+        if transform.method == "tools/list" {
+            let hasCache = sessionManager.cachedToolsListResult() != nil
+            let params = (try? JSONSerialization.jsonObject(with: bodyData, options: []))
+                .flatMap { $0 as? [String: Any] }?["params"]
+            let hasParams = params != nil && !(params is NSNull)
+            logger.debug(
+                "tools/list cache miss; forwarding upstream",
+                metadata: [
+                    "session": .string(sessionId),
+                    "has_cache": .string(hasCache ? "true" : "false"),
+                    "has_params": .string(hasParams ? "true" : "false"),
+                    "upstream": .string("\(upstreamIndex)"),
+                ]
+            )
         }
 
         if headerSessionId == nil {
@@ -749,8 +779,9 @@ enum RequestInspector {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
             let method = object["method"] as? String
+            // We intentionally treat tools/list as stable and cache it regardless of params.
+            // Some clients attach pagination-like params even when they expect the full list.
             let isCacheableToolsListRequest = (method == "tools/list")
-                && ToolsListCachePolicy.isCacheableParams(object["params"])
             if let id = object["id"], let rpcId = RPCId(any: id) {
                 let upstreamId = mapId(sessionId, rpcId)
                 object["id"] = upstreamId
@@ -813,15 +844,5 @@ enum RequestInspector {
             originalId: nil,
             isCacheableToolsListRequest: false
         )
-    }
-}
-
-fileprivate enum ToolsListCachePolicy {
-    static func isCacheableParams(_ params: Any?) -> Bool {
-        guard let params else { return true }
-        if params is NSNull { return true }
-        if let object = params as? [String: Any] { return object.isEmpty }
-        if let array = params as? [Any] { return array.isEmpty }
-        return false
     }
 }

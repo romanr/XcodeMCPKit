@@ -16,8 +16,9 @@ If you see an error like:
 
 it’s usually because the upstream (`xcrun mcpbridge` / Xcode) was slow on the first `tools/list`.
 
-- `xcode-mcp-proxy-server` prewarms and caches `tools/list` once it’s ready.
-- The cached tool list is stored at `~/Library/Caches/XcodeMCPProxy/tools-list.json` and reused on next startup.
+- `xcode-mcp-proxy-server` prewarms and caches `tools/list` **in memory** once it’s ready, and serves it immediately on subsequent requests.
+- The tool list cache is **not persisted to disk**. It survives repeated Codex restarts as long as the proxy server stays running.
+- `tools/list` is intentionally treated as stable for the lifetime of the proxy process (no background refresh), to avoid upstream churn and surprise Xcode permission dialogs.
 
 ## HTTP/SSE client cannot connect
 - Ensure `xcode-mcp-proxy-server` is running.

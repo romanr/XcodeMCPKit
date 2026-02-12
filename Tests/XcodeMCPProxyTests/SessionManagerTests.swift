@@ -454,6 +454,130 @@ import Testing
     #expect(received.first == notification)
 }
 
+@Test func sessionManagerDropsUnmappedResponsesEvenWhenPinnedTargetsExist() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+    let sessionId = "session-A"
+    let session = manager.session(id: sessionId)
+    _ = manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true)
+
+    _ = session.router.drainBufferedNotifications()
+
+    // Unmapped JSON-RPC response (no `method`) must never be routed to sessions.
+    await yieldMessage(try makeToolListResponse(id: 9_999_999), to: upstream)
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    #expect(session.router.drainBufferedNotifications().isEmpty)
+}
+
+@Test func sessionManagerPinsFallbackUpstreamEvenWhenUnhealthy() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    var config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    config.prewarmToolsList = true
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize primary upstream0.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    // Warm init -> upstream1.
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    // Wait for per-upstream notifications/initialized.
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    // Fail tools/list warmup on upstream0 to mark it unhealthy.
+    var warmup0: Data?
+    let warmupDeadline0 = Date().addingTimeInterval(2)
+    while Date() < warmupDeadline0 {
+        manager.refreshToolsListIfNeeded()
+        if let req = (await upstream0.sent()).first(where: { methodName(from: $0) == "tools/list" }) {
+            warmup0 = req
+            break
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    #expect(warmup0 != nil)
+    if let warmup0 {
+        let id = try extractUpstreamId(from: warmup0)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [:], // invalid (no `tools` array) -> marks upstream unhealthy
+        ]
+        await upstream0.yield(.message(try JSONSerialization.data(withJSONObject: response, options: [])))
+    }
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    // Trigger another warmup; it should prefer upstream1 and fail there too so no healthy upstream exists.
+    var warmup1: Data?
+    let warmupDeadline1 = Date().addingTimeInterval(2)
+    while Date() < warmupDeadline1 {
+        manager.refreshToolsListIfNeeded()
+        if let req = (await upstream1.sent()).first(where: { methodName(from: $0) == "tools/list" }) {
+            warmup1 = req
+            break
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    #expect(warmup1 != nil)
+    if let warmup1 {
+        let id = try extractUpstreamId(from: warmup1)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [:],
+        ]
+        await upstream1.yield(.message(try JSONSerialization.data(withJSONObject: response, options: [])))
+    }
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let sessionIdA = "session-A"
+    let sessionIdB = "session-B"
+    let sessionA = manager.session(id: sessionIdA)
+    let sessionB = manager.session(id: sessionIdB)
+
+    _ = sessionA.router.drainBufferedNotifications()
+    _ = sessionB.router.drainBufferedNotifications()
+
+    // Pin session A even though the selected upstream is unhealthy, so unmapped messages don't broadcast
+    // to other unpinned sessions (session B).
+    let chosen = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
+
+    let notification = try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/test",
+            "params": ["value": 1],
+        ],
+        options: []
+    )
+
+    await yieldMessage(notification, to: chosen == 0 ? upstream0 : upstream1)
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let receivedA = sessionA.router.drainBufferedNotifications()
+    let receivedB = sessionB.router.drainBufferedNotifications()
+    #expect(receivedA.count == 1)
+    #expect(receivedA.first == notification)
+    #expect(receivedB.isEmpty)
+}
+
 @Test func sessionManagerRepinsAfterUpstreamExit() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }

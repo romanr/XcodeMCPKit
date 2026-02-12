@@ -1010,6 +1010,7 @@ final class SessionManager: Sendable, SessionManaging {
         ]
         guard JSONSerialization.isValidJSONObject(request),
               let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
+            idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
             markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "encode_request_failed")
             return
         }
@@ -1030,6 +1031,7 @@ final class SessionManager: Sendable, SessionManaging {
                   let resultAny = response["result"],
                   let result = JSONValue(any: resultAny),
                   isValidToolsListResult(result) else {
+                idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
                 markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "invalid_response")
                 return
             }
@@ -1041,6 +1043,7 @@ final class SessionManager: Sendable, SessionManaging {
                 metadata: ["upstream": .string("\(upstreamIndex)"), "bytes": .string("\(responseData.count)")]
             )
         } catch {
+            idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
             markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "timeout")
         }
     }

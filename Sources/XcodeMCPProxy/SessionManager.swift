@@ -1185,6 +1185,8 @@ final class SessionManager: Sendable, SessionManaging {
                 let quarantineUntil = nowUptimeNs &+ 15_000_000_000
                 state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                // Invalidate any in-flight probe completion that started before this newer timeout-based quarantine.
+                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
                 shouldClearPins = true
             } else {
                 state.upstreamStates[upstreamIndex].healthState = .degraded

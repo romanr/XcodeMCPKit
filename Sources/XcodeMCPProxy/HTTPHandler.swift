@@ -305,11 +305,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 future.whenComplete { result in
                     switch result {
                     case .success(let buffer):
-                        self.sessionManager.onRequestSucceeded(
-                            sessionId: sessionId,
-                            requestIdKey: originalId.key,
-                            upstreamIndex: 0
-                        )
                         var buffer = buffer
                         guard let data = buffer.readData(length: buffer.readableBytes) else {
                             self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)

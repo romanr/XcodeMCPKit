@@ -136,6 +136,7 @@ import Testing
     let responseObject = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
     let responseId = (responseObject?["id"] as? NSNumber)?.intValue
     #expect(responseId == 1)
+    #expect(sessionManager.requestSuccessNotificationCount() == 0)
 }
 
 @Test func httpInitializePrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
@@ -1281,6 +1282,7 @@ private final class TestSessionManager: SessionManaging {
         var chooseUpstreamCalls: [ChooseUpstreamCall] = []
         var availableUpstreamIndex: Int? = 0
         var requestTimeoutNotifications = 0
+        var requestSuccessNotifications = 0
     }
 
     private let state = NIOLockedValueBox(State())
@@ -1401,7 +1403,11 @@ private final class TestSessionManager: SessionManaging {
         removeUpstreamIdMapping(sessionId: sessionId, requestIdKey: requestIdKey, upstreamIndex: upstreamIndex)
     }
 
-    func onRequestSucceeded(sessionId _: String, requestIdKey _: String, upstreamIndex _: Int) {}
+    func onRequestSucceeded(sessionId _: String, requestIdKey _: String, upstreamIndex _: Int) {
+        state.withLockedValue { state in
+            state.requestSuccessNotifications += 1
+        }
+    }
 
     func sendUpstream(_ data: Data, upstreamIndex _: Int) {
         state.withLockedValue { state in
@@ -1455,6 +1461,10 @@ private final class TestSessionManager: SessionManaging {
 
     func requestTimeoutNotificationCount() -> Int {
         state.withLockedValue { $0.requestTimeoutNotifications }
+    }
+
+    func requestSuccessNotificationCount() -> Int {
+        state.withLockedValue { $0.requestSuccessNotifications }
     }
 }
 

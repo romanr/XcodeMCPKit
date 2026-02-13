@@ -965,19 +965,22 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func completeInitPendingWithError(_ errorObject: [String: Any]) {
-        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?)? in
+        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?, shouldRetryEagerInit: Bool)? in
             if state.isShuttingDown {
                 return nil
             }
+            let shouldRetryEagerInit = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            if shouldRetryEagerInit {
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+            }
             state.initInFlight = false
-            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             let timeout = state.initTimeout
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
             let upstreamId = state.primaryInitUpstreamId
             state.primaryInitUpstreamId = nil
-            return (pending, timeout, upstreamId)
+            return (pending, timeout, upstreamId, shouldRetryEagerInit)
         }
         guard let result else { return }
         result.timeout?.cancel()
@@ -995,6 +998,10 @@ final class SessionManager: Sendable, SessionManaging {
                     item.promise.fail(TimeoutError())
                 }
             }
+        }
+
+        if result.shouldRetryEagerInit, config.eagerInitialize {
+            startEagerInitializePrimary()
         }
     }
 

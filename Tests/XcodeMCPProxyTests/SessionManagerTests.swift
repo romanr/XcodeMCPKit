@@ -721,6 +721,57 @@ import Testing
     #expect((error?["message"] as? String) == "upstream overloaded")
 }
 
+@Test func sessionManagerRepinsWhenPinnedUpstreamBecomesOverloaded() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = ToggleableOverloadUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    let sessionId = "session-overload-repin"
+    let session = manager.session(id: sessionId)
+    let pinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+    #expect(pinned == 0)
+
+    await upstream0.setOverloaded(true)
+
+    let original = RPCId(any: NSNumber(value: 920))!
+    let future = session.router.registerRequest(idKey: original.key, on: eventLoop, timeout: .seconds(1))
+    let upstreamId = manager.assignUpstreamId(sessionId: sessionId, originalId: original, upstreamIndex: pinned)
+    manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: pinned)
+
+    let response = try decodeJSON(from: try await future.get())
+    let error = response["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32002)
+    #expect((error?["message"] as? String) == "upstream overloaded")
+
+    let repinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+    #expect(repinned == 1)
+
+    let original2 = RPCId(any: NSNumber(value: 921))!
+    let future2 = session.router.registerRequest(idKey: original2.key, on: eventLoop, timeout: .seconds(1))
+    let upstreamId2 = manager.assignUpstreamId(sessionId: sessionId, originalId: original2, upstreamIndex: repinned)
+    manager.sendUpstream(try makeToolListRequest(id: upstreamId2), upstreamIndex: repinned)
+    await upstream1.yield(.message(try makeToolListResponse(id: upstreamId2)))
+    _ = try await future2.get()
+}
+
 private func makeConfig(eagerInitialize: Bool, requestTimeout: TimeInterval) -> ProxyConfig {
     ProxyConfig(
         listenHost: "127.0.0.1",
@@ -757,6 +808,44 @@ private actor AlwaysOverloadedUpstreamClient: UpstreamClient {
     func send(_ data: Data) async -> UpstreamSendResult {
         _ = data
         return .overloaded
+    }
+}
+
+private actor ToggleableOverloadUpstreamClient: UpstreamClient {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private var sentMessages: [Data] = []
+    private var overloaded = false
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func setOverloaded(_ value: Bool) {
+        overloaded = value
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        sentMessages.append(data)
+        return overloaded ? .overloaded : .accepted
+    }
+
+    func yield(_ event: UpstreamEvent) async {
+        continuation.yield(event)
+    }
+
+    func sent() async -> [Data] {
+        sentMessages
     }
 }
 
@@ -810,6 +899,22 @@ private func shutdown(_ group: EventLoopGroup) async {
 
 private func waitForSentCount(
     _ upstream: TestUpstreamClient,
+    count: Int,
+    timeoutSeconds: UInt64
+) async throws {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    while Date() < deadline {
+        if await upstream.sent().count >= count {
+            return
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    let actual = await upstream.sent().count
+    throw WaitForSentCountError.timeout(expected: count, actual: actual)
+}
+
+private func waitForSentCount(
+    _ upstream: ToggleableOverloadUpstreamClient,
     count: Int,
     timeoutSeconds: UInt64
 ) async throws {

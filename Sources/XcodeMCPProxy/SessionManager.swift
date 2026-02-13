@@ -651,6 +651,7 @@ final class SessionManager: Sendable, SessionManaging {
             if result == .accepted {
                 return
             }
+            self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
             self.handleOverloadedUpstreamSend(
                 originalRequestData: data,
                 upstreamIndex: upstreamIndex
@@ -1169,7 +1170,44 @@ final class SessionManager: Sendable, SessionManaging {
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].healthState = .healthy
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                // Invalidate stale probe completions that started before this request-success transition.
+                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            } else {
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            }
+        }
+    }
+
+    private func markUpstreamOverloaded(upstreamIndex: Int) {
+        var shouldClearPins = false
+        upstreamState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+
+            if case .healthy = state.upstreamStates[upstreamIndex].healthState {
+                state.upstreamStates[upstreamIndex].healthState = .degraded
+            }
+
+            if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            } else {
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            }
+            shouldClearPins = true
+        }
+
+        guard shouldClearPins else { return }
+        let cleared = clearPinnedSessions(forUpstreamIndex: upstreamIndex)
+        if cleared > 0 {
+            logger.warning(
+                "Upstream overloaded; cleared pinned sessions for failover",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "cleared_pins": .string("\(cleared)"),
+                ]
+            )
         }
     }
 

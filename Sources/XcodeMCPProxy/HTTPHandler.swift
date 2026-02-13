@@ -599,19 +599,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return upstreamData
         }
 
-        // Happy path: upstream already returned a valid Resources result shape.
-        if let result = object["result"] {
-            if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
-                return upstreamData
-            }
+        let result = object["result"]
 
-            // Xcode MCP may return non-standard "tool-style" error payloads via `result`,
-            // for example:
-            //   {"result":{"content":[...],"isError":true}, ...}
-            // Normalize any non-conforming `result` to an empty Resources list.
-            if let empty = emptyResourcesListResponseData(method: method, originalId: originalId) {
-                return empty
-            }
+        // Happy path: upstream already returned a valid Resources result shape.
+        if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
             return upstreamData
         }
 
@@ -622,14 +613,50 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             guard code == -32601 else {
                 return upstreamData
             }
-        } else {
-            return upstreamData
+            if let result,
+               isNonStandardUnsupportedResourcesResult(result, method: method),
+               let empty = emptyResourcesListResponseData(method: method, originalId: originalId) {
+                return empty
+            }
+            return emptyResourcesListResponseData(method: method, originalId: originalId) ?? upstreamData
         }
 
-        guard let empty = emptyResourcesListResponseData(method: method, originalId: originalId) else {
-            return upstreamData
+        // Xcode MCP may return non-standard "tool-style" error payloads via `result`,
+        // for example:
+        //   {"result":{"content":[...],"isError":true}, ...}
+        // Only rewrite this specific "unknown method" shape to avoid masking real errors.
+        if let result,
+           isNonStandardUnsupportedResourcesResult(result, method: method),
+           let empty = emptyResourcesListResponseData(method: method, originalId: originalId) {
+            return empty
         }
-        return empty
+
+        return upstreamData
+    }
+
+    private func isNonStandardUnsupportedResourcesResult(_ result: Any, method: String) -> Bool {
+        guard let resultObject = result as? [String: Any] else {
+            return false
+        }
+        guard let isError = resultObject["isError"] as? Bool, isError else {
+            return false
+        }
+        guard let content = resultObject["content"] as? [Any], !content.isEmpty else {
+            return false
+        }
+
+        let methodToken = method.lowercased()
+        for item in content {
+            guard let contentObject = item as? [String: Any],
+                  let text = contentObject["text"] as? String else {
+                continue
+            }
+            let normalized = text.lowercased()
+            if normalized.contains("unknown method"), normalized.contains(methodToken) {
+                return true
+            }
+        }
+        return false
     }
 
     private func emptyResourcesListResponseData(method: String, originalId: RPCId) -> Data? {

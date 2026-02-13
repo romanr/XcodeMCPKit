@@ -479,6 +479,118 @@ import Testing
     #expect((error?["message"] as? String) == "upstream unavailable")
 }
 
+@Test func httpMalformedJSONReturnsParseErrorBeforeUpstreamUnavailable() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config)
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
+
+    sessionManager.setAvailableUpstreamIndex(nil)
+    let chooseCountBeforeMalformedRequest = sessionManager.chooseUpstreamIndexCallCount()
+
+    var malformedHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    malformedHead.headers.add(name: "Accept", value: "application/json")
+    malformedHead.headers.add(name: "Content-Type", value: "application/json")
+    malformedHead.headers.add(name: "Mcp-Session-Id", value: sessionId)
+    var malformedBody = channel.allocator.buffer(capacity: 20)
+    malformedBody.writeString("{\"jsonrpc\":\"2.0\",")
+    try channel.writeInbound(HTTPServerRequestPart.head(malformedHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(malformedBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    let error = object?["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32700)
+    #expect((error?["message"] as? String) == "invalid json")
+    #expect(sessionManager.chooseUpstreamIndexCallCount() == chooseCountBeforeMalformedRequest)
+}
+
+@Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config) { method, originalId in
+        #expect(method == "tools/list")
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "error": [
+                "code": -32002,
+                "message": "upstream overloaded",
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
+
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 3101,
+        "method": "tools/list",
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: sessionId)
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    let error = object?["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32002)
+    #expect((error?["message"] as? String) == "upstream overloaded")
+    #expect(sessionManager.requestSuccessNotificationCount() == 0)
+}
+
 @Test func httpSessionHeaderAutoCreatesSession() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()

@@ -471,7 +471,21 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let shouldPinUpstream = parsedRequestJSON.map(MCPMethodDispatcher.shouldPinUpstream(for:)) ?? false
+        guard let parsedRequestJSON else {
+            sendMCPError(
+                on: context.channel,
+                id: nil,
+                code: -32700,
+                message: "invalid json",
+                prefersEventStream: prefersEventStream,
+                keepAlive: head.isKeepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+            return
+        }
+
+        let shouldPinUpstream = MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
         guard let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: shouldPinUpstream) else {
             if requestIDs.isEmpty {
                 sendPlain(
@@ -602,13 +616,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             future.whenComplete { result in
                 switch result {
                 case .success(let buffer):
-                    for responseId in transform.responseIds {
-                        self.sessionManager.onRequestSucceeded(
-                            sessionId: sessionIdCopy,
-                            requestIdKey: responseId.key,
-                            upstreamIndex: upstreamIndex
-                        )
-                    }
                     var buffer = buffer
                     guard let data = buffer.readData(length: buffer.readableBytes) else {
                         self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
@@ -624,6 +631,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                        let resultAny = object["result"],
                        let result = JSONValue(any: resultAny) {
                         self.sessionManager.setCachedToolsListResult(result)
+                    }
+                    if self.shouldNotifyUpstreamSuccess(for: responseData) {
+                        for responseId in transform.responseIds {
+                            self.sessionManager.onRequestSucceeded(
+                                sessionId: sessionIdCopy,
+                                requestIdKey: responseId.key,
+                                upstreamIndex: upstreamIndex
+                            )
+                        }
                     }
                     if prefersEventStream {
                         self.sendSingleSSE(on: channel, data: responseData, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
@@ -852,6 +868,44 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             buffer.writeBytes(data)
             sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
         }
+    }
+
+    private func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {
+        guard let any = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
+            return true
+        }
+
+        if let object = any as? [String: Any] {
+            return isUpstreamOverloadedErrorResponse(object) == false
+        }
+
+        if let array = any as? [Any] {
+            let objects = array.compactMap { $0 as? [String: Any] }
+            guard objects.isEmpty == false else {
+                return true
+            }
+            return objects.allSatisfy(isUpstreamOverloadedErrorResponse) == false
+        }
+
+        return true
+    }
+
+    private func isUpstreamOverloadedErrorResponse(_ object: [String: Any]) -> Bool {
+        guard let error = object["error"] as? [String: Any] else {
+            return false
+        }
+
+        let code: Int?
+        if let number = error["code"] as? NSNumber {
+            code = number.intValue
+        } else {
+            code = error["code"] as? Int
+        }
+        guard code == -32002 else {
+            return false
+        }
+
+        return (error["message"] as? String) == "upstream overloaded"
     }
 
     private func sendMCPError(

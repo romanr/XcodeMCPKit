@@ -277,6 +277,55 @@ import Testing
     try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
 }
 
+@Test func sessionManagerRetriesEagerInitializeAfterPrimaryWarmInitErrorWhenLastInitializedUpstreamExited() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
+    let _ = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    // Wait for per-upstream notifications/initialized.
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    // Primary exit triggers warm init on primary.
+    await upstream0.yield(.exit(1))
+    try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
+    let retry = await upstream0.sent()
+    let retryId = try extractUpstreamId(from: retry[2])
+
+    // While primary warm init is in flight, last initialized upstream exits.
+    await upstream1.yield(.exit(1))
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    // Warm init fails with JSON-RPC error.
+    let errorResponse: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": retryId,
+        "error": [
+            "code": -1,
+            "message": "warm init failed",
+        ],
+    ]
+    await upstream0.yield(.message(try JSONSerialization.data(withJSONObject: errorResponse, options: [])))
+
+    // Proxy should restart eager/global init automatically.
+    try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
+}
+
 @Test func sessionManagerPinsSessionsRoundRobinAcrossUpstreams() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }
@@ -310,8 +359,8 @@ import Testing
     let originalA = RPCId(any: NSNumber(value: 100))!
     let originalB = RPCId(any: NSNumber(value: 101))!
 
-    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
-    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true)
+    let upstreamIndexA = try #require(manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true))
+    let upstreamIndexB = try #require(manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true))
     #expect(upstreamIndexA != upstreamIndexB)
 
     let futureA = sessionA.router.registerRequest(idKey: originalA.key, on: eventLoop)
@@ -377,8 +426,8 @@ import Testing
     let sessionA = manager.session(id: sessionIdA)
     let sessionB = manager.session(id: sessionIdB)
 
-    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
-    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true)
+    let upstreamIndexA = try #require(manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true))
+    let upstreamIndexB = try #require(manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true))
     #expect(upstreamIndexA != upstreamIndexB)
 
     // Ensure we're starting from a clean buffer state.
@@ -475,7 +524,7 @@ import Testing
     #expect(session.router.drainBufferedNotifications().isEmpty)
 }
 
-@Test func sessionManagerPinsFallbackUpstreamEvenWhenUnhealthy() async throws {
+@Test func sessionManagerReturnsNilWhenAllUpstreamsAreQuarantined() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }
     let eventLoop = group.next()
@@ -547,35 +596,8 @@ import Testing
     }
     try await Task.sleep(nanoseconds: 50_000_000)
 
-    let sessionIdA = "session-A"
-    let sessionIdB = "session-B"
-    let sessionA = manager.session(id: sessionIdA)
-    let sessionB = manager.session(id: sessionIdB)
-
-    _ = sessionA.router.drainBufferedNotifications()
-    _ = sessionB.router.drainBufferedNotifications()
-
-    // Pin session A even though the selected upstream is unhealthy, so unmapped messages don't broadcast
-    // to other unpinned sessions (session B).
-    let chosen = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
-
-    let notification = try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "method": "notifications/test",
-            "params": ["value": 1],
-        ],
-        options: []
-    )
-
-    await yieldMessage(notification, to: chosen == 0 ? upstream0 : upstream1)
-    try await Task.sleep(nanoseconds: 50_000_000)
-
-    let receivedA = sessionA.router.drainBufferedNotifications()
-    let receivedB = sessionB.router.drainBufferedNotifications()
-    #expect(receivedA.count == 1)
-    #expect(receivedA.first == notification)
-    #expect(receivedB.isEmpty)
+    let chosen = manager.chooseUpstreamIndex(sessionId: "session-A", shouldPin: true)
+    #expect(chosen == nil)
 }
 
 @Test func sessionManagerRepinsAfterUpstreamExit() async throws {
@@ -607,8 +629,8 @@ import Testing
     _ = manager.session(id: sessionIdA)
     _ = manager.session(id: sessionIdB)
 
-    let upstreamIndexA = manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true)
-    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true)
+    let upstreamIndexA = try #require(manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true))
+    let upstreamIndexB = try #require(manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true))
     #expect(upstreamIndexA != upstreamIndexB)
 
     let pinnedTo1SessionId = upstreamIndexA == 1 ? sessionIdA : sessionIdB
@@ -617,8 +639,42 @@ import Testing
     await upstream1.yield(.exit(1))
     try await Task.sleep(nanoseconds: 50_000_000)
 
-    let repinned = manager.chooseUpstreamIndex(sessionId: pinnedTo1SessionId, shouldPin: true)
+    let repinned = try #require(manager.chooseUpstreamIndex(sessionId: pinnedTo1SessionId, shouldPin: true))
     #expect(repinned == 0)
+}
+
+@Test func sessionManagerRepinsWhenPinnedUpstreamIsQuarantinedByTimeouts() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = TestUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    let sessionId = "session-timeout-repin"
+    _ = manager.session(id: sessionId)
+    let pinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+
+    manager.onRequestTimeout(sessionId: sessionId, requestIdKey: "dummy-1", upstreamIndex: pinned)
+    manager.onRequestTimeout(sessionId: sessionId, requestIdKey: "dummy-2", upstreamIndex: pinned)
+    manager.onRequestTimeout(sessionId: sessionId, requestIdKey: "dummy-3", upstreamIndex: pinned)
+
+    let repinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+    #expect(repinned != pinned)
 }
 
 @Test func sessionManagerExitClearsMappingsAndKeepsServingOnOtherUpstreams() async throws {
@@ -656,7 +712,7 @@ import Testing
     // The proxy should continue serving on upstream0.
     let originalB = RPCId(any: NSNumber(value: 201))!
     let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
-    let upstreamIndexB = manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true)
+    let upstreamIndexB = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
     #expect(upstreamIndexB == 0)
     let upstreamIdB = manager.assignUpstreamId(sessionId: sessionId, originalId: originalB, upstreamIndex: upstreamIndexB)
     manager.sendUpstream(try makeToolListRequest(id: upstreamIdB), upstreamIndex: upstreamIndexB)
@@ -672,6 +728,99 @@ import Testing
     }
 }
 
+@Test func sessionManagerReturnsOverloadedErrorWhenUpstreamRejectsSend() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream = AlwaysOverloadedUpstreamClient()
+    let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+    let sessionId = "session-overloaded"
+    let session = manager.session(id: sessionId)
+    let original = RPCId(any: NSNumber(value: 910))!
+    let future = session.router.registerRequest(idKey: original.key, on: eventLoop, timeout: .seconds(1))
+    let upstreamId = manager.assignUpstreamId(sessionId: sessionId, originalId: original, upstreamIndex: 0)
+    manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: 0)
+
+    let response = try decodeJSON(from: try await future.get())
+    let error = response["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32002)
+    #expect((error?["message"] as? String) == "upstream overloaded")
+}
+
+@Test func sessionManagerInitializeReturnsOverloadedErrorWhenUpstreamRejectsSend() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream = AlwaysOverloadedUpstreamClient()
+    let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+    let original = RPCId(any: NSNumber(value: 1001))!
+    let future = manager.registerInitialize(
+        originalId: original,
+        requestObject: makeInitializeRequest(id: 1001),
+        on: eventLoop
+    )
+
+    let response = try decodeJSON(from: try await future.get())
+    let error = response["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32002)
+    #expect((error?["message"] as? String) == "upstream overloaded")
+}
+
+@Test func sessionManagerRepinsWhenPinnedUpstreamBecomesOverloaded() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream0 = ToggleableOverloadUpstreamClient()
+    let upstream1 = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+    // Initialize both upstreams.
+    try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+    let init0 = await upstream0.sent()
+    let init0Id = try extractUpstreamId(from: init0[0])
+    await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+    try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+    let init1 = await upstream1.sent()
+    let init1Id = try extractUpstreamId(from: init1[0])
+    await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+    try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+    try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+    let sessionId = "session-overload-repin"
+    let session = manager.session(id: sessionId)
+    let pinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+    #expect(pinned == 0)
+
+    await upstream0.setOverloaded(true)
+
+    let original = RPCId(any: NSNumber(value: 920))!
+    let future = session.router.registerRequest(idKey: original.key, on: eventLoop, timeout: .seconds(1))
+    let upstreamId = manager.assignUpstreamId(sessionId: sessionId, originalId: original, upstreamIndex: pinned)
+    manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: pinned)
+
+    let response = try decodeJSON(from: try await future.get())
+    let error = response["error"] as? [String: Any]
+    #expect((error?["code"] as? NSNumber)?.intValue == -32002)
+    #expect((error?["message"] as? String) == "upstream overloaded")
+
+    let repinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+    #expect(repinned == 1)
+
+    let original2 = RPCId(any: NSNumber(value: 921))!
+    let future2 = session.router.registerRequest(idKey: original2.key, on: eventLoop, timeout: .seconds(1))
+    let upstreamId2 = manager.assignUpstreamId(sessionId: sessionId, originalId: original2, upstreamIndex: repinned)
+    manager.sendUpstream(try makeToolListRequest(id: upstreamId2), upstreamIndex: repinned)
+    await upstream1.yield(.message(try makeToolListResponse(id: upstreamId2)))
+    _ = try await future2.get()
+}
+
 private func makeConfig(eagerInitialize: Bool, requestTimeout: TimeInterval) -> ProxyConfig {
     ProxyConfig(
         listenHost: "127.0.0.1",
@@ -685,6 +834,68 @@ private func makeConfig(eagerInitialize: Bool, requestTimeout: TimeInterval) -> 
         eagerInitialize: eagerInitialize,
         prewarmToolsList: false
     )
+}
+
+private actor AlwaysOverloadedUpstreamClient: UpstreamClient {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        _ = data
+        return .overloaded
+    }
+}
+
+private actor ToggleableOverloadUpstreamClient: UpstreamClient {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private var sentMessages: [Data] = []
+    private var overloaded = false
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func setOverloaded(_ value: Bool) {
+        overloaded = value
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        sentMessages.append(data)
+        return overloaded ? .overloaded : .accepted
+    }
+
+    func yield(_ event: UpstreamEvent) async {
+        continuation.yield(event)
+    }
+
+    func sent() async -> [Data] {
+        sentMessages
+    }
 }
 
 private func makeInitializeRequest(id: Int) -> [String: Any] {
@@ -737,6 +948,22 @@ private func shutdown(_ group: EventLoopGroup) async {
 
 private func waitForSentCount(
     _ upstream: TestUpstreamClient,
+    count: Int,
+    timeoutSeconds: UInt64
+) async throws {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    while Date() < deadline {
+        if await upstream.sent().count >= count {
+            return
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    let actual = await upstream.sent().count
+    throw WaitForSentCountError.timeout(expected: count, actual: actual)
+}
+
+private func waitForSentCount(
+    _ upstream: ToggleableOverloadUpstreamClient,
     count: Int,
     timeoutSeconds: UInt64
 ) async throws {

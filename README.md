@@ -29,9 +29,9 @@ Replace `xcrun mcpbridge` with one of the following:
 
 ```bash
 codex mcp remove xcode
-codex mcp add xcode --url http://localhost:8765/mcp
-# or
 codex mcp add xcode -- xcode-mcp-proxy
+# or
+codex mcp add xcode --url http://localhost:8765/mcp
 ```
 
 ### Claude Code

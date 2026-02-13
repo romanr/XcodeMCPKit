@@ -144,7 +144,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard acceptsEventStream(head.headers) else {
+        guard HTTPRequestValidator.acceptsEventStream(head.headers) else {
             sendPlain(
                 on: context.channel,
                 status: .notAcceptable,
@@ -156,7 +156,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard let sessionId = sessionIdFromHeaders(head.headers) else {
+        guard let sessionId = HTTPRequestValidator.sessionId(from: head.headers) else {
             sendPlain(
                 on: context.channel,
                 status: .unauthorized,
@@ -206,7 +206,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleDelete(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        guard let sessionId = sessionIdFromHeaders(head.headers) else {
+        guard let sessionId = HTTPRequestValidator.sessionId(from: head.headers) else {
             sendPlain(
                 on: context.channel,
                 status: .unauthorized,
@@ -224,13 +224,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handlePost(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        let wantsEventStream = acceptsEventStream(head.headers)
-        let wantsJSON = acceptsJSON(head.headers)
-        // Prefer JSON when the client accepts both. Some MCP clients advertise
-        // `text/event-stream` but expect JSON for ordinary request/response calls
-        // such as `initialize` and `tools/list`.
-        let prefersEventStream = wantsEventStream && !wantsJSON
-        guard wantsEventStream || wantsJSON else {
+        let prefersEventStream: Bool
+        do {
+            prefersEventStream = try HTTPRequestValidator.postPreference(for: head.headers)
+        } catch HTTPRequestValidationFailure.notAcceptable {
             sendPlain(
                 on: context.channel,
                 status: .notAcceptable,
@@ -240,13 +237,21 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 requestLog: requestLog
             )
             return
-        }
-
-        guard contentTypeIsJSON(head.headers) else {
+        } catch HTTPRequestValidationFailure.unsupportedMediaType {
             sendPlain(
                 on: context.channel,
                 status: .unsupportedMediaType,
                 body: "content-type must be application/json",
+                keepAlive: head.isKeepAlive,
+                sessionId: nil,
+                requestLog: requestLog
+            )
+            return
+        } catch {
+            sendPlain(
+                on: context.channel,
+                status: .badRequest,
+                body: "invalid request headers",
                 keepAlive: head.isKeepAlive,
                 sessionId: nil,
                 requestLog: requestLog
@@ -269,14 +274,23 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let headerSessionId = sessionIdFromHeaders(head.headers)
+        let headerSessionId = HTTPRequestValidator.sessionId(from: head.headers)
         let headerSessionExists = headerSessionId.map { sessionManager.hasSession(id: $0) } ?? false
 
         if let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
            let method = object["method"] as? String {
             if method == "initialize" {
                 guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
-                    sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
+                    sendMCPError(
+                        on: context.channel,
+                        id: nil,
+                        code: -32600,
+                        message: "missing id",
+                        prefersEventStream: prefersEventStream,
+                        keepAlive: head.isKeepAlive,
+                        sessionId: headerSessionId ?? UUID().uuidString,
+                        requestLog: requestLog
+                    )
                     return
                 }
                 let sessionId = headerSessionId ?? UUID().uuidString
@@ -304,7 +318,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                             self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
                         }
                     case .failure:
-                        self.sendPlain(on: channel, status: .gatewayTimeout, body: "upstream timeout", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+                        self.sendMCPError(
+                            on: channel,
+                            id: originalId,
+                            code: -32000,
+                            message: "upstream timeout",
+                            prefersEventStream: prefersEventStream,
+                            keepAlive: keepAlive,
+                            sessionId: sessionId,
+                            requestLog: requestLog
+                        )
                     }
                 }
                 return
@@ -317,7 +340,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             // empty list response locally so clients don't choke on unsupported-method errors.
             if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
                 guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
-                    sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
+                    sendMCPError(
+                        on: context.channel,
+                        id: nil,
+                        code: -32600,
+                        message: "missing id",
+                        prefersEventStream: prefersEventStream,
+                        keepAlive: head.isKeepAlive,
+                        sessionId: headerSessionId ?? UUID().uuidString,
+                        requestLog: requestLog
+                    )
                     return
                 }
 
@@ -378,7 +410,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     metadata: [
                         "session": .string(headerSessionId),
                         "has_params": .string(hasParams ? "true" : "false"),
-                        "pinned_upstream": .string("\(pinnedUpstreamIndex)"),
+                        "pinned_upstream": .string(pinnedUpstreamIndex.map(String.init) ?? "none"),
                     ]
                 )
                 // Intentionally do not refresh tools/list in the background.
@@ -408,12 +440,44 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         let sessionId = headerSessionId ?? UUID().uuidString
+        let requestMetadata = MCPErrorResponder.requestMetadata(from: bodyData)
+        let requestIDs = requestMetadata.ids
+        let requestIsBatch = requestMetadata.isBatch
+        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
 
         if sessionManager.isInitialized() == false {
-            sendPlain(
+            if requestIDs.isEmpty {
+                sendPlain(
+                    on: context.channel,
+                    status: .unprocessableEntity,
+                    body: "expected initialize request",
+                    keepAlive: head.isKeepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            } else {
+                sendMCPError(
+                    on: context.channel,
+                    ids: requestIDs,
+                    code: -32000,
+                    message: "expected initialize request",
+                    forceBatchArray: requestIsBatch,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: head.isKeepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            }
+            return
+        }
+
+        guard let parsedRequestJSON else {
+            sendMCPError(
                 on: context.channel,
-                status: .unprocessableEntity,
-                body: "expected initialize request",
+                id: nil,
+                code: -32700,
+                message: "invalid json",
+                prefersEventStream: prefersEventStream,
                 keepAlive: head.isKeepAlive,
                 sessionId: sessionId,
                 requestLog: requestLog
@@ -421,29 +485,32 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let shouldPinUpstream: Bool = {
-            guard let any = try? JSONSerialization.jsonObject(with: bodyData, options: []) else {
-                return false
+        let shouldPinUpstream = MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
+        guard let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: shouldPinUpstream) else {
+            if requestIDs.isEmpty {
+                sendPlain(
+                    on: context.channel,
+                    status: .serviceUnavailable,
+                    body: "upstream unavailable",
+                    keepAlive: head.isKeepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            } else {
+                sendMCPError(
+                    on: context.channel,
+                    ids: requestIDs,
+                    code: -32001,
+                    message: "upstream unavailable",
+                    forceBatchArray: requestIsBatch,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: head.isKeepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
             }
-            if let object = any as? [String: Any] {
-                guard let method = object["method"] as? String, method != "initialize" else {
-                    return false
-                }
-                return object["id"] != nil && !(object["id"] is NSNull)
-            }
-            if let array = any as? [Any] {
-                for item in array {
-                    guard let object = item as? [String: Any] else { continue }
-                    guard let method = object["method"] as? String, method != "initialize" else { continue }
-                    if let id = object["id"], !(id is NSNull) {
-                        return true
-                    }
-                }
-            }
-            return false
-        }()
-
-        let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: shouldPinUpstream)
+            return
+        }
 
         let transform: RequestTransform
         do {
@@ -459,7 +526,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             )
         } catch {
-            sendPlain(on: context.channel, status: .badRequest, body: "invalid json", keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
+            sendMCPError(
+                on: context.channel,
+                id: nil,
+                code: -32700,
+                message: "invalid json",
+                prefersEventStream: prefersEventStream,
+                keepAlive: head.isKeepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
             return
         }
 
@@ -481,14 +557,28 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         if headerSessionId == nil {
             if transform.isBatch || transform.method != "initialize" || !transform.expectsResponse {
-                sendPlain(
-                    on: context.channel,
-                    status: .unprocessableEntity,
-                    body: "expected initialize request",
-                    keepAlive: head.isKeepAlive,
-                    sessionId: sessionId,
-                    requestLog: requestLog
-                )
+                if transform.responseIds.isEmpty {
+                    sendPlain(
+                        on: context.channel,
+                        status: .unprocessableEntity,
+                        body: "expected initialize request",
+                        keepAlive: head.isKeepAlive,
+                        sessionId: sessionId,
+                        requestLog: requestLog
+                    )
+                } else {
+                    sendMCPError(
+                        on: context.channel,
+                        ids: transform.responseIds,
+                        code: -32000,
+                        message: "expected initialize request",
+                        forceBatchArray: transform.isBatch,
+                        prefersEventStream: prefersEventStream,
+                        keepAlive: head.isKeepAlive,
+                        sessionId: sessionId,
+                        requestLog: requestLog
+                    )
+                }
                 return
             }
         }
@@ -497,12 +587,25 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         if transform.expectsResponse {
             let future: EventLoopFuture<ByteBuffer>
+            let requestTimeout = MCPMethodDispatcher.timeoutForMethod(
+                transform.method,
+                defaultSeconds: config.requestTimeout
+            )
             if transform.isBatch {
-                future = session.router.registerBatch(on: context.eventLoop)
+                future = session.router.registerBatch(on: context.eventLoop, timeout: requestTimeout)
             } else if let idKey = transform.idKey {
-                future = session.router.registerRequest(idKey: idKey, on: context.eventLoop)
+                future = session.router.registerRequest(idKey: idKey, on: context.eventLoop, timeout: requestTimeout)
             } else {
-                sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
+                sendMCPError(
+                    on: context.channel,
+                    id: nil,
+                    code: -32600,
+                    message: "missing id",
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: head.isKeepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
                 return
             }
 
@@ -529,6 +632,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                        let result = JSONValue(any: resultAny) {
                         self.sessionManager.setCachedToolsListResult(result)
                     }
+                    if self.shouldNotifyUpstreamSuccess(for: responseData) {
+                        for responseId in transform.responseIds {
+                            self.sessionManager.onRequestSucceeded(
+                                sessionId: sessionIdCopy,
+                                requestIdKey: responseId.key,
+                                upstreamIndex: upstreamIndex
+                            )
+                        }
+                    }
                     if prefersEventStream {
                         self.sendSingleSSE(on: channel, data: responseData, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                     } else {
@@ -537,7 +649,31 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                     }
                 case .failure:
-                    self.sendPlain(on: channel, status: .gatewayTimeout, body: "upstream timeout", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
+                    if let firstResponseId = transform.responseIds.first {
+                        self.sessionManager.onRequestTimeout(
+                            sessionId: sessionIdCopy,
+                            requestIdKey: firstResponseId.key,
+                            upstreamIndex: upstreamIndex
+                        )
+                        for responseId in transform.responseIds.dropFirst() {
+                            self.sessionManager.removeUpstreamIdMapping(
+                                sessionId: sessionIdCopy,
+                                requestIdKey: responseId.key,
+                                upstreamIndex: upstreamIndex
+                            )
+                        }
+                    }
+                    self.sendMCPError(
+                        on: channel,
+                        ids: transform.responseIds,
+                        code: -32000,
+                        message: "upstream timeout",
+                        forceBatchArray: transform.isBatch,
+                        prefersEventStream: prefersEventStream,
+                        keepAlive: keepAlive,
+                        sessionId: sessionIdCopy,
+                        requestLog: requestLog
+                    )
                 }
             }
         } else {
@@ -551,7 +687,12 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
-        guard let payload = SSECodec.encodeDataEvent(data) else {
+        guard MCPResponseEmitter.sendSingleSSE(
+            on: channel,
+            data: data,
+            keepAlive: keepAlive,
+            sessionId: sessionId
+        ) else {
             sendPlain(
                 on: channel,
                 status: .badGateway,
@@ -562,24 +703,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         }
-
         logResponse(requestLog, status: .ok, sessionId: sessionId)
-        var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "text/event-stream")
-        headers.add(name: "Cache-Control", value: "no-cache")
-        headers.add(name: "Mcp-Session-Id", value: sessionId)
-
-        var head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
-        head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
-        channel.write(HTTPServerResponsePart.head(head), promise: nil)
-
-        var buffer = channel.allocator.buffer(capacity: payload.utf8.count)
-        buffer.writeString(payload)
-        channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
-        if !keepAlive {
-            channel.close(promise: nil)
-        }
     }
 
     private func rewriteUnsupportedResourcesListResponseIfNeeded(
@@ -676,10 +800,12 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     private func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
         logResponse(requestLog, status: .ok, sessionId: sessionId)
-        var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "application/json")
-        headers.add(name: "Mcp-Session-Id", value: sessionId)
-        Self.sendBuffer(on: channel, status: .ok, headers: headers, buffer: buffer, keepAlive: keepAlive)
+        MCPResponseEmitter.sendJSON(
+            on: channel,
+            buffer: buffer,
+            keepAlive: keepAlive,
+            sessionId: sessionId
+        )
     }
 
     private func sendPlain(
@@ -691,39 +817,130 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         requestLog: RequestLogContext
     ) {
         logResponse(requestLog, status: status, sessionId: sessionId)
-        var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
-        if let sessionId {
-            headers.add(name: "Mcp-Session-Id", value: sessionId)
-        }
-        var buffer = channel.allocator.buffer(capacity: body.utf8.count)
-        buffer.writeString(body)
-        Self.sendBuffer(on: channel, status: status, headers: headers, buffer: buffer, keepAlive: keepAlive)
+        MCPResponseEmitter.sendPlain(
+            on: channel,
+            status: status,
+            body: body,
+            keepAlive: keepAlive,
+            sessionId: sessionId
+        )
     }
 
     private func sendEmpty(on channel: Channel, status: HTTPResponseStatus, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
         logResponse(requestLog, status: status, sessionId: sessionId)
-        var headers = HTTPHeaders()
-        headers.add(name: "Mcp-Session-Id", value: sessionId)
-        Self.sendBuffer(on: channel, status: status, headers: headers, buffer: nil, keepAlive: keepAlive)
+        MCPResponseEmitter.sendEmpty(
+            on: channel,
+            status: status,
+            keepAlive: keepAlive,
+            sessionId: sessionId
+        )
     }
 
-    private static func sendBuffer(
+    private func sendMCPError(
         on channel: Channel,
-        status: HTTPResponseStatus,
-        headers: HTTPHeaders,
-        buffer: ByteBuffer?,
-        keepAlive: Bool
+        id: RPCId?,
+        code: Int,
+        message: String,
+        prefersEventStream: Bool,
+        keepAlive: Bool,
+        sessionId: String,
+        requestLog: RequestLogContext
     ) {
-        var head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
-        head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
-        channel.write(HTTPServerResponsePart.head(head), promise: nil)
-        if let buffer {
-            channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
+        guard let data = MCPErrorResponder.errorResponseData(
+            id: id,
+            code: code,
+            message: message
+        ) else {
+            sendPlain(
+                on: channel,
+                status: .badGateway,
+                body: "invalid error response",
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+            return
         }
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
-        if !keepAlive {
-            channel.close(promise: nil)
+        if prefersEventStream {
+            sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+        } else {
+            var buffer = channel.allocator.buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+        }
+    }
+
+    private func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {
+        guard let any = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
+            return true
+        }
+
+        if let object = any as? [String: Any] {
+            return isUpstreamOverloadedErrorResponse(object) == false
+        }
+
+        if let array = any as? [Any] {
+            let objects = array.compactMap { $0 as? [String: Any] }
+            guard objects.isEmpty == false else {
+                return true
+            }
+            return objects.allSatisfy(isUpstreamOverloadedErrorResponse) == false
+        }
+
+        return true
+    }
+
+    private func isUpstreamOverloadedErrorResponse(_ object: [String: Any]) -> Bool {
+        guard let error = object["error"] as? [String: Any] else {
+            return false
+        }
+
+        let code: Int?
+        if let number = error["code"] as? NSNumber {
+            code = number.intValue
+        } else {
+            code = error["code"] as? Int
+        }
+        guard code == -32002 else {
+            return false
+        }
+
+        return (error["message"] as? String) == "upstream overloaded"
+    }
+
+    private func sendMCPError(
+        on channel: Channel,
+        ids: [RPCId],
+        code: Int,
+        message: String,
+        forceBatchArray: Bool = false,
+        prefersEventStream: Bool,
+        keepAlive: Bool,
+        sessionId: String,
+        requestLog: RequestLogContext
+    ) {
+        guard let data = MCPErrorResponder.errorResponseData(
+            ids: ids,
+            code: code,
+            message: message,
+            forceBatchArray: forceBatchArray
+        ) else {
+            sendPlain(
+                on: channel,
+                status: .badGateway,
+                body: "invalid error response",
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+            return
+        }
+        if prefersEventStream {
+            sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+        } else {
+            var buffer = channel.allocator.buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
         }
     }
 
@@ -738,10 +955,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             buffer.writeString(payload)
             _ = channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
         }
-    }
-
-    private func sessionIdFromHeaders(_ headers: HTTPHeaders) -> String? {
-        headers.first(name: "Mcp-Session-Id")
     }
 
     private func logRequest(_ request: RequestLogContext) {
@@ -782,20 +995,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         return String(describing: address)
     }
 
-    private func acceptsEventStream(_ headers: HTTPHeaders) -> Bool {
-        guard let accept = headers.first(name: "Accept")?.lowercased() else { return false }
-        return accept.contains("text/event-stream")
-    }
-
-    private func acceptsJSON(_ headers: HTTPHeaders) -> Bool {
-        guard let accept = headers.first(name: "Accept")?.lowercased() else { return true }
-        return accept.contains("application/json") || accept.contains("*/*")
-    }
-
-    private func contentTypeIsJSON(_ headers: HTTPHeaders) -> Bool {
-        guard let contentType = headers.first(name: "Content-Type")?.lowercased() else { return false }
-        return contentType.hasPrefix("application/json")
-    }
 }
 
 struct RequestInfo {
@@ -809,6 +1008,7 @@ struct RequestTransform {
     let expectsResponse: Bool
     let isBatch: Bool
     let idKey: String?
+    let responseIds: [RPCId]
     let method: String?
     let originalId: RPCId?
     let isCacheableToolsListRequest: Bool
@@ -835,6 +1035,7 @@ enum RequestInspector {
                     expectsResponse: true,
                     isBatch: false,
                     idKey: rpcId.key,
+                    responseIds: [rpcId],
                     method: method,
                     originalId: rpcId,
                     isCacheableToolsListRequest: isCacheableToolsListRequest
@@ -846,6 +1047,7 @@ enum RequestInspector {
                 expectsResponse: false,
                 isBatch: false,
                 idKey: nil,
+                responseIds: [],
                 method: method,
                 originalId: nil,
                 isCacheableToolsListRequest: isCacheableToolsListRequest
@@ -854,13 +1056,14 @@ enum RequestInspector {
 
         if let array = json as? [Any] {
             var transformed: [Any] = []
-            var hasRequest = false
+            var responseIds: [RPCId] = []
+            responseIds.reserveCapacity(array.count)
             for item in array {
                 if var object = item as? [String: Any] {
                     if let id = object["id"], let rpcId = RPCId(any: id) {
                         let upstreamId = mapId(sessionId, rpcId)
                         object["id"] = upstreamId
-                        hasRequest = true
+                        responseIds.append(rpcId)
                     }
                     transformed.append(object)
                 } else {
@@ -870,9 +1073,10 @@ enum RequestInspector {
             let upstream = try JSONSerialization.data(withJSONObject: transformed, options: [])
             return RequestTransform(
                 upstreamData: upstream,
-                expectsResponse: hasRequest,
+                expectsResponse: !responseIds.isEmpty,
                 isBatch: true,
                 idKey: nil,
+                responseIds: responseIds,
                 method: nil,
                 originalId: nil,
                 isCacheableToolsListRequest: false
@@ -884,6 +1088,7 @@ enum RequestInspector {
             expectsResponse: false,
             isBatch: false,
             idKey: nil,
+            responseIds: [],
             method: nil,
             originalId: nil,
             isCacheableToolsListRequest: false

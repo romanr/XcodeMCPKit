@@ -201,9 +201,9 @@ private actor EchoUpstreamClient: UpstreamClient {
         continuation.finish()
     }
 
-    func send(_ data: Data) async {
+    func send(_ data: Data) async -> UpstreamSendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return
+            return .accepted
         }
         var responses: [Data] = []
         if let object = json as? [String: Any] {
@@ -222,6 +222,7 @@ private actor EchoUpstreamClient: UpstreamClient {
         for response in responses {
             continuation.yield(.message(response))
         }
+        return .accepted
     }
 
     private func makeResponse(from object: [String: Any]) -> Data? {

@@ -8,6 +8,7 @@ actor UpstreamProcess: UpstreamClient {
         var environment: [String: String]
         var restartInitialDelay: TimeInterval
         var restartMaxDelay: TimeInterval
+        var maxQueuedWriteBytes: Int
     }
 
     typealias Event = UpstreamEvent
@@ -25,6 +26,9 @@ actor UpstreamProcess: UpstreamClient {
     private var framer = StdioFramer()
     private var isStopping = false
     private var restartTask: Task<Void, Never>?
+    private var queuedWriteBytes = 0
+    private var writeGeneration: UInt64 = 0
+    private let writeQueue = DispatchQueue(label: "XcodeMCPProxy.UpstreamProcess.write")
     private let logger: Logger = ProxyLogging.make("upstream")
 
     init(config: Config) {
@@ -68,7 +72,7 @@ actor UpstreamProcess: UpstreamClient {
         // The termination handler will emit an .exit event and schedule a restart.
     }
 
-    func send(_ data: Data) async {
+    func send(_ data: Data) async -> UpstreamSendResult {
         if process == nil {
             startLocked()
         }
@@ -76,7 +80,39 @@ actor UpstreamProcess: UpstreamClient {
         if payload.last != 0x0A {
             payload.append(0x0A)
         }
-        stdinPipe.fileHandleForWriting.write(payload)
+        if queuedWriteBytes + payload.count > config.maxQueuedWriteBytes {
+            logger.warning(
+                "Upstream write queue overloaded",
+                metadata: [
+                    "queued_bytes": "\(queuedWriteBytes)",
+                    "payload_bytes": "\(payload.count)",
+                    "limit_bytes": "\(config.maxQueuedWriteBytes)",
+                ]
+            )
+            return .overloaded
+        }
+
+        let queuedPayload = payload
+        let queuedPayloadBytes = queuedPayload.count
+        queuedWriteBytes += queuedPayloadBytes
+        let handle = stdinPipe.fileHandleForWriting
+        let generation = writeGeneration
+        writeQueue.async { [weak self] in
+            var writeError: Error?
+            do {
+                try handle.write(contentsOf: queuedPayload)
+            } catch {
+                writeError = error
+            }
+            Task { [weak self] in
+                await self?.completeQueuedWrite(
+                    bytes: queuedPayloadBytes,
+                    generation: generation,
+                    error: writeError
+                )
+            }
+        }
+        return .accepted
     }
 
     private func startLocked() {
@@ -86,6 +122,8 @@ actor UpstreamProcess: UpstreamClient {
         stdoutPipe = Pipe()
         stderrPipe = Pipe()
         framer = StdioFramer()
+        queuedWriteBytes = 0
+        writeGeneration &+= 1
 
         let (executableURL, args) = resolveCommand(command: config.command, args: config.args)
         let process = Process()
@@ -135,6 +173,8 @@ actor UpstreamProcess: UpstreamClient {
     private func stopLocked() {
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
+        queuedWriteBytes = 0
+        writeGeneration &+= 1
         if let process = process {
             terminatingProcess = process
             process.terminate()
@@ -235,5 +275,17 @@ actor UpstreamProcess: UpstreamClient {
         }
         let env = "/usr/bin/env"
         return (URL(fileURLWithPath: env), [command] + args)
+    }
+
+    private func completeQueuedWrite(
+        bytes: Int,
+        generation: UInt64,
+        error: Error?
+    ) {
+        if generation == writeGeneration {
+            queuedWriteBytes = max(0, queuedWriteBytes - bytes)
+        }
+        guard let error else { return }
+        logger.warning("Upstream async write failed", metadata: ["error": "\(error)"])
     }
 }

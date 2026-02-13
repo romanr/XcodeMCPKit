@@ -29,9 +29,9 @@ swift run -c release xcode-mcp-proxy-install
 
 ```bash
 codex mcp remove xcode
-codex mcp add xcode --url http://localhost:8765/mcp
-# または
 codex mcp add xcode -- xcode-mcp-proxy
+# または
+codex mcp add xcode --url http://localhost:8765/mcp
 ```
 
 ### Claude Code

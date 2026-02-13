@@ -51,9 +51,13 @@ final class ProxyRouter: Sendable {
         return promise.futureResult
     }
 
-    func registerBatch(on eventLoop: EventLoop) -> EventLoopFuture<ByteBuffer> {
+    func registerBatch(
+        on eventLoop: EventLoop,
+        timeout: TimeAmount? = nil
+    ) -> EventLoopFuture<ByteBuffer> {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
-        let timeout = requestTimeout.map { timeout in
+        let effectiveTimeout = timeout ?? requestTimeout
+        let timeout = effectiveTimeout.map { timeout in
             eventLoop.scheduleTask(in: timeout) { [weak self] in
                 guard let self else { return }
                 self.failBatchTimeout()

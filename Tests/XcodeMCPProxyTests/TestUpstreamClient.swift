@@ -25,8 +25,9 @@ actor TestUpstreamClient: UpstreamClient {
         continuation.finish()
     }
 
-    func send(_ data: Data) async {
+    func send(_ data: Data) async -> UpstreamSendResult {
         sentMessages.append(data)
+        return .accepted
     }
 
     func yield(_ event: UpstreamEvent) async {

@@ -599,8 +599,19 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return upstreamData
         }
 
-        if let result = object["result"] as? [String: Any],
-           result[expectedKey] is [Any] {
+        // Happy path: upstream already returned a valid Resources result shape.
+        if let result = object["result"] {
+            if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
+                return upstreamData
+            }
+
+            // Xcode MCP may return non-standard "tool-style" error payloads via `result`,
+            // for example:
+            //   {"result":{"content":[...],"isError":true}, ...}
+            // Normalize any non-conforming `result` to an empty Resources list.
+            if let empty = emptyResourcesListResponseData(method: method, originalId: originalId) {
+                return empty
+            }
             return upstreamData
         }
 
@@ -615,6 +626,13 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return upstreamData
         }
 
+        guard let empty = emptyResourcesListResponseData(method: method, originalId: originalId) else {
+            return upstreamData
+        }
+        return empty
+    }
+
+    private func emptyResourcesListResponseData(method: String, originalId: RPCId) -> Data? {
         let result: [String: Any] = (method == "resources/list")
             ? ["resources": [Any]()]
             : ["resourceTemplates": [Any]()]
@@ -623,11 +641,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             "id": originalId.value.foundationObject,
             "result": result,
         ]
-        guard JSONSerialization.isValidJSONObject(response),
-              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
-            return upstreamData
+        guard JSONSerialization.isValidJSONObject(response) else {
+            return nil
         }
-        return data
+        return try? JSONSerialization.data(withJSONObject: response, options: [])
     }
 
     private func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {

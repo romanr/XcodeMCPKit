@@ -695,6 +695,81 @@ import Testing
     #expect(resources?.isEmpty == true)
 }
 
+@Test func httpResourcesListRewritesNonStandardErrorResultToEmptyArrayAfterInit() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config) { method, originalId in
+        #expect(method == "resources/list")
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": originalId.value.foundationObject,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "The message contained an unknown method 'resources/list'",
+                    ],
+                ],
+                "isError": true,
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    // Initialize to establish a session id.
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any](),
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let initResponse = try collectResponse(from: channel)
+    let sessionId = initResponse.head.headers.first(name: "Mcp-Session-Id")
+    #expect(sessionId?.isEmpty == false)
+
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 456,
+        "method": "resources/list",
+        "params": [String: Any](),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: sessionId!)
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+
+    let object = try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: []) as? [String: Any]
+    #expect(object?["error"] == nil)
+    let result = object?["result"] as? [String: Any]
+    let resources = result?["resources"] as? [Any]
+    #expect(resources?.isEmpty == true)
+}
+
 @Test func httpResourcesListDoesNotMaskNonMethodNotFoundErrorsAfterInit() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()

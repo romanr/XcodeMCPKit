@@ -29,9 +29,11 @@ swift run -c release xcode-mcp-proxy-install
 
 ```bash
 codex mcp remove xcode
-codex mcp add xcode -- xcode-mcp-proxy
-# または
+# 推奨: Streamable HTTP
 codex mcp add xcode --url http://localhost:8765/mcp
+
+# 代替: STDIO
+codex mcp add xcode -- xcode-mcp-proxy
 ```
 
 ### Claude Code

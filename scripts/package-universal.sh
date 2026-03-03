@@ -10,6 +10,7 @@ Requires staged binaries from:
   <dist-root>/x86_64/bin/
 
 Outputs:
+  <output-dir>/xcode-mcp-proxy.tar.gz
   <output-dir>/xcode-mcp-proxy-darwin-arm64.tar.gz
   <output-dir>/xcode-mcp-proxy-darwin-x86_64.tar.gz
   <output-dir>/SHA256SUMS.txt
@@ -67,9 +68,44 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 mkdir -p "$output_base"
 
+universal_archive="$output_base/xcode-mcp-proxy.tar.gz"
 arm_archive="$output_base/xcode-mcp-proxy-darwin-arm64.tar.gz"
 x86_archive="$output_base/xcode-mcp-proxy-darwin-x86_64.tar.gz"
-rm -f "$arm_archive" "$x86_archive" "$output_base/SHA256SUMS.txt"
+find "$output_base" -maxdepth 1 -type f -name 'xcode-mcp-proxy*.tar.gz' -delete
+rm -f "$output_base/SHA256SUMS.txt"
+
+products=(
+  "xcode-mcp-proxy"
+  "xcode-mcp-proxy-server"
+  "xcode-mcp-proxy-install"
+)
+
+for product in "${products[@]}"; do
+  arm_product="$arm_bin/$product"
+  x86_product="$x86_bin/$product"
+  if [[ ! -f "$arm_product" ]]; then
+    echo "Missing staged binary: $arm_product" >&2
+    exit 1
+  fi
+  if [[ ! -f "$x86_product" ]]; then
+    echo "Missing staged binary: $x86_product" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$tmp_dir/universal/bin"
+for product in "${products[@]}"; do
+  target="$tmp_dir/universal/bin/$product"
+  lipo -create -output "$target" "$arm_bin/$product" "$x86_bin/$product"
+  chmod +x "$target"
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --remove-signature "$target" >/dev/null 2>&1 || true
+  fi
+done
+
+cp -R "$tmp_dir/universal/bin" "$tmp_dir/bin"
+tar -C "$tmp_dir" -czf "$universal_archive" bin
+rm -rf "$tmp_dir/bin"
 
 cp -R "$arm_bin" "$tmp_dir/bin"
 tar -C "$tmp_dir" -czf "$arm_archive" bin
@@ -77,14 +113,17 @@ rm -rf "$tmp_dir/bin"
 
 cp -R "$x86_bin" "$tmp_dir/bin"
 tar -C "$tmp_dir" -czf "$x86_archive" bin
+rm -rf "$tmp_dir/bin"
 
 (
   cd "$output_base"
   shasum -a 256 \
+    xcode-mcp-proxy.tar.gz \
     xcode-mcp-proxy-darwin-arm64.tar.gz \
     xcode-mcp-proxy-darwin-x86_64.tar.gz > SHA256SUMS.txt
 )
 
+echo "Created release package: $universal_archive"
 echo "Created release package: $arm_archive"
 echo "Created release package: $x86_archive"
 echo "Created checksum file: $output_base/SHA256SUMS.txt"

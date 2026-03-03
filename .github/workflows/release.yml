@@ -96,7 +96,7 @@ jobs:
           name: dist-x86_64
           path: dist/x86_64
 
-      - name: Package universal binaries
+      - name: Package release archives
         run: scripts/package-universal.sh --dist-root dist --output-dir release
 
       - name: Publish GitHub Release

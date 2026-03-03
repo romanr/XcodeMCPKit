@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    name: Test
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        run: swift test
+
+  build-arm64:
+    name: Build (arm64)
+    needs: test
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: scripts/build-release.sh --arch arm64 --version "${GITHUB_REF_NAME}" --dist-root dist
+
+      - name: Upload arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-arm64
+          path: dist/arm64
+          if-no-files-found: error
+
+  build-x86_64:
+    name: Build (x86_64)
+    needs: test
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: scripts/build-release.sh --arch x86_64 --version "${GITHUB_REF_NAME}" --dist-root dist
+
+      - name: Upload x86_64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-x86_64
+          path: dist/x86_64
+          if-no-files-found: error
+
+  release:
+    name: Package and Publish
+    needs:
+      - build-arm64
+      - build-x86_64
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-arm64
+          path: dist/arm64
+
+      - name: Download x86_64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-x86_64
+          path: dist/x86_64
+
+      - name: Package universal binaries
+        run: scripts/package-universal.sh --version "${GITHUB_REF_NAME}" --dist-root dist --output-dir release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.tar.gz
+            release/SHA256SUMS.txt
+          generate_release_notes: true

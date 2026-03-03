@@ -13,6 +13,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Swift 6.2
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
+
       - name: Run tests
         run: swift test
 
@@ -23,6 +28,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Swift 6.2
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
 
       - name: Build release binaries
         run: scripts/build-release.sh --arch arm64 --version "${GITHUB_REF_NAME}" --dist-root dist
@@ -41,6 +51,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Swift 6.2
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
 
       - name: Build release binaries
         run: scripts/build-release.sh --arch x86_64 --version "${GITHUB_REF_NAME}" --dist-root dist
@@ -63,6 +78,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Swift 6.2
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
 
       - name: Download arm64 artifacts
         uses: actions/download-artifact@v4

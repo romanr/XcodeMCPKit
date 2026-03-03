@@ -78,7 +78,10 @@ products=(
 pushd "$repo_root" >/dev/null
 
 for product in "${products[@]}"; do
-  swift build -c release --arch "$arch" --product "$product"
+  swift build -c release \
+    -Xswiftc -strict-concurrency=minimal \
+    --arch "$arch" \
+    --product "$product"
 done
 
 bin_path="$(swift build -c release --arch "$arch" --show-bin-path)"

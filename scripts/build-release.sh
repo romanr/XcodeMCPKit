@@ -78,10 +78,10 @@ products=(
 pushd "$repo_root" >/dev/null
 
 for product in "${products[@]}"; do
-  swift build -c release --product "$product"
+  swift build -c release --arch "$arch" --product "$product"
 done
 
-bin_path="$(swift build -c release --show-bin-path)"
+bin_path="$(swift build -c release --arch "$arch" --show-bin-path)"
 rm -rf "$out_dir"
 mkdir -p "$bin_out"
 

@@ -8,15 +8,10 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.2"
 
       - name: Run tests
         run: swift test
@@ -24,15 +19,10 @@ jobs:
   build-arm64:
     name: Build (arm64)
     needs: test
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.2"
 
       - name: Build release binaries
         run: scripts/build-release.sh --arch arm64 --version "${GITHUB_REF_NAME}" --dist-root dist
@@ -47,15 +37,10 @@ jobs:
   build-x86_64:
     name: Build (x86_64)
     needs: test
-    runs-on: macos-13
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.2"
 
       - name: Build release binaries
         run: scripts/build-release.sh --arch x86_64 --version "${GITHUB_REF_NAME}" --dist-root dist
@@ -72,17 +57,12 @@ jobs:
     needs:
       - build-arm64
       - build-x86_64
-    runs-on: macos-latest
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.2"
 
       - name: Download arm64 artifacts
         uses: actions/download-artifact@v4

@@ -97,7 +97,7 @@ jobs:
           path: dist/x86_64
 
       - name: Package universal binaries
-        run: scripts/package-universal.sh --version "${GITHUB_REF_NAME}" --dist-root dist --output-dir release
+        run: scripts/package-universal.sh --dist-root dist --output-dir release
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

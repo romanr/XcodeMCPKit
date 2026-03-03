@@ -27,21 +27,22 @@ swift run -c release xcode-mcp-proxy-install
 
 Each release tag (`v*`) publishes:
 
-- `xcode-mcp-proxy_<tag>_darwin_universal.tar.gz`
+- `xcode-mcp-proxy-darwin-arm64.tar.gz`
+- `xcode-mcp-proxy-darwin-x86_64.tar.gz`
 - `SHA256SUMS.txt`
 
 Example:
 
 ```bash
 VERSION=v0.1.0
-ASSET="xcode-mcp-proxy_${VERSION}_darwin_universal.tar.gz"
 BASE_URL="https://github.com/<owner>/XcodeMCPKit/releases/download/${VERSION}"
 
-curl -fL -O "${BASE_URL}/${ASSET}"
+ARCHIVE="xcode-mcp-proxy-darwin-arm64.tar.gz"   # or xcode-mcp-proxy-darwin-x86_64.tar.gz
+curl -fL -O "${BASE_URL}/${ARCHIVE}"
 curl -fL -O "${BASE_URL}/SHA256SUMS.txt"
 shasum -a 256 -c SHA256SUMS.txt
 
-tar -xzf "${ASSET}"
+tar -xzf "${ARCHIVE}"
 mkdir -p "${HOME}/.local/bin"
 cp bin/* "${HOME}/.local/bin/"
 chmod +x "${HOME}/.local/bin/xcode-mcp-proxy" \

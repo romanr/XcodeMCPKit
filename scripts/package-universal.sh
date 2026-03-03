@@ -3,28 +3,24 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/package-universal.sh --version <tag> [--dist-root <dir>] [--output-dir <dir>]
+Usage: scripts/package-universal.sh [--dist-root <dir>] [--output-dir <dir>]
 
 Requires staged binaries from:
   <dist-root>/arm64/bin/
   <dist-root>/x86_64/bin/
 
 Outputs:
-  <output-dir>/xcode-mcp-proxy_<tag>_darwin_universal.tar.gz
+  <output-dir>/xcode-mcp-proxy-darwin-arm64.tar.gz
+  <output-dir>/xcode-mcp-proxy-darwin-x86_64.tar.gz
   <output-dir>/SHA256SUMS.txt
 EOF
 }
 
-version=""
 dist_root="dist"
 output_dir="release"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version)
-      version="${2:-}"
-      shift 2
-      ;;
     --dist-root)
       dist_root="${2:-}"
       shift 2
@@ -45,12 +41,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$version" ]]; then
-  echo "--version is required." >&2
-  usage
-  exit 1
-fi
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$dist_root" = /* ]]; then
   dist_base="$dist_root"
@@ -65,12 +55,6 @@ fi
 
 arm_bin="$dist_base/arm64/bin"
 x86_bin="$dist_base/x86_64/bin"
-binaries=(
-  "xcode-mcp-proxy"
-  "xcode-mcp-proxy-server"
-  "xcode-mcp-proxy-install"
-)
-
 for path in "$arm_bin" "$x86_bin"; do
   if [[ ! -d "$path" ]]; then
     echo "Missing staged directory: $path" >&2
@@ -81,27 +65,26 @@ done
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-mkdir -p "$tmp_dir/bin" "$output_base"
+mkdir -p "$output_base"
 
-for bin in "${binaries[@]}"; do
-  arm_src="$arm_bin/$bin"
-  x86_src="$x86_bin/$bin"
-  if [[ ! -f "$arm_src" || ! -f "$x86_src" ]]; then
-    echo "Missing binary for lipo merge: $bin" >&2
-    exit 1
-  fi
-  lipo -create "$arm_src" "$x86_src" -output "$tmp_dir/bin/$bin"
-  chmod +x "$tmp_dir/bin/$bin"
-done
+arm_archive="$output_base/xcode-mcp-proxy-darwin-arm64.tar.gz"
+x86_archive="$output_base/xcode-mcp-proxy-darwin-x86_64.tar.gz"
+rm -f "$arm_archive" "$x86_archive" "$output_base/SHA256SUMS.txt"
 
-archive_name="xcode-mcp-proxy_${version}_darwin_universal.tar.gz"
-archive_path="$output_base/$archive_name"
-tar -C "$tmp_dir" -czf "$archive_path" bin
+cp -R "$arm_bin" "$tmp_dir/bin"
+tar -C "$tmp_dir" -czf "$arm_archive" bin
+rm -rf "$tmp_dir/bin"
+
+cp -R "$x86_bin" "$tmp_dir/bin"
+tar -C "$tmp_dir" -czf "$x86_archive" bin
 
 (
   cd "$output_base"
-  shasum -a 256 "$archive_name" > SHA256SUMS.txt
+  shasum -a 256 \
+    xcode-mcp-proxy-darwin-arm64.tar.gz \
+    xcode-mcp-proxy-darwin-x86_64.tar.gz > SHA256SUMS.txt
 )
 
-echo "Created release package: $archive_path"
+echo "Created release package: $arm_archive"
+echo "Created release package: $x86_archive"
 echo "Created checksum file: $output_base/SHA256SUMS.txt"

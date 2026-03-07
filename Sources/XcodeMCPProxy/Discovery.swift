@@ -36,6 +36,7 @@ public enum Discovery {
         guard let data = try? Data(contentsOf: url) else { return nil }
         guard let record = try? decoder.decode(DiscoveryRecord.self, from: data) else { return nil }
         guard isProcessAlive(record.pid) else { return nil }
+        guard isLoopbackURL(record.url) else { return nil }
         return record
     }
 
@@ -104,5 +105,26 @@ public enum Discovery {
         }
         let normalizedHost = host.contains(":") ? "[\(host)]" : host
         return "\(scheme)://\(normalizedHost):\(port)/mcp"
+    }
+
+    private static func isLoopbackURL(_ raw: String) -> Bool {
+        guard let components = URLComponents(string: raw),
+              let host = components.host?.lowercased() else {
+            return false
+        }
+        return isLoopbackHost(host)
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        if host == "localhost" || host == "::1" { return true }
+        if host == "127.0.0.1" { return true }
+        if host.hasPrefix("127.") {
+            let segments = host.split(separator: ".", omittingEmptySubsequences: false)
+            if segments.count == 4,
+               segments.allSatisfy({ Int($0).map { (0...255).contains($0) } == true }) {
+                return true
+            }
+        }
+        return false
     }
 }

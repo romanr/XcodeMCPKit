@@ -456,7 +456,7 @@ import Testing
     #expect(receivedOther.isEmpty)
 }
 
-@Test func sessionManagerRoutesUnmappedNotificationsToUnpinnedSessionsWhenNoPinnedTargetsExist() async throws {
+@Test func sessionManagerDropsUnmappedNotificationsWhenNoPinnedTargetsExist() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }
     let eventLoop = group.next()
@@ -499,8 +499,7 @@ import Testing
     try await Task.sleep(nanoseconds: 50_000_000)
 
     let received = session.router.drainBufferedNotifications()
-    #expect(received.count == 1)
-    #expect(received.first == notification)
+    #expect(received.isEmpty)
 }
 
 @Test func sessionManagerDropsUnmappedResponsesEvenWhenPinnedTargetsExist() async throws {

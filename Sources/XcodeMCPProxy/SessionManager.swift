@@ -736,10 +736,8 @@ final class SessionManager: Sendable, SessionManaging {
 
     private func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
         // We have no id-based mapping for this upstream message, so we can't unambiguously route it to a
-        // single session. To reduce cross-talk across multiple concurrent agents, only deliver it to
-        // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
-        // deliver server-initiated notifications/requests to unpinned sessions so they don't miss
-        // pre-pin messages.
+        // single session. To avoid cross-session data disclosure, only deliver server-initiated
+        // notifications/requests to sessions that are already pinned to the same upstream.
         //
         // Never forward unmapped JSON-RPC responses (no `method`) to sessions: if we dropped a mapping
         // due to timeouts (e.g. a best-effort tools/list warmup) then a late response must not leak
@@ -788,41 +786,20 @@ final class SessionManager: Sendable, SessionManaging {
             return
         }
 
-        let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue { state -> ([SessionContext], [SessionContext]) in
+        let pinnedTargets = sessionsState.withLockedValue { state -> [SessionContext] in
             var pinned: [SessionContext] = []
-            var unpinned: [SessionContext] = []
             pinned.reserveCapacity(state.sessions.count)
-            unpinned.reserveCapacity(state.sessions.count)
             for record in state.sessions.values {
                 if record.pinnedUpstreamIndex == upstreamIndex {
                     pinned.append(record.context)
-                } else if record.pinnedUpstreamIndex == nil {
-                    unpinned.append(record.context)
                 }
             }
-            return (pinned, unpinned)
+            return pinned
         }
 
         if !pinnedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
                 for session in pinnedTargets {
-                    session.router.handleIncoming(payload)
-                }
-            }
-            return
-        }
-
-        if !unpinnedTargets.isEmpty {
-            logger.debug(
-                "Routing unmapped upstream message to unpinned sessions",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
-                    "bytes": .string("\(data.count)"),
-                    "targets": .string("\(unpinnedTargets.count)"),
-                ]
-            )
-            for payload in serverInitiatedPayloads {
-                for session in unpinnedTargets {
                     session.router.handleIncoming(payload)
                 }
             }

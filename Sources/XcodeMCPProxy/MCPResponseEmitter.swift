@@ -7,11 +7,13 @@ enum MCPResponseEmitter {
         on channel: Channel,
         buffer: ByteBuffer,
         keepAlive: Bool,
-        sessionId: String
+        sessionId: String?
     ) {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
-        headers.add(name: "Mcp-Session-Id", value: sessionId)
+        if let sessionId {
+            headers.add(name: "Mcp-Session-Id", value: sessionId)
+        }
         sendBuffer(on: channel, status: .ok, headers: headers, buffer: buffer, keepAlive: keepAlive)
     }
 

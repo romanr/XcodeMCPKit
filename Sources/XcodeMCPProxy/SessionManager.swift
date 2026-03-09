@@ -43,9 +43,28 @@ protocol SessionManaging: Sendable {
     func onRequestTimeout(sessionId: String, requestIdKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionId: String, requestIdKey: String, upstreamIndex: Int)
     func sendUpstream(_ data: Data, upstreamIndex: Int)
+    func debugSnapshot() -> ProxyDebugSnapshot
 }
 
 final class SessionManager: Sendable, SessionManaging {
+    private static let redactedDebugText = "<redacted>"
+
+    private struct DebugUpstreamState: Sendable {
+        var recentStderr: [ProxyDebugEvent] = []
+        var lastDecodeError: ProxyDebugEvent?
+        var lastBridgeError: ProxyDebugEvent?
+        var resyncCount = 0
+        var lastResyncAt: Date?
+        var lastResyncDroppedBytes: Int?
+        var lastResyncPreview: String?
+        var bufferedStdoutBytes = 0
+    }
+
+    private struct DebugState: Sendable {
+        var upstreams: [DebugUpstreamState] = []
+        var recentTraffic: [ProxyDebugTrafficEvent] = []
+    }
+
     private struct InitPending: Sendable {
         let eventLoop: EventLoop
         let promise: EventLoopPromise<ByteBuffer>
@@ -84,12 +103,15 @@ final class SessionManager: Sendable, SessionManaging {
     private let sessionsState = NIOLockedValueBox(SessionState())
     private let initState = NIOLockedValueBox(InitState())
     private let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
+    private let debugState = NIOLockedValueBox(DebugState())
     private let eventLoop: EventLoop
     private let idMapper: UpstreamIdMapper
     private let config: ProxyConfig
     private let logger: Logger = ProxyLogging.make("session")
     let upstreams: [any UpstreamClient]
     private let toolsListState = NIOLockedValueBox(ToolsListState())
+    private let debugTrafficLimit = 50
+    private let debugStderrLimit = 20
 
     private struct UpstreamState: Sendable {
         var isInitialized = false
@@ -129,6 +151,10 @@ final class SessionManager: Sendable, SessionManaging {
             state.upstreamStates = Array(repeating: UpstreamState(), count: upstreams.count)
             state.nextPick = 0
         }
+        debugState.withLockedValue { state in
+            state.upstreams = Array(repeating: DebugUpstreamState(), count: upstreams.count)
+            state.recentTraffic = []
+        }
 
         var tasks: [Task<Void, Never>] = []
         tasks.reserveCapacity(upstreams.count)
@@ -139,6 +165,12 @@ final class SessionManager: Sendable, SessionManaging {
                     switch event {
                     case .message(let data):
                         self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+                    case .stderr(let message):
+                        self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
+                    case .stdoutRecovery(let recovery):
+                        self.handleUpstreamRecovery(recovery, upstreamIndex: upstreamIndex)
+                    case .stdoutBufferSize(let size):
+                        self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
                     case .exit(let status):
                         self.handleUpstreamExit(status, upstreamIndex: upstreamIndex)
                     }
@@ -472,6 +504,11 @@ final class SessionManager: Sendable, SessionManaging {
             if let sessionId = mapping.sessionId, let originalId = mapping.originalId {
                 object["id"] = originalId.value.foundationObject
                 if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: []) {
+                    recordTraffic(
+                        upstreamIndex: upstreamIndex,
+                        direction: "inbound",
+                        data: rewritten
+                    )
                     let target = session(id: sessionId)
                     target.router.handleIncoming(rewritten)
                     return
@@ -504,6 +541,11 @@ final class SessionManager: Sendable, SessionManaging {
                 transformed.append(object)
             }
             if rewrittenAny, let sessionId, let rewritten = try? JSONSerialization.data(withJSONObject: transformed, options: []) {
+                recordTraffic(
+                    upstreamIndex: upstreamIndex,
+                    direction: "inbound",
+                    data: rewritten
+                )
                 let target = session(id: sessionId)
                 target.router.handleIncoming(rewritten)
                 return
@@ -649,6 +691,11 @@ final class SessionManager: Sendable, SessionManaging {
         Task {
             let result = await upstreams[upstreamIndex].send(data)
             if result == .accepted {
+                self.recordTraffic(
+                    upstreamIndex: upstreamIndex,
+                    direction: "outbound",
+                    data: data
+                )
                 return
             }
             self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
@@ -657,6 +704,102 @@ final class SessionManager: Sendable, SessionManaging {
                 upstreamIndex: upstreamIndex
             )
         }
+    }
+
+    func debugSnapshot() -> ProxyDebugSnapshot {
+        let initSnapshot = initState.withLockedValue { state in
+            (
+                proxyInitialized: state.initResult != nil,
+                isShuttingDown: state.isShuttingDown
+            )
+        }
+        let toolsSnapshot = toolsListState.withLockedValue { state in
+            (
+                cachedToolsListAvailable: state.cachedResult != nil,
+                warmupInFlight: state.warmupInFlight
+            )
+        }
+        let upstreamSnapshot = upstreamState.withLockedValue { state in
+            state.upstreamStates.enumerated().map { index, upstream in
+                ProxyUpstreamDebugSnapshot(
+                    upstreamIndex: index,
+                    isInitialized: upstream.isInitialized,
+                    initInFlight: upstream.initInFlight,
+                    didSendInitialized: upstream.didSendInitialized,
+                    healthState: debugHealthStateString(upstream.healthState),
+                    consecutiveRequestTimeouts: upstream.consecutiveRequestTimeouts,
+                    consecutiveToolsListFailures: upstream.consecutiveToolsListFailures,
+                    lastToolsListSuccessUptimeNs: upstream.lastToolsListSuccessUptimeNs,
+                    recentStderr: [],
+                    lastDecodeError: nil,
+                    lastBridgeError: nil,
+                    resyncCount: 0,
+                    lastResyncAt: nil,
+                    lastResyncDroppedBytes: nil,
+                    lastResyncPreview: nil,
+                    bufferedStdoutBytes: 0
+                )
+            }
+        }
+        let debugSnapshot = debugState.withLockedValue { state in
+            (
+                upstreams: state.upstreams,
+                recentTraffic: state.recentTraffic
+            )
+        }
+
+        let upstreams = upstreamSnapshot.map { base in
+            guard base.upstreamIndex < debugSnapshot.upstreams.count else { return base }
+            let debug = debugSnapshot.upstreams[base.upstreamIndex]
+            return ProxyUpstreamDebugSnapshot(
+                upstreamIndex: base.upstreamIndex,
+                isInitialized: base.isInitialized,
+                initInFlight: base.initInFlight,
+                didSendInitialized: base.didSendInitialized,
+                healthState: base.healthState,
+                consecutiveRequestTimeouts: base.consecutiveRequestTimeouts,
+                consecutiveToolsListFailures: base.consecutiveToolsListFailures,
+                lastToolsListSuccessUptimeNs: base.lastToolsListSuccessUptimeNs,
+                recentStderr: debug.recentStderr.map(redactedDebugEvent),
+                lastDecodeError: redactedDebugEvent(debug.lastDecodeError),
+                lastBridgeError: redactedDebugEvent(debug.lastBridgeError),
+                resyncCount: debug.resyncCount,
+                lastResyncAt: debug.lastResyncAt,
+                lastResyncDroppedBytes: debug.lastResyncDroppedBytes,
+                lastResyncPreview: debug.lastResyncPreview.map { _ in Self.redactedDebugText },
+                bufferedStdoutBytes: debug.bufferedStdoutBytes
+            )
+        }
+
+        return ProxyDebugSnapshot(
+            generatedAt: Date(),
+            proxyInitialized: initSnapshot.proxyInitialized && !initSnapshot.isShuttingDown,
+            cachedToolsListAvailable: toolsSnapshot.cachedToolsListAvailable,
+            warmupInFlight: toolsSnapshot.warmupInFlight,
+            upstreams: upstreams,
+            recentTraffic: debugSnapshot.recentTraffic.map(redactedTrafficEvent)
+        )
+    }
+
+    private func redactedDebugEvent(_ event: ProxyDebugEvent?) -> ProxyDebugEvent? {
+        event.map(redactedDebugEvent)
+    }
+
+    private func redactedDebugEvent(_ event: ProxyDebugEvent) -> ProxyDebugEvent {
+        ProxyDebugEvent(
+            timestamp: event.timestamp,
+            message: Self.redactedDebugText
+        )
+    }
+
+    private func redactedTrafficEvent(_ event: ProxyDebugTrafficEvent) -> ProxyDebugTrafficEvent {
+        ProxyDebugTrafficEvent(
+            timestamp: event.timestamp,
+            upstreamIndex: event.upstreamIndex,
+            direction: event.direction,
+            bytes: event.bytes,
+            preview: Self.redactedDebugText
+        )
     }
 
     private func handleOverloadedUpstreamSend(
@@ -735,6 +878,11 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+        recordTraffic(
+            upstreamIndex: upstreamIndex,
+            direction: "inbound_unmapped",
+            data: data
+        )
         // We have no id-based mapping for this upstream message, so we can't unambiguously route it to a
         // single session. To reduce cross-talk across multiple concurrent agents, only deliver it to
         // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
@@ -836,6 +984,77 @@ final class SessionManager: Sendable, SessionManaging {
                 "bytes": .string("\(data.count)"),
             ]
         )
+    }
+
+    private func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
+        let event = ProxyDebugEvent(timestamp: Date(), message: message)
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].recentStderr.append(event)
+            if state.upstreams[upstreamIndex].recentStderr.count > debugStderrLimit {
+                state.upstreams[upstreamIndex].recentStderr.removeFirst(
+                    state.upstreams[upstreamIndex].recentStderr.count - debugStderrLimit
+                )
+            }
+            if message.contains("Could not decode agent message") {
+                state.upstreams[upstreamIndex].lastDecodeError = event
+            }
+            if message.contains("BridgeError") {
+                state.upstreams[upstreamIndex].lastBridgeError = event
+            }
+        }
+    }
+
+    private func handleUpstreamRecovery(_ recovery: StdioFramerRecovery, upstreamIndex: Int) {
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].resyncCount += 1
+            state.upstreams[upstreamIndex].lastResyncAt = Date()
+            state.upstreams[upstreamIndex].lastResyncDroppedBytes = recovery.droppedPrefixBytes
+            if let recovered = recovery.previewRecoveredMessage, !recovered.isEmpty {
+                state.upstreams[upstreamIndex].lastResyncPreview = recovered
+            } else {
+                state.upstreams[upstreamIndex].lastResyncPreview = recovery.previewBeforeDrop
+            }
+        }
+    }
+
+    private func handleBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].bufferedStdoutBytes = size
+        }
+    }
+
+    private func recordTraffic(
+        upstreamIndex: Int,
+        direction: String,
+        data: Data
+    ) {
+        let event = ProxyDebugTrafficEvent(
+            timestamp: Date(),
+            upstreamIndex: upstreamIndex,
+            direction: direction,
+            bytes: data.count,
+            preview: Self.redactedDebugText
+        )
+        debugState.withLockedValue { state in
+            state.recentTraffic.append(event)
+            if state.recentTraffic.count > debugTrafficLimit {
+                state.recentTraffic.removeFirst(state.recentTraffic.count - debugTrafficLimit)
+            }
+        }
+    }
+
+    private func debugHealthStateString(_ state: UpstreamHealthState) -> String {
+        switch state {
+        case .healthy:
+            return "healthy"
+        case .degraded:
+            return "degraded"
+        case .quarantined(let untilUptimeNs):
+            return "quarantined(untilUptimeNs:\(untilUptimeNs))"
+        }
     }
 
     private func startEagerInitializePrimary() {
@@ -1112,6 +1331,10 @@ final class SessionManager: Sendable, SessionManaging {
             return timeout
         }
         timeout?.cancel()
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex] = DebugUpstreamState()
+        }
     }
 
     private func markUpstreamInitialized(upstreamIndex: Int) {

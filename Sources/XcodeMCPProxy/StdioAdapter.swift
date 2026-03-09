@@ -90,8 +90,18 @@ public actor StdioAdapter {
     }
 
     private func handleInput(_ data: Data) {
-        let messages = framer.append(data)
-        for message in messages {
+        let result = framer.append(data)
+        for recovery in result.recoveries {
+            logger.warning(
+                "Recovered STDIO input stream corruption",
+                metadata: [
+                    "kind": "\(recovery.kind.rawValue)",
+                    "dropped_prefix_bytes": "\(recovery.droppedPrefixBytes)",
+                    "candidate_offset": "\(recovery.candidateOffset.map(String.init) ?? "none")",
+                ]
+            )
+        }
+        for message in result.messages {
             Task { [weak self] in
                 await self?.processMessage(message)
             }

@@ -28,8 +28,11 @@ actor UpstreamProcess: UpstreamClient {
     private var restartTask: Task<Void, Never>?
     private var queuedWriteBytes = 0
     private var writeGeneration: UInt64 = 0
+    private var stderrBuffer = ""
+    private var lastReportedBufferedStdoutBytes = 0
     private let writeQueue = DispatchQueue(label: "XcodeMCPProxy.UpstreamProcess.write")
     private let logger: Logger = ProxyLogging.make("upstream")
+    private let maxBufferedStderrBytes = 16 * 1024
 
     init(config: Config) {
         self.config = config
@@ -124,6 +127,8 @@ actor UpstreamProcess: UpstreamClient {
         framer = StdioFramer()
         queuedWriteBytes = 0
         writeGeneration &+= 1
+        stderrBuffer = ""
+        resetBufferedStdoutBytesIfNeeded()
 
         let (executableURL, args) = resolveCommand(command: config.command, args: config.args)
         let process = Process()
@@ -147,6 +152,9 @@ actor UpstreamProcess: UpstreamClient {
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty {
+                Task { [weak self] in
+                    await self?.handleStderrEOF()
+                }
                 return
             }
             Task { [weak self] in
@@ -171,10 +179,13 @@ actor UpstreamProcess: UpstreamClient {
     }
 
     private func stopLocked() {
+        flushBufferedStderrIfNeeded()
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         queuedWriteBytes = 0
         writeGeneration &+= 1
+        stderrBuffer = ""
+        resetBufferedStdoutBytesIfNeeded()
         if let process = process {
             terminatingProcess = process
             process.terminate()
@@ -183,8 +194,27 @@ actor UpstreamProcess: UpstreamClient {
     }
 
     private func handleStdoutData(_ data: Data) {
-        let messages = framer.append(data)
-        for message in messages {
+        let result = framer.append(data)
+        for recovery in result.recoveries {
+            logger.warning(
+                "Recovered upstream stdout stream corruption",
+                metadata: [
+                    "kind": .string(recovery.kind.rawValue),
+                    "dropped_prefix_bytes": .string("\(recovery.droppedPrefixBytes)"),
+                    "candidate_offset": .string(recovery.candidateOffset.map(String.init) ?? "none"),
+                    "preview_before_drop": .string(recovery.previewBeforeDrop),
+                    "preview_recovered": .string(recovery.previewRecoveredMessage ?? ""),
+                ]
+            )
+            continuation.yield(.stdoutRecovery(recovery))
+        }
+
+        if lastReportedBufferedStdoutBytes != result.bufferedByteCount {
+            lastReportedBufferedStdoutBytes = result.bufferedByteCount
+            continuation.yield(.stdoutBufferSize(result.bufferedByteCount))
+        }
+
+        for message in result.messages {
             guard isValidJSONPayload(message) else {
                 if let text = String(data: message, encoding: .utf8) {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -206,6 +236,12 @@ actor UpstreamProcess: UpstreamClient {
             return false
         }
         return json is [String: Any] || json is [Any]
+    }
+
+    private func resetBufferedStdoutBytesIfNeeded() {
+        guard lastReportedBufferedStdoutBytes != 0 else { return }
+        lastReportedBufferedStdoutBytes = 0
+        continuation.yield(.stdoutBufferSize(0))
     }
 
     private func handleTermination(process terminated: Process, status: Int32) {
@@ -243,12 +279,43 @@ actor UpstreamProcess: UpstreamClient {
 
     private func handleStderrData(_ data: Data) {
         if let message = String(data: data, encoding: .utf8) {
-            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            logger.error("Upstream stderr: \(trimmed)")
+            stderrBuffer.append(message)
+            let parts = stderrBuffer.split(separator: "\n", omittingEmptySubsequences: false)
+            let completeLines = parts.dropLast()
+            stderrBuffer = parts.last.map(String.init) ?? ""
+
+            for line in completeLines {
+                emitStderrLine(String(line))
+            }
+            flushBufferedStderrChunkIfNeeded()
         } else {
             logger.error("Upstream stderr (binary)", metadata: ["bytes": "\(data.count)"])
         }
+    }
+
+    private func handleStderrEOF() {
+        flushBufferedStderrIfNeeded()
+    }
+
+    private func flushBufferedStderrIfNeeded() {
+        emitStderrLine(stderrBuffer)
+        stderrBuffer = ""
+    }
+
+    private func flushBufferedStderrChunkIfNeeded() {
+        while stderrBuffer.utf8.count > maxBufferedStderrBytes {
+            let prefixData = Data(stderrBuffer.utf8.prefix(maxBufferedStderrBytes))
+            emitStderrLine(String(decoding: prefixData, as: UTF8.self), suffix: " [truncated]")
+            stderrBuffer = String(decoding: stderrBuffer.utf8.dropFirst(maxBufferedStderrBytes), as: UTF8.self)
+        }
+    }
+
+    private func emitStderrLine(_ line: String, suffix: String = "") {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let message = suffix.isEmpty ? trimmed : trimmed + suffix
+        logger.error("Upstream stderr: \(message)")
+        continuation.yield(.stderr(message))
     }
 
     private func scheduleRestart() {

@@ -22,6 +22,47 @@ import Testing
     #expect(response.body == "ok")
 }
 
+@Test func httpDebugUpstreamsReturnsSnapshot() async throws {
+    let config = makeConfig()
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config)
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .ok)
+    #expect(response.head.headers.first(name: "Content-Type") == "application/json")
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let snapshot = try decoder.decode(ProxyDebugSnapshot.self, from: Data(response.body.utf8))
+    #expect(snapshot.proxyInitialized == false)
+    #expect(snapshot.upstreams.count == 1)
+    #expect(snapshot.upstreams[0].upstreamIndex == 0)
+}
+
+@Test func httpDebugUpstreamsReturnsNotFoundWhenListenerIsNotLoopback() async throws {
+    var config = makeConfig()
+    config.listenHost = "0.0.0.0"
+
+    let channel = EmbeddedChannel()
+    defer { _ = try? channel.finish() }
+    let sessionManager = TestSessionManager(config: config)
+    try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+    let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let response = try collectResponse(from: channel)
+    #expect(response.head.status == .notFound)
+    #expect(response.body == "not found")
+}
+
 @Test func httpSSERequiresAcceptHeader() async throws {
     let config = makeConfig()
     let channel = EmbeddedChannel()
@@ -1543,6 +1584,36 @@ private final class TestSessionManager: SessionManaging {
         session.router.handleIncoming(responseData)
     }
 
+    func debugSnapshot() -> ProxyDebugSnapshot {
+        ProxyDebugSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 0),
+            proxyInitialized: isInitialized(),
+            cachedToolsListAvailable: cachedToolsListResult() != nil,
+            warmupInFlight: false,
+            upstreams: [
+                ProxyUpstreamDebugSnapshot(
+                    upstreamIndex: 0,
+                    isInitialized: isInitialized(),
+                    initInFlight: false,
+                    didSendInitialized: false,
+                    healthState: "healthy",
+                    consecutiveRequestTimeouts: 0,
+                    consecutiveToolsListFailures: 0,
+                    lastToolsListSuccessUptimeNs: nil,
+                    recentStderr: [],
+                    lastDecodeError: nil,
+                    lastBridgeError: nil,
+                    resyncCount: 0,
+                    lastResyncAt: nil,
+                    lastResyncDroppedBytes: nil,
+                    lastResyncPreview: nil,
+                    bufferedStdoutBytes: 0
+                )
+            ],
+            recentTraffic: []
+        )
+    }
+
     func sentUpstreamCount() -> Int {
         state.withLockedValue { $0.upstreamSendCount }
     }
@@ -1580,7 +1651,10 @@ private final class TestSessionManager: SessionManaging {
     }
 }
 
-private func makeConfig(maxBodyBytes: Int = 1024, requestTimeout: TimeInterval = 1) -> ProxyConfig {
+private func makeConfig(
+    maxBodyBytes: Int = 1024,
+    requestTimeout: TimeInterval = 1
+) -> ProxyConfig {
     ProxyConfig(
         listenHost: "127.0.0.1",
         listenPort: 0,

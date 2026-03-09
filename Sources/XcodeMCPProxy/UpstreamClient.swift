@@ -2,6 +2,9 @@ import Foundation
 
 enum UpstreamEvent: Sendable {
     case message(Data)
+    case stderr(String)
+    case stdoutRecovery(StdioFramerRecovery)
+    case stdoutBufferSize(Int)
     case exit(Int32)
 }
 

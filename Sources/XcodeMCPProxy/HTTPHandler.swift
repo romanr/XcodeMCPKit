@@ -127,6 +127,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         switch (head.method, path) {
         case (.GET, "/health"):
             sendPlain(on: context.channel, status: .ok, body: "ok", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
+        case (.GET, "/debug/upstreams"):
+            handleDebugSnapshot(context: context, head: head, requestLog: requestLog)
         case (.GET, "/mcp"), (.GET, "/"), (.GET, "/mcp/events"), (.GET, "/events"):
             handleSSE(context: context, head: head, requestLog: requestLog)
         case (.DELETE, "/mcp"), (.DELETE, "/"):
@@ -136,6 +138,44 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         default:
             sendPlain(on: context.channel, status: .notFound, body: "not found", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
         }
+    }
+
+    private func handleDebugSnapshot(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
+        guard isLoopbackDebugEndpointEnabled else {
+            sendPlain(
+                on: context.channel,
+                status: .notFound,
+                body: "not found",
+                keepAlive: head.isKeepAlive,
+                sessionId: nil,
+                requestLog: requestLog
+            )
+            return
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        guard let data = try? encoder.encode(sessionManager.debugSnapshot()) else {
+            sendPlain(
+                on: context.channel,
+                status: .internalServerError,
+                body: "debug snapshot unavailable",
+                keepAlive: head.isKeepAlive,
+                sessionId: nil,
+                requestLog: requestLog
+            )
+            return
+        }
+
+        sendJSONData(
+            on: context.channel,
+            data: data,
+            keepAlive: head.isKeepAlive,
+            sessionId: nil,
+            requestLog: requestLog
+        )
     }
 
     private func handleSSE(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
@@ -808,6 +848,24 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         )
     }
 
+    private func sendJSONData(
+        on channel: Channel,
+        data: Data,
+        keepAlive: Bool,
+        sessionId: String?,
+        requestLog: RequestLogContext
+    ) {
+        logResponse(requestLog, status: .ok, sessionId: sessionId)
+        var buffer = channel.allocator.buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        MCPResponseEmitter.sendJSON(
+            on: channel,
+            buffer: buffer,
+            keepAlive: keepAlive,
+            sessionId: sessionId
+        )
+    }
+
     private func sendPlain(
         on channel: Channel,
         status: HTTPResponseStatus,
@@ -993,6 +1051,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return "\(ip):\(port)"
         }
         return String(describing: address)
+    }
+
+    private var isLoopbackDebugEndpointEnabled: Bool {
+        switch config.listenHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "localhost", "127.0.0.1", "::1", "[::1]":
+            return true
+        default:
+            return false
+        }
     }
 
 }

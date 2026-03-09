@@ -524,6 +524,76 @@ import Testing
     #expect(session.router.drainBufferedNotifications().isEmpty)
 }
 
+@Test func sessionManagerDebugSnapshotCapturesTrafficAndStderr() async throws {
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    defer { Task { await shutdown(group) } }
+    let eventLoop = group.next()
+    let upstream = TestUpstreamClient()
+    let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+    let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+    try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+    let initMessages = await upstream.sent()
+    let initId = try extractUpstreamId(from: initMessages[0])
+    await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+    try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+    let sessionId = "session-debug"
+    let session = manager.session(id: sessionId)
+    let upstreamIndex = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+    let original = RPCId(any: NSNumber(value: 301))!
+    let future = session.router.registerRequest(idKey: original.key, on: eventLoop, timeout: .seconds(1))
+    let upstreamId = manager.assignUpstreamId(
+        sessionId: sessionId,
+        originalId: original,
+        upstreamIndex: upstreamIndex
+    )
+    manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: upstreamIndex)
+    await upstream.yield(.message(try makeToolListResponse(id: upstreamId)))
+    _ = try await future.get()
+
+    await upstream.yield(.message(try makeToolListResponse(id: 9_999_999)))
+    await upstream.yield(.stderr("Could not decode agent message: Error Domain=mcpbridge.DecodeError Code=1"))
+    await upstream.yield(.stderr("callTool request for 'DocumentationSearch' failed: Error Domain=IDEIntelligenceMessaging.BridgeError Code=1"))
+    await upstream.yield(
+        .stdoutRecovery(
+            StdioFramerRecovery(
+                kind: .resync,
+                droppedPrefixBytes: 1024,
+                candidateOffset: 1024,
+                previewBeforeDrop: "...broken",
+                previewRecoveredMessage: "{\"id\":301,\"jsonrpc\":\"2.0\"}"
+            )
+        )
+    )
+    await upstream.yield(.stdoutBufferSize(2048))
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let snapshot = manager.debugSnapshot()
+    #expect(snapshot.upstreams.count == 1)
+    #expect(snapshot.upstreams[0].lastDecodeError?.message == "<redacted>")
+    #expect(snapshot.upstreams[0].lastBridgeError?.message == "<redacted>")
+    #expect(snapshot.upstreams[0].resyncCount == 1)
+    #expect(snapshot.upstreams[0].lastResyncDroppedBytes == 1024)
+    #expect(snapshot.upstreams[0].lastResyncPreview == "<redacted>")
+    #expect(snapshot.upstreams[0].bufferedStdoutBytes == 2048)
+    #expect(snapshot.recentTraffic.contains { $0.direction == "outbound" && $0.bytes > 0 })
+    #expect(snapshot.recentTraffic.contains { $0.direction == "inbound" && $0.preview == "<redacted>" })
+    #expect(snapshot.recentTraffic.contains { $0.direction == "inbound_unmapped" && $0.preview == "<redacted>" })
+    #expect(snapshot.upstreams[0].recentStderr.allSatisfy { $0.message == "<redacted>" })
+
+    await upstream.yield(.exit(1))
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    let clearedSnapshot = manager.debugSnapshot()
+    #expect(clearedSnapshot.upstreams[0].recentStderr.isEmpty)
+    #expect(clearedSnapshot.upstreams[0].lastDecodeError == nil)
+    #expect(clearedSnapshot.upstreams[0].lastBridgeError == nil)
+    #expect(clearedSnapshot.upstreams[0].resyncCount == 0)
+    #expect(clearedSnapshot.upstreams[0].lastResyncPreview == nil)
+    #expect(clearedSnapshot.upstreams[0].bufferedStdoutBytes == 0)
+}
+
 @Test func sessionManagerReturnsNilWhenAllUpstreamsAreQuarantined() async throws {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     defer { Task { await shutdown(group) } }
@@ -747,6 +817,10 @@ import Testing
     let error = response["error"] as? [String: Any]
     #expect((error?["code"] as? NSNumber)?.intValue == -32002)
     #expect((error?["message"] as? String) == "upstream overloaded")
+
+    try await Task.sleep(nanoseconds: 50_000_000)
+    let snapshot = manager.debugSnapshot()
+    #expect(snapshot.recentTraffic.contains { $0.direction == "outbound" } == false)
 }
 
 @Test func sessionManagerInitializeReturnsOverloadedErrorWhenUpstreamRejectsSend() async throws {

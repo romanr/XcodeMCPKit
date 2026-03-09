@@ -231,6 +231,79 @@ import Testing
     #expect(String(data: result.messages[0], encoding: .utf8) == json)
 }
 
+@Test func stdioFramerResyncsSmallInvalidObjectWithoutWaitingForThreshold() async throws {
+    let framer = StdioFramer()
+    let corrupt = "{\"result\":tru}"
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}"
+
+    let result = framer.append(Data((corrupt + json).utf8))
+    #expect(result.messages.count == 1)
+    #expect(result.recoveries.count == 1)
+    guard let recovery = result.recoveries.first else { return }
+    #expect(recovery.kind == .resync)
+    #expect(recovery.droppedPrefixBytes == corrupt.utf8.count)
+    guard result.messages.count == 1 else { return }
+    #expect(String(data: result.messages[0], encoding: .utf8) == json)
+}
+
+@Test func stdioFramerResyncsSmallInvalidObjectAcrossNewlineDelimitedMessages() async throws {
+    let framer = StdioFramer()
+    let corrupt = "{\"result\":tru}\n"
+    let json = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}"
+
+    let result = framer.append(Data((corrupt + json).utf8))
+    #expect(result.messages.count == 1)
+    #expect(result.recoveries.count == 1)
+    guard let recovery = result.recoveries.first else { return }
+    #expect(recovery.kind == .resync)
+    #expect(recovery.droppedPrefixBytes == corrupt.utf8.count)
+    guard result.messages.count == 1 else { return }
+    #expect(String(data: result.messages[0], encoding: .utf8) == json)
+}
+
+@Test func stdioFramerDoesNotResyncNestedJSONInsideSmallMalformedObject() async throws {
+    let framer = StdioFramer()
+    let payload = """
+    {
+      "broken": tru,
+      "result": {
+        "jsonrpc": "2.0",
+        "id": 2
+      }
+    }
+    """
+
+    let result = framer.append(Data(payload.utf8))
+    #expect(result.messages.isEmpty)
+    #expect(result.recoveries.isEmpty)
+    #expect(result.bufferedByteCount == payload.utf8.count)
+}
+
+@Test func stdioFramerDoesNotResyncAdjacentNestedJSONObjectInsideSmallMalformedObject() async throws {
+    let framer = StdioFramer()
+    let payload = "{\"outer\":{\"broken\":true}{\"jsonrpc\":\"2.0\",\"id\":2}}"
+
+    let result = framer.append(Data(payload.utf8))
+    #expect(result.messages.isEmpty)
+    #expect(result.recoveries.isEmpty)
+    #expect(result.bufferedByteCount == payload.utf8.count)
+}
+
+@Test func stdioFramerDoesNotEarlyResyncWhenSmallMalformedObjectHasNoStructuralEnd() async throws {
+    let framer = StdioFramer()
+    let payload = """
+    {
+      "broken": tru,
+      "result":
+    {"jsonrpc":"2.0","id":2}
+    """
+
+    let result = framer.append(Data(payload.utf8))
+    #expect(result.messages.isEmpty)
+    #expect(result.recoveries.isEmpty)
+    #expect(result.bufferedByteCount == payload.utf8.count)
+}
+
 @Test func stdioFramerResyncsCorruptBatchToAdjacentRawJSONObject() async throws {
     let framer = StdioFramer()
     let corrupt = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":tru}]"

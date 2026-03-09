@@ -194,7 +194,6 @@ final class StdioFramer {
     }
 
     private func recoverCorruptJSONPrefixIfNeeded() -> StdioFramerRecovery? {
-        guard buffer.count > resyncScanThreshold else { return nil }
         guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else { return nil }
         let rootByte = buffer[firstIndex]
         guard rootByte == 0x7B || rootByte == 0x5B else { return nil }
@@ -206,10 +205,19 @@ final class StdioFramer {
             break
         }
 
+        // Invalid JSON at the buffer head is already a proven corruption signal, so recover as soon
+        // as we can find a later top-level root instead of waiting for the large-buffer threshold.
+        let allowsLooseLineBoundaries = buffer.count > resyncScanThreshold
+        let minimumCandidateIndex = allowsLooseLineBoundaries ? nil : jsonValueEndIndex(from: firstIndex)
+        if !allowsLooseLineBoundaries, minimumCandidateIndex == nil {
+            return nil
+        }
+
         let candidates = recoveryCandidateOffsets(
             startingAfter: buffer.index(after: firstIndex),
             allowsObjectRoots: true,
-            allowsArrayRoots: true
+            allowsArrayRoots: true,
+            minimumCandidateIndex: minimumCandidateIndex
         )
         for candidate in candidates {
             guard let messageEnd = jsonValueEndIndex(from: candidate) else { continue }
@@ -246,7 +254,8 @@ final class StdioFramer {
     private func recoveryCandidateOffsets(
         startingAfter lowerBound: Data.Index,
         allowsObjectRoots: Bool,
-        allowsArrayRoots: Bool
+        allowsArrayRoots: Bool,
+        minimumCandidateIndex: Data.Index?
     ) -> [Data.Index] {
         guard lowerBound < buffer.endIndex else { return [] }
         var offsets: [Data.Index] = []
@@ -256,7 +265,9 @@ final class StdioFramer {
             let byte = buffer[index]
             let isAllowedObjectRoot = byte == 0x7B && allowsObjectRoots
             let isAllowedArrayRoot = byte == 0x5B && allowsArrayRoots
+            let clearsMinimumBoundary = minimumCandidateIndex.map { index >= $0 } ?? true
             if (isAllowedObjectRoot || isAllowedArrayRoot),
+               clearsMinimumBoundary,
                isRecoveryBoundary(at: index),
                isPlausibleRecoveryRoot(at: index) {
                 offsets.append(index)
@@ -269,7 +280,10 @@ final class StdioFramer {
     private func isRecoveryBoundary(at index: Data.Index) -> Bool {
         guard index > buffer.startIndex else { return true }
         let previous = buffer[buffer.index(before: index)]
-        return previous == 0x0A || previous == 0x7D || previous == 0x5D
+        if previous == 0x7D || previous == 0x5D {
+            return true
+        }
+        return previous == 0x0A
     }
 
     private func isPlausibleRecoveryRoot(at index: Data.Index) -> Bool {

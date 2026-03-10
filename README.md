@@ -19,11 +19,15 @@ See [Architecture](Docs/architecture.md) for the process overview.
 
 ## Installation
 
+### 1. Install the binaries
+
+#### Build from source
+
 ```bash
 swift run -c release xcode-mcp-proxy-install
 ```
 
-### Install from GitHub Releases
+#### Install from GitHub Releases
 
 Each release tag (`v*`) publishes:
 
@@ -38,7 +42,7 @@ Example:
 VERSION=v0.1.0
 BASE_URL="https://github.com/lynnswap/XcodeMCPKit/releases/download/${VERSION}"
 
-ARCHIVE="xcode-mcp-proxy.tar.gz"   # or: xcode-mcp-proxy-darwin-arm64.tar.gz / xcode-mcp-proxy-darwin-x86_64.tar.gz
+ARCHIVE="xcode-mcp-proxy.tar.gz"
 curl -fL -O "${BASE_URL}/${ARCHIVE}"
 curl -fL -O "${BASE_URL}/SHA256SUMS.txt"
 grep "  ${ARCHIVE}\$" SHA256SUMS.txt | shasum -a 256 -c
@@ -51,9 +55,34 @@ chmod +x "${HOME}/.local/bin/xcode-mcp-proxy" \
          "${HOME}/.local/bin/xcode-mcp-proxy-install"
 ```
 
+If you prefer a platform-specific archive, choose one of:
+
+- `xcode-mcp-proxy.tar.gz`: universal binary
+- `xcode-mcp-proxy-darwin-arm64.tar.gz`: Apple Silicon
+- `xcode-mcp-proxy-darwin-x86_64.tar.gz`: Intel
+
+#### Optional: change the installation destination
+
+```bash
+./.build/release/xcode-mcp-proxy-install --prefix "$HOME/.local"
+# or
+./.build/release/xcode-mcp-proxy-install --bindir "$HOME/bin"
+```
+
+### 2. Add the install directory to your `PATH`
+
+By default, `xcode-mcp-proxy` and `xcode-mcp-proxy-server` are installed to `~/.local/bin`.
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### 3. Register the proxy in your MCP client
+
 Replace `xcrun mcpbridge` with one of the following:
 
-### Codex
+#### Codex
 
 ```bash
 codex mcp remove xcode
@@ -64,26 +93,11 @@ codex mcp add xcode --url http://localhost:8765/mcp
 codex mcp add xcode -- xcode-mcp-proxy
 ```
 
-### Claude Code
+#### Claude Code
 
 ```bash
 claude mcp remove xcode
 claude mcp add --transport stdio xcode -- xcode-mcp-proxy
-```
-
-By default, `xcode-mcp-proxy` and `xcode-mcp-proxy-server` are installed to `~/.local/bin`. Add it to your `PATH` if needed.
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-To change the destination:
-
-```bash
-./.build/release/xcode-mcp-proxy-install --prefix "$HOME/.local"
-# or
-./.build/release/xcode-mcp-proxy-install --bindir "$HOME/bin"
 ```
 
 ## Usage

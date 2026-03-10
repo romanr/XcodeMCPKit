@@ -17,6 +17,14 @@ package struct CLICommandLogSink {
     }
 }
 
+package struct CLICommandInvocation {
+    package var showHelp = false
+    package var usesRemovedURLHelper = false
+    package var hasExplicitURL = false
+    package var hasStdioFlag = false
+    package var serverOnlyFlag: String?
+}
+
 package struct XcodeMCPProxyCLICommand {
     package struct Dependencies {
         package var bootstrapLogging: ([String: String]) -> Void
@@ -78,20 +86,21 @@ package struct XcodeMCPProxyCLICommand {
     package func run(args: [String], environment: [String: String]) async -> Int32 {
         dependencies.bootstrapLogging(environment)
         let logSink = dependencies.makeLogSink()
+        let invocation = Self.scanInvocation(args)
 
-        if args.contains("-h") || args.contains("--help") {
+        if invocation.showHelp {
             dependencies.stdout(Self.usage())
             return 0
         }
 
-        if (args.count > 1 && args[1] == "url") || args.contains("--print-url") {
+        if invocation.usesRemovedURLHelper {
             logSink.error(
                 "url helper mode was removed; configure your HTTP client with a concrete URL (default: http://localhost:8765/mcp)."
             )
             return 1
         }
 
-        if args.contains(where: { Self.serverOnlyFlags.contains($0) }) {
+        if invocation.serverOnlyFlag != nil {
             logSink.error(
                 "This option is only supported by xcode-mcp-proxy-server (proxy server)."
             )
@@ -101,12 +110,10 @@ package struct XcodeMCPProxyCLICommand {
 
         do {
             var parseArgs = args
-            let hasURL =
-                parseArgs.contains("--url") || parseArgs.contains(where: { $0.hasPrefix("--url=") })
-            if hasURL && parseArgs.contains("--stdio") {
+            if invocation.hasExplicitURL && invocation.hasStdioFlag {
                 throw CLIError.message("Use either --url or --stdio (not both).")
             }
-            if hasURL {
+            if invocation.hasExplicitURL {
                 parseArgs = try Self.rewriteURLFlagToStdio(parseArgs)
             }
 
@@ -139,6 +146,58 @@ package struct XcodeMCPProxyCLICommand {
             logSink.error("error: \(error)")
             return 1
         }
+    }
+
+    package static func scanInvocation(_ args: [String]) -> CLICommandInvocation {
+        var invocation = CLICommandInvocation()
+        var index = 1
+
+        while index < args.count {
+            let arg = args[index]
+            switch arg {
+            case "-h", "--help":
+                invocation.showHelp = true
+                index += 1
+            case "url" where index == 1:
+                invocation.usesRemovedURLHelper = true
+                index += 1
+            case "--print-url":
+                invocation.usesRemovedURLHelper = true
+                index += 1
+            case "--url":
+                invocation.hasExplicitURL = true
+                index += min(2, args.count - index)
+            case let value where value.hasPrefix("--url="):
+                invocation.hasExplicitURL = true
+                index += 1
+            case "--stdio":
+                invocation.hasStdioFlag = true
+                if index + 1 < args.count, !args[index + 1].hasPrefix("-") {
+                    index += 2
+                } else {
+                    index += 1
+                }
+            case "--request-timeout":
+                if index + 1 < args.count, shouldConsumeRequestTimeoutValue(args[index + 1]) {
+                    index += 2
+                } else {
+                    index += 1
+                }
+            case let flag where Self.serverOnlyFlags.contains(flag):
+                if invocation.serverOnlyFlag == nil {
+                    invocation.serverOnlyFlag = flag
+                }
+                if Self.serverOnlyValueFlags.contains(flag) {
+                    index += min(2, args.count - index)
+                } else {
+                    index += 1
+                }
+            default:
+                index += 1
+            }
+        }
+
+        return invocation
     }
 
     package static func rewriteURLFlagToStdio(_ args: [String]) throws -> [String] {
@@ -224,6 +283,29 @@ package struct XcodeMCPProxyCLICommand {
         "--session-id",
         "--lazy-init",
     ]
+
+    private static let serverOnlyValueFlags: Set<String> = [
+        "--listen",
+        "--host",
+        "--port",
+        "--max-body-bytes",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--xcode-pid",
+        "--session-id",
+    ]
+
+    private static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
+        if token == "-h" || token == "--help" {
+            return true
+        }
+        if Double(token) != nil {
+            return true
+        }
+        return !token.hasPrefix("-")
+    }
 
     private func logResolvedUpstream(
         config: ProxyConfig,

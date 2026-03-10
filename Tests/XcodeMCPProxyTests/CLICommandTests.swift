@@ -179,6 +179,111 @@ struct CLICommandTests {
         #expect(order.snapshot() == ["bootstrap", "makeLogSink"])
         #expect(output.snapshot().first?.contains("url helper mode was removed") == true)
     }
+
+    @Test func cliCommandTreatsHelpOnlyAsTopLevelFlag() async throws {
+        let usage = CapturedLines()
+        let errors = CapturedLines()
+        let createdAdapter = RecordingCLIAdapter()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { usage.append($0) },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in createdAdapter },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy",
+                "--request-timeout", "--help",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(usage.snapshot().isEmpty)
+        #expect(errors.snapshot().isEmpty)
+        #expect(await createdAdapter.startCount() == 1)
+        #expect(await createdAdapter.waitCount() == 1)
+    }
+
+    @Test func cliCommandStillRejectsServerOnlyFlagsAfterMalformedTimeoutValue() async throws {
+        let usage = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { usage.append($0) },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy",
+                "--request-timeout", "--listen",
+                "127.0.0.1:9000",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(usage.snapshot().isEmpty)
+        #expect(errors.snapshot() == [
+            "This option is only supported by xcode-mcp-proxy-server (proxy server).",
+            "Run: xcode-mcp-proxy-server --help",
+        ])
+    }
+
+    @Test func cliCommandStillRejectsRemovedURLHelperAfterMalformedTimeoutValue() async throws {
+        let usage = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { usage.append($0) },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy",
+                "--request-timeout", "--print-url",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(usage.snapshot().isEmpty)
+        #expect(
+            errors.snapshot().first?.contains("url helper mode was removed") == true
+        )
+    }
 }
 
 private actor RecordingCLIAdapter: CLICommandAdapter {

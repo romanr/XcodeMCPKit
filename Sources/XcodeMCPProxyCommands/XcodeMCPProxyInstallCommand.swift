@@ -4,12 +4,18 @@ package struct InstallOptions {
     package var prefix: String?
     package var bindir: String?
     package var dryRun: Bool
+    package var showHelp: Bool
 
-    package init(prefix: String?, bindir: String?, dryRun: Bool) {
+    package init(prefix: String?, bindir: String?, dryRun: Bool, showHelp: Bool = false) {
         self.prefix = prefix
         self.bindir = bindir
         self.dryRun = dryRun
+        self.showHelp = showHelp
     }
+}
+
+package struct InstallCommandInvocation {
+    package var showHelp = false
 }
 
 package enum InstallCommandError: Error, CustomStringConvertible {
@@ -64,13 +70,18 @@ package struct XcodeMCPProxyInstallCommand {
     }
 
     package func run(args: [String], environment: [String: String]) -> Int32 {
-        if args.contains("-h") || args.contains("--help") {
+        let invocation = Self.scanInvocation(args)
+        if invocation.showHelp {
             dependencies.stdout(Self.usage())
             return 0
         }
 
         do {
             let options = try Self.parseOptions(args, environment: environment)
+            if options.showHelp {
+                dependencies.stdout(Self.usage())
+                return 0
+            }
             guard let executableURL = dependencies.executableURL() else {
                 throw InstallCommandError.message("failed to locate installer executable")
             }
@@ -89,6 +100,28 @@ package struct XcodeMCPProxyInstallCommand {
             dependencies.stderr("error: \(error)")
             return 1
         }
+    }
+
+    package static func scanInvocation(_ args: [String]) -> InstallCommandInvocation {
+        var invocation = InstallCommandInvocation()
+        var index = 1
+
+        while index < args.count {
+            let arg = args[index]
+            switch arg {
+            case "-h", "--help":
+                invocation.showHelp = true
+                index += 1
+            case "--prefix", "--bindir":
+                index += min(2, args.count - index)
+            case "--dry-run":
+                index += 1
+            default:
+                index += 1
+            }
+        }
+
+        return invocation
     }
 
     package static func usage() -> String {
@@ -129,6 +162,9 @@ package struct XcodeMCPProxyInstallCommand {
         while index < args.count {
             let arg = args[index]
             switch arg {
+            case "-h", "--help":
+                options.showHelp = true
+                index += 1
             case "--prefix":
                 guard index + 1 < args.count else {
                     throw InstallCommandError.message("--prefix requires a value")

@@ -84,6 +84,7 @@ final class SessionManager: Sendable, SessionManaging {
         let eventLoop: EventLoop
         let promise: EventLoopPromise<ByteBuffer>
         let sessionId: String
+        let sessionGeneration: UInt64
         let originalId: RPCId
     }
 
@@ -97,6 +98,7 @@ final class SessionManager: Sendable, SessionManaging {
     private struct SessionState: Sendable {
         struct SessionRecord: Sendable {
             let context: SessionContext
+            let generation: UInt64
             var pinnedUpstreamIndex: Int?
             var initializeUpstreamIndex: Int?
             var preferInitializeUpstreamOnNextPin: Bool
@@ -104,6 +106,7 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         var sessions: [String: SessionRecord] = [:]
+        var nextGeneration: UInt64 = 0
     }
 
     private struct InitState: Sendable {
@@ -216,8 +219,10 @@ final class SessionManager: Sendable, SessionManaging {
                 return existing.context
             }
             let context = SessionContext(id: id, config: config)
+            state.nextGeneration &+= 1
             state.sessions[id] = SessionState.SessionRecord(
                 context: context,
+                generation: state.nextGeneration,
                 pinnedUpstreamIndex: nil,
                 initializeUpstreamIndex: nil,
                 preferInitializeUpstreamOnNextPin: false,
@@ -557,6 +562,16 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
+    private func sessionStillMatchesPendingInitialize(
+        sessionId: String,
+        sessionGeneration: UInt64
+    ) -> Bool {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[sessionId] else { return false }
+            return record.generation == sessionGeneration
+        }
+    }
+
     private func classifyHealthAndCollectProbeIfNeeded(
         upstreamIndex: Int,
         nowUptimeNs: UInt64,
@@ -595,6 +610,10 @@ final class SessionManager: Sendable, SessionManaging {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
+        _ = session(id: sessionId)
+        let sessionGeneration = sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.generation ?? 0
+        }
         var shouldSend = false
         var shouldScheduleTimeout = false
         var initRequest: [String: Any]?
@@ -618,6 +637,7 @@ final class SessionManager: Sendable, SessionManaging {
                     eventLoop: eventLoop,
                     promise: promise,
                     sessionId: sessionId,
+                    sessionGeneration: sessionGeneration,
                     originalId: originalId
                 )
             )
@@ -1398,12 +1418,16 @@ final class SessionManager: Sendable, SessionManaging {
         update.timeout?.cancel()
 
         for item in update.pending {
-            _ = session(id: item.sessionId)
-            setInitializeUpstreamIndexIfNeeded(
+            if sessionStillMatchesPendingInitialize(
                 sessionId: item.sessionId,
-                upstreamIndex: upstreamIndex,
-                preferOnNextPin: false
-            )
+                sessionGeneration: item.sessionGeneration
+            ) {
+                setInitializeUpstreamIndexIfNeeded(
+                    sessionId: item.sessionId,
+                    upstreamIndex: upstreamIndex,
+                    preferOnNextPin: false
+                )
+            }
             if let buffer = encodeInitializeResponse(originalId: item.originalId, result: result) {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)

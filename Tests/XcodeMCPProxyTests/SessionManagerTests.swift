@@ -171,6 +171,78 @@ struct SessionManagerTests {
         #expect(received.first == notification)
     }
 
+    @Test func sessionManagerDoesNotRecreateRemovedSessionWhenInitializeCompletes() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+        let sessionId = "session-removed"
+        _ = manager.session(id: sessionId)
+        let future = manager.registerInitialize(
+            sessionId: sessionId,
+            originalId: RPCId(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        manager.removeSession(id: sessionId)
+
+        let sent = await upstream.sent()
+        let initId = try extractUpstreamId(from: sent[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+
+        _ = try await future.get()
+        #expect(manager.hasSession(id: sessionId) == false)
+    }
+
+    @Test func sessionManagerDoesNotApplyRemovedInitializeStateToRecreatedSession() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+        let sessionId = "session-recreated"
+        _ = manager.session(id: sessionId)
+        let future = manager.registerInitialize(
+            sessionId: sessionId,
+            originalId: RPCId(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        manager.removeSession(id: sessionId)
+        let replacement = manager.session(id: sessionId)
+        _ = replacement.router.drainBufferedNotifications()
+
+        let sent = await upstream.sent()
+        let initId = try extractUpstreamId(from: sent[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+
+        let notification = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "method": "notifications/test",
+                "params": ["value": 7],
+            ],
+            options: []
+        )
+        await upstream.yield(.message(notification))
+
+        _ = try await future.get()
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                replacement.router.drainBufferedNotifications().isEmpty
+            }
+        )
+    }
+
     @Test func sessionManagerPinsFirstRequestToCachedInitializeUpstreamAfterNotification() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

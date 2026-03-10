@@ -23,6 +23,34 @@ See [Architecture](Docs/architecture.md) for the process overview.
 swift run -c release xcode-mcp-proxy-install
 ```
 
+### Install from GitHub Releases
+
+Each release tag (`v*`) publishes:
+
+- `xcode-mcp-proxy.tar.gz` (universal binary)
+- `xcode-mcp-proxy-darwin-arm64.tar.gz`
+- `xcode-mcp-proxy-darwin-x86_64.tar.gz`
+- `SHA256SUMS.txt`
+
+Example:
+
+```bash
+VERSION=v0.1.0
+BASE_URL="https://github.com/lynnswap/XcodeMCPKit/releases/download/${VERSION}"
+
+ARCHIVE="xcode-mcp-proxy.tar.gz"   # or: xcode-mcp-proxy-darwin-arm64.tar.gz / xcode-mcp-proxy-darwin-x86_64.tar.gz
+curl -fL -O "${BASE_URL}/${ARCHIVE}"
+curl -fL -O "${BASE_URL}/SHA256SUMS.txt"
+grep "  ${ARCHIVE}\$" SHA256SUMS.txt | shasum -a 256 -c
+
+tar -xzf "${ARCHIVE}"
+mkdir -p "${HOME}/.local/bin"
+cp bin/* "${HOME}/.local/bin/"
+chmod +x "${HOME}/.local/bin/xcode-mcp-proxy" \
+         "${HOME}/.local/bin/xcode-mcp-proxy-server" \
+         "${HOME}/.local/bin/xcode-mcp-proxy-install"
+```
+
 Replace `xcrun mcpbridge` with one of the following:
 
 ### Codex

@@ -36,7 +36,7 @@ Example:
 
 ```bash
 VERSION=v0.1.0
-BASE_URL="https://github.com/<owner>/XcodeMCPKit/releases/download/${VERSION}"
+BASE_URL="https://github.com/lynnswap/XcodeMCPKit/releases/download/${VERSION}"
 
 ARCHIVE="xcode-mcp-proxy.tar.gz"   # or: xcode-mcp-proxy-darwin-arm64.tar.gz / xcode-mcp-proxy-darwin-x86_64.tar.gz
 curl -fL -O "${BASE_URL}/${ARCHIVE}"

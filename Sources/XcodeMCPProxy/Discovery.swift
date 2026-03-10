@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Network
 
 public struct DiscoveryRecord: Codable, Sendable {
     public var url: String
@@ -116,16 +117,9 @@ public enum Discovery {
     }
 
     private static func isLoopbackHost(_ host: String) -> Bool {
-        if host == "localhost" || host == "::1" { return true }
-        if host == "127.0.0.1" { return true }
-        if host.hasPrefix("127.") {
-            let segments = host.split(separator: ".", omittingEmptySubsequences: false)
-            if segments.count == 4,
-               segments.allSatisfy({ Int($0).map { (0...255).contains($0) } == true }) {
-                return true
-            }
-        }
-        return false
+        if host == "localhost" { return true }
+        if isIPv4Loopback(host) { return true }
+        return isIPv6Loopback(host)
     }
 
     private static func normalizeHost(_ host: String) -> String {
@@ -134,5 +128,16 @@ public enum Discovery {
             return String(value.dropFirst().dropLast())
         }
         return value
+    }
+
+    private static func isIPv4Loopback(_ host: String) -> Bool {
+        guard let address = IPv4Address(host) else { return false }
+        return address.rawValue.first == 127
+    }
+
+    private static func isIPv6Loopback(_ host: String) -> Bool {
+        guard let address = IPv6Address(host) else { return false }
+        let bytes = address.rawValue
+        return bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
     }
 }

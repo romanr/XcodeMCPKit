@@ -145,6 +145,29 @@ struct CLIParserTests {
         #expect(config.stdioUpstreamSource == .discovery)
     }
 
+    @Test func cliDefaultsStdioUpstreamFromExpandedIPv6Discovery() async throws {
+        let tempURL = makeTempDiscoveryURL()
+        let record = DiscoveryRecord(
+            url: "http://[0:0:0:0:0:0:0:1]:5555/mcp",
+            host: "0:0:0:0:0:0:0:1",
+            port: 5555,
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            updatedAt: Date()
+        )
+        try Discovery.write(record: record, overrideURL: tempURL)
+        let config = try CLIParser.parse(
+            args: [
+                "xcode-mcp-proxy",
+                "--stdio",
+            ],
+            environment: [:],
+            discoveryOverrideURL: tempURL
+        )
+        #expect(config.transport == .stdio)
+        #expect(config.stdioUpstreamURL?.absoluteString == "http://[0:0:0:0:0:0:0:1]:5555/mcp")
+        #expect(config.stdioUpstreamSource == .discovery)
+    }
+
     @Test func cliIgnoresNonLoopbackDiscoveryEndpoint() async throws {
         let tempURL = makeTempDiscoveryURL()
         let record = DiscoveryRecord(

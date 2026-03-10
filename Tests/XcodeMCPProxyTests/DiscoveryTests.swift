@@ -85,6 +85,20 @@ struct DiscoveryTests {
         #expect(Discovery.read(overrideURL: url)?.url == record.url)
     }
 
+    @Test func discoveryAllowsExpandedIPv6LoopbackURL() async throws {
+        let url = makeTempDiscoveryURL()
+        defer { cleanupTempDiscoveryURL(url) }
+        let record = DiscoveryRecord(
+            url: "http://[0:0:0:0:0:0:0:1]:8888/mcp",
+            host: "0:0:0:0:0:0:0:1",
+            port: 8888,
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            updatedAt: Date()
+        )
+        try Discovery.write(record: record, overrideURL: url)
+        #expect(Discovery.read(overrideURL: url)?.url == record.url)
+    }
+
     @Test func discoveryRejectsNonLoopbackURL() async throws {
         let url = makeTempDiscoveryURL()
         defer { cleanupTempDiscoveryURL(url) }

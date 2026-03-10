@@ -55,35 +55,59 @@ let package = Package(
             ],
             swiftSettings: strictSwiftSettings
         ),
-        .executableTarget(
-            name: "XcodeMCPProxyCLI",
+        .target(
+            name: "XcodeMCPProxyCommands",
             dependencies: [
                 "XcodeMCPProxy",
                 .product(name: "Logging", package: "swift-log"),
             ],
             swiftSettings: strictSwiftSettings
         ),
+        .target(
+            name: "XcodeMCPTestSupport",
+            dependencies: [
+                .product(name: "NIO", package: "swift-nio")
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .executableTarget(
+            name: "XcodeMCPProxyCLI",
+            dependencies: [
+                "XcodeMCPProxyCommands"
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
         .executableTarget(
             name: "XcodeMCPProxyServer",
-            dependencies: ["XcodeMCPProxy"],
+            dependencies: ["XcodeMCPProxyCommands"],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPProxyInstall",
-            dependencies: [],
+            dependencies: ["XcodeMCPProxyCommands"],
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
             name: "XcodeMCPKitTests",
-            dependencies: ["XcodeMCPKit"],
+            dependencies: [
+                "XcodeMCPKit",
+                "XcodeMCPProxy",
+                "XcodeMCPProxyCommands",
+                "XcodeMCPTestSupport",
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ],
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
             name: "XcodeMCPProxyTests",
             dependencies: [
                 "XcodeMCPProxy",
+                "XcodeMCPProxyCommands",
+                "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             swiftSettings: strictSwiftSettings
         ),

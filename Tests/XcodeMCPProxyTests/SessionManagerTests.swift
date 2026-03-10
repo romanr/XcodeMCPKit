@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import Testing
+import XcodeMCPTestSupport
 
 @testable import XcodeMCPProxy
 

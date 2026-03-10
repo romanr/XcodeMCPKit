@@ -1,0 +1,155 @@
+import Foundation
+import Testing
+import XcodeMCPProxyCommands
+
+@Suite
+struct CLICommandTests {
+    @Test func cliCommandRewritesURLFlagToStdio() throws {
+        let rewritten = try XcodeMCPProxyCLICommand.rewriteURLFlagToStdio([
+            "xcode-mcp-proxy",
+            "--url",
+            "http://localhost:8765/mcp",
+        ])
+
+        #expect(rewritten == [
+            "xcode-mcp-proxy",
+            "--stdio",
+            "http://localhost:8765/mcp",
+        ])
+    }
+
+    @Test func cliCommandRejectsURLAndStdioTogether() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                logError: { output.append($0) },
+                logInfo: { _, _ in },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy",
+                "--url",
+                "http://localhost:8765/mcp",
+                "--stdio",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        let lines = output.snapshot()
+        #expect(lines.contains("Use either --url or --stdio (not both)."))
+        #expect(lines.contains { $0.contains("Usage:") })
+    }
+
+    @Test func cliCommandRejectsServerOnlyFlags() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                logError: { output.append($0) },
+                logInfo: { _, _ in },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--listen", "127.0.0.1:9000"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [
+            "This option is only supported by xcode-mcp-proxy-server (proxy server).",
+            "Run: xcode-mcp-proxy-server --help",
+        ])
+    }
+
+    @Test func cliCommandBuildsAdapterFromResolvedEnvironmentURL() async throws {
+        let createdAdapter = RecordingCLIAdapter()
+        let captured = LockedBox<(url: URL?, timeout: TimeInterval?)>((nil, nil))
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                logError: { _ in },
+                logInfo: { _, _ in },
+                makeAdapter: { url, timeout, _, _ in
+                    captured.withValue { value in
+                        value = (url, timeout)
+                    }
+                    return createdAdapter
+                },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--request-timeout", "12"],
+            environment: [
+                "XCODE_MCP_PROXY_ENDPOINT": "http://localhost:9001/mcp"
+            ]
+        )
+
+        #expect(exitCode == 0)
+        let values = captured.snapshot()
+        #expect(values.url?.absoluteString == "http://localhost:9001/mcp")
+        #expect(values.timeout == 12)
+        #expect(await createdAdapter.startCount() == 1)
+        #expect(await createdAdapter.waitCount() == 1)
+    }
+
+    @Test func cliCommandPrintsUsageForHelp() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                logError: { _ in },
+                logInfo: { _, _ in },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--help"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot().first?.contains("Usage:") == true)
+    }
+}
+
+private actor RecordingCLIAdapter: CLICommandAdapter {
+    private var started = 0
+    private var waited = 0
+
+    func start() async {
+        started += 1
+    }
+
+    func wait() async {
+        waited += 1
+    }
+
+    func startCount() -> Int {
+        started
+    }
+
+    func waitCount() -> Int {
+        waited
+    }
+}

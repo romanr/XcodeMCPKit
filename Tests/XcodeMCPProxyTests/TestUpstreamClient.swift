@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPTestSupport
 
 @testable import XcodeMCPProxy
 

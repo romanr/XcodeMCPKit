@@ -1,12 +1,16 @@
+import Dispatch
 import Foundation
 import NIO
-import Testing
 
-struct AsyncTestTimeoutError: Error, CustomStringConvertible {
-    let description: String
+package struct AsyncTestTimeoutError: Error, CustomStringConvertible {
+    package let description: String
+
+    package init(description: String) {
+        self.description = description
+    }
 }
 
-actor RecordedValues<Value: Sendable> {
+package actor RecordedValues<Value: Sendable> {
     private struct Waiter {
         let id: UUID
         let index: Int
@@ -16,7 +20,9 @@ actor RecordedValues<Value: Sendable> {
     private var values: [Value] = []
     private var waiters: [Waiter] = []
 
-    func append(_ value: Value) {
+    package init() {}
+
+    package func append(_ value: Value) {
         let index = values.count
         values.append(value)
 
@@ -25,8 +31,7 @@ actor RecordedValues<Value: Sendable> {
             if waiter.index == index {
                 waiter.continuation.resume(returning: value)
             } else if values.indices.contains(waiter.index) {
-                let existing = values[waiter.index]
-                waiter.continuation.resume(returning: existing)
+                waiter.continuation.resume(returning: values[waiter.index])
             } else {
                 remaining.append(waiter)
             }
@@ -34,22 +39,22 @@ actor RecordedValues<Value: Sendable> {
         waiters = remaining
     }
 
-    func snapshot() -> [Value] {
+    package func snapshot() -> [Value] {
         values
     }
 
-    func count() -> Int {
+    package func count() -> Int {
         values.count
     }
 
-    func value(at index: Int) -> Value? {
+    package func value(at index: Int) -> Value? {
         guard values.indices.contains(index) else {
             return nil
         }
         return values[index]
     }
 
-    func nextValue(at index: Int) async throws -> Value {
+    package func nextValue(at index: Int) async throws -> Value {
         if let existing = value(at: index) {
             return existing
         }
@@ -74,7 +79,7 @@ actor RecordedValues<Value: Sendable> {
 }
 
 @discardableResult
-func waitWithTimeout<T: Sendable>(
+package func waitWithTimeout<T: Sendable>(
     _ description: String = "timed out waiting for async operation",
     timeout: Duration = .seconds(5),
     operation: @escaping @Sendable () async throws -> T
@@ -99,7 +104,7 @@ func waitWithTimeout<T: Sendable>(
     }
 }
 
-func waitUntil(
+package func waitUntil(
     timeout: Duration = .seconds(5),
     pollInterval: Duration = .milliseconds(10),
     _ condition: @escaping @Sendable () async -> Bool
@@ -120,7 +125,7 @@ func waitUntil(
     return await condition()
 }
 
-func waitUntilCount(
+package func waitUntilCount(
     _ expectedCount: Int,
     count: @escaping @Sendable () async -> Int,
     timeout: Duration = .seconds(5)
@@ -130,7 +135,7 @@ func waitUntilCount(
     }
 }
 
-func nextValue<Value: Sendable>(
+package func nextValue<Value: Sendable>(
     _ description: String,
     timeout: Duration = .seconds(5),
     value: @escaping @Sendable () async throws -> Value?
@@ -146,7 +151,7 @@ func nextValue<Value: Sendable>(
     }
 }
 
-func staysTrue(
+package func staysTrue(
     for duration: Duration,
     _ condition: @escaping @Sendable () async -> Bool
 ) async -> Bool {
@@ -166,7 +171,7 @@ func staysTrue(
     return await condition()
 }
 
-func shutdown(_ group: EventLoopGroup) async {
+package func shutdown(_ group: EventLoopGroup) async {
     await withCheckedContinuation { continuation in
         group.shutdownGracefully { _ in
             continuation.resume()
@@ -174,7 +179,7 @@ func shutdown(_ group: EventLoopGroup) async {
     }
 }
 
-func shutdownAndWait(_ group: EventLoopGroup) {
+package func shutdownAndWait(_ group: EventLoopGroup) {
     let semaphore = DispatchSemaphore(value: 0)
     Task.detached(priority: .userInitiated) {
         await shutdown(group)

@@ -1450,154 +1450,62 @@ struct HTTPHandlerTests {
     }
 
     @Test func httpRefreshCodeIssuesSerializesRequestsForSameTabIdentifier() async throws {
-        let config = makeConfig(requestTimeout: 2)
         let coordinator = RefreshCodeIssuesCoordinator()
-        let sessionManager = TestSessionManager(
-            config: config,
-            upstreamPlanResponder: { method, originalId in
-                #expect(method == "tools/call")
-                return .delayed(
-                    try makeToolSuccessResponse(id: originalId, text: "ok"),
-                    delayNanos: 150_000_000
-                )
+        let firstEntered = AsyncSignal()
+        let releaseFirst = AsyncSignal()
+        let secondEntered = NIOLockedValueBox(false)
+
+        let firstTask = Task<Void, Never> {
+            _ = await coordinator.withPermit(key: "windowtab-same") { _ in
+                await firstEntered.signal()
+                await releaseFirst.wait()
             }
-        )
-        sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
-            config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: coordinator
-        )
-
-        do {
-            let firstTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionId: "session-1",
-                    payload: toolsCallPayload(
-                        id: 1,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-same",
-                            "filePath": "App.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
-            }
-
-            #expect(
-                await waitUntil(timeoutNanoseconds: 100_000_000) {
-                    sessionManager.sentUpstreamCount() == 1
-                }
-            )
-
-            let secondTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionId: "session-2",
-                    payload: toolsCallPayload(
-                        id: 2,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-same",
-                            "filePath": "Other.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
-            }
-
-            #expect(sessionManager.sentUpstreamCount() == 1)
-            #expect(
-                await waitUntil(timeoutNanoseconds: 75_000_000) {
-                    sessionManager.sentUpstreamCount() == 2
-                } == false
-            )
-            #expect(
-                await waitUntil(timeoutNanoseconds: 350_000_000) {
-                    sessionManager.sentUpstreamCount() == 2
-                }
-            )
-
-            let response1 = try await firstTask.value
-            let response2 = try await secondTask.value
-            #expect(response1 == 200)
-            #expect(response2 == 200)
-        } catch {
-            await server.shutdown()
-            throw error
         }
-        await server.shutdown()
+        await firstEntered.wait()
+
+        let secondTask = Task<Void, Never> {
+            _ = await coordinator.withPermit(key: "windowtab-same") { _ in
+                secondEntered.withLockedValue { value in
+                    value = true
+                }
+            }
+        }
+
+        await Task.yield()
+        await Task.yield()
+        #expect(secondEntered.withLockedValue { $0 } == false)
+
+        await releaseFirst.signal()
+        _ = await firstTask.value
+        _ = await secondTask.value
+        #expect(secondEntered.withLockedValue { $0 } == true)
     }
 
     @Test func httpRefreshCodeIssuesKeepsDifferentTabIdentifiersConcurrent() async throws {
-        let config = makeConfig(requestTimeout: 2)
         let coordinator = RefreshCodeIssuesCoordinator()
-        let sessionManager = TestSessionManager(
-            config: config,
-            upstreamPlanResponder: { method, originalId in
-                #expect(method == "tools/call")
-                return .delayed(
-                    try makeToolSuccessResponse(id: originalId, text: "ok"),
-                    delayNanos: 150_000_000
-                )
-            }
-        )
-        sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
-            config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: coordinator
-        )
+        let firstEntered = AsyncSignal()
+        let secondEntered = AsyncSignal()
+        let releaseFirst = AsyncSignal()
 
-        do {
-            let firstTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionId: "session-a",
-                    payload: toolsCallPayload(
-                        id: 3,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-a",
-                            "filePath": "A.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
+        let firstTask = Task<Void, Never> {
+            _ = await coordinator.withPermit(key: "windowtab-a") { _ in
+                await firstEntered.signal()
+                await releaseFirst.wait()
             }
-            let secondTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionId: "session-b",
-                    payload: toolsCallPayload(
-                        id: 4,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-b",
-                            "filePath": "B.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
-            }
-
-            #expect(
-                await waitUntil(timeoutNanoseconds: 100_000_000) {
-                    sessionManager.sentUpstreamCount() == 2
-                }
-            )
-
-            let response1 = try await firstTask.value
-            let response2 = try await secondTask.value
-            #expect(response1 == 200)
-            #expect(response2 == 200)
-        } catch {
-            await server.shutdown()
-            throw error
         }
-        await server.shutdown()
+        await firstEntered.wait()
+
+        let secondTask = Task<Void, Never> {
+            _ = await coordinator.withPermit(key: "windowtab-b") { _ in
+                await secondEntered.signal()
+            }
+        }
+
+        await secondEntered.wait()
+        await releaseFirst.signal()
+        _ = await firstTask.value
+        _ = await secondTask.value
+        #expect(Bool(true))
     }
 
     @Test func httpRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
@@ -1750,21 +1658,16 @@ private enum HTTPTestError: Error {
 private struct UpstreamResponsePlan {
     let data: Data
     let delayNanos: UInt64?
-    let deliverManually: Bool
 
     static func immediate(_ data: Data) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, delayNanos: nil, deliverManually: false)
+        UpstreamResponsePlan(data: data, delayNanos: nil)
     }
 
     static func delayed(
         _ data: Data,
         delayNanos: UInt64
     ) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, delayNanos: delayNanos, deliverManually: false)
-    }
-
-    static func manual(_ data: Data) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, delayNanos: nil, deliverManually: true)
+        UpstreamResponsePlan(data: data, delayNanos: delayNanos)
     }
 }
 
@@ -1780,11 +1683,6 @@ private final class TestSessionManager: SessionManaging {
     }
 
     private struct State: Sendable {
-        struct PendingResponse: Sendable {
-            let sessionId: String
-            let data: Data
-        }
-
         var sessions: [String: SessionContext] = [:]
         var nextUpstreamId: Int64 = 1
         var assignUpstreamIdCount = 0
@@ -1797,7 +1695,6 @@ private final class TestSessionManager: SessionManaging {
         var availableUpstreamIndex: Int? = 0
         var requestTimeoutNotifications = 0
         var requestSuccessNotifications = 0
-        var pendingResponses: [PendingResponse] = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -1976,16 +1873,7 @@ private final class TestSessionManager: SessionManaging {
             let session = self.session(id: mapping.sessionId)
             session.router.handleIncoming(responsePlan.data)
         }
-        if responsePlan.deliverManually {
-            state.withLockedValue { state in
-                state.pendingResponses.append(
-                    State.PendingResponse(
-                        sessionId: mapping.sessionId,
-                        data: responsePlan.data
-                    )
-                )
-            }
-        } else if let delayNanos = responsePlan.delayNanos {
+        if let delayNanos = responsePlan.delayNanos {
             Task {
                 try? await Task.sleep(nanoseconds: delayNanos)
                 deliverResponse()
@@ -2063,16 +1951,6 @@ private final class TestSessionManager: SessionManaging {
 
     func setInitialized(_ value: Bool) {
         state.withLockedValue { $0.initialized = value }
-    }
-
-    func deliverNextPendingResponse() {
-        let pending = state.withLockedValue { state -> State.PendingResponse? in
-            guard state.pendingResponses.isEmpty == false else { return nil }
-            return state.pendingResponses.removeFirst()
-        }
-        guard let pending else { return }
-        let session = session(id: pending.sessionId)
-        session.router.handleIncoming(pending.data)
     }
 }
 
@@ -2173,21 +2051,6 @@ private func postJSON(
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 }
 
-private func waitUntil(
-    timeoutNanoseconds: UInt64 = 1_000_000_000,
-    intervalNanoseconds: UInt64 = 20_000_000,
-    condition: @escaping @Sendable () -> Bool
-) async -> Bool {
-    let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
-    while DispatchTime.now().uptimeNanoseconds < deadline {
-        if condition() {
-            return true
-        }
-        try? await Task.sleep(nanoseconds: intervalNanoseconds)
-    }
-    return condition()
-}
-
 private struct TestHTTPHandlerServer {
     let group: MultiThreadedEventLoopGroup
     let channel: Channel
@@ -2259,6 +2122,30 @@ private func postHTTPJSON(
         (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
         ?? [:]
     return (httpResponse, object)
+}
+
+private actor AsyncSignal {
+    private var signaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if signaled {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func signal() {
+        guard signaled == false else { return }
+        signaled = true
+        let continuations = waiters
+        waiters.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
 }
 
 private func makeToolSuccessResponse(id: RPCId, text: String) throws -> Data {

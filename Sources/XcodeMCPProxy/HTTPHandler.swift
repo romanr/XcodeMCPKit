@@ -390,6 +390,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 let sessionId = headerSessionId ?? UUID().uuidString
                 _ = sessionManager.session(id: sessionId)
                 let future = sessionManager.registerInitialize(
+                    sessionId: sessionId,
                     originalId: originalId,
                     requestObject: object,
                     on: context.eventLoop

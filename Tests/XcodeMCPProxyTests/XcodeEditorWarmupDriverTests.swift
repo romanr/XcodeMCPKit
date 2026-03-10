@@ -113,6 +113,34 @@ struct XcodeEditorWarmupDriverTests {
         #expect(resolved == nil)
     }
 
+    @Test func warmupDriverRejectsSymlinkEscapeOutsideWorkspaceRoot() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        let outsideRoot = makeTemporaryWorkspaceRoot()
+        defer {
+            try? FileManager.default.removeItem(atPath: root)
+            try? FileManager.default.removeItem(atPath: outsideRoot)
+        }
+
+        let outsideFile = URL(fileURLWithPath: outsideRoot)
+            .appendingPathComponent("Outside.swift")
+        try "".write(to: outsideFile, atomically: true, encoding: .utf8)
+
+        let symlinkPath = URL(fileURLWithPath: root).appendingPathComponent("linked").path
+        try FileManager.default.createSymbolicLink(
+            atPath: symlinkPath,
+            withDestinationPath: outsideRoot
+        )
+
+        let driver = XcodeEditorWarmupDriver(isEnabled: false)
+        let resolved = await driver.resolveAbsoluteFilePath(
+            workspacePath: root,
+            workspaceRoot: root,
+            requestedFilePath: "linked/Outside.swift"
+        )
+
+        #expect(resolved == nil)
+    }
+
     @Test func warmupDriverWarmsAndRestoresUsingProcessRunner() async throws {
         let root = makeTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -251,6 +279,75 @@ struct XcodeEditorWarmupDriverTests {
 
         let restoreResult = await driver.restore(result.context)
         #expect(restoreResult == "restored")
+    }
+
+    @Test func warmupDriverSnapshotExcludesSymlinkEscapesOutsideWorkspaceRoot() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        let outsideRoot = makeTemporaryWorkspaceRoot()
+        defer {
+            try? FileManager.default.removeItem(atPath: root)
+            try? FileManager.default.removeItem(atPath: outsideRoot)
+        }
+
+        let workspacePath = URL(fileURLWithPath: root)
+            .appendingPathComponent("tweetpd.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let target = URL(fileURLWithPath: root)
+            .appendingPathComponent("tweetpd/Timeline/View/Regular/RegularTimelineView.swift")
+        let insideRestorePath = URL(fileURLWithPath: root)
+            .appendingPathComponent("tweetpd/Store/AccountStore.swift")
+        let symlinkPath = URL(fileURLWithPath: root).appendingPathComponent("linked").path
+        let outsideRestorePath = URL(fileURLWithPath: outsideRoot)
+            .appendingPathComponent("AccountStore.swift")
+
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: insideRestorePath.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+        try "".write(to: insideRestorePath, atomically: true, encoding: .utf8)
+        try "".write(to: outsideRestorePath, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(
+            atPath: symlinkPath,
+            withDestinationPath: outsideRoot
+        )
+
+        let runner = FakeProcessRunner()
+        await runner.enqueue(
+            label: "window-title",
+            stdout: "tweetpd — AccountStore.swift\n"
+        )
+        await runner.enqueue(
+            label: "source-document-paths",
+            stdout: "\(insideRestorePath.path)\n\(symlinkPath)/AccountStore.swift\n"
+        )
+        await runner.enqueue(label: "open-source-document", stdout: "ok\n")
+        await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
+        await runner.enqueue(label: "window-title", stdout: "tweetpd — RegularTimelineView.swift\n")
+        await runner.enqueue(label: "open-source-document", stdout: "ok\n")
+        await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
+
+        let driver = XcodeEditorWarmupDriver(processRunner: runner)
+        let eventLoop = EmbeddedEventLoop()
+        let result = await driver.warmUp(
+            tabIdentifier: "windowtab2",
+            filePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift",
+            sessionId: "session-1",
+            eventLoop: eventLoop,
+            windowsProvider: { _, _ in
+                [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
+            }
+        )
+
+        #expect(result.snapshot?.candidateSourceDocumentPaths == [insideRestorePath.path])
     }
 
     @Test func warmupDriverRevalidatesCachedWorkspacePath() async throws {

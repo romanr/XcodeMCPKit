@@ -499,14 +499,19 @@ actor XcodeEditorWarmupDriver {
     }
 
     private func isPath(_ path: String, containedIn workspaceRoot: String) -> Bool {
-        let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-        let standardizedRoot = URL(fileURLWithPath: workspaceRoot).standardizedFileURL.path
-        guard standardizedRoot.isEmpty == false else { return false }
-        if standardizedPath == standardizedRoot {
+        let resolvedPath = resolvedPathForContainment(path)
+        let resolvedRoot = resolvedPathForContainment(workspaceRoot)
+        guard resolvedRoot.isEmpty == false else { return false }
+        if resolvedPath == resolvedRoot {
             return true
         }
-        let rootPrefix = standardizedRoot.hasSuffix("/") ? standardizedRoot : standardizedRoot + "/"
-        return standardizedPath.hasPrefix(rootPrefix)
+        let rootPrefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
+        return resolvedPath.hasPrefix(rootPrefix)
+    }
+
+    private func resolvedPathForContainment(_ path: String) -> String {
+        let symlinkResolvedPath = (path as NSString).resolvingSymlinksInPath
+        return URL(fileURLWithPath: symlinkResolvedPath).standardizedFileURL.path
     }
 
     private func suffixMatchScore(

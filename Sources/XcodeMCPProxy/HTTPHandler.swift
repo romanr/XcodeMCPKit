@@ -24,14 +24,64 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         var bodyTooLarge = false
     }
 
+    private struct RefreshCodeIssuesRequest: Sendable {
+        static let toolName = "XcodeRefreshCodeIssuesInFile"
+        static let globalQueueKey = "__global__"
+
+        let tabIdentifier: String?
+
+        var queueKey: String {
+            guard let tabIdentifier, tabIdentifier.isEmpty == false else {
+                return Self.globalQueueKey
+            }
+            return tabIdentifier
+        }
+    }
+
+    private struct PreparedForwardRequest {
+        let transform: RequestTransform
+        let upstreamIndex: Int
+    }
+
+    private struct StartedForwardRequest {
+        let transform: RequestTransform
+        let upstreamIndex: Int
+        let future: EventLoopFuture<ByteBuffer>
+    }
+
+    private enum ForwardResponseResolution {
+        case success(Data)
+        case timeout
+        case invalidUpstreamResponse
+    }
+
+    private enum RefreshForwardAttemptResult {
+        case success(Data)
+        case timeout(responseIds: [RPCId], isBatch: Bool)
+        case upstreamUnavailable(responseIds: [RPCId], isBatch: Bool)
+        case invalidRequest
+        case invalidUpstreamResponse
+    }
+
+    private static let refreshRetryDelaysNanos: [UInt64] = [
+        200_000_000,
+        500_000_000,
+    ]
+
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
     private let sessionManager: any SessionManaging
+    private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
     private let logger: Logger = ProxyLogging.make("http")
 
-    init(config: ProxyConfig, sessionManager: any SessionManaging) {
+    init(
+        config: ProxyConfig,
+        sessionManager: any SessionManaging,
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+    ) {
         self.config = config
         self.sessionManager = sessionManager
+        self.refreshCodeIssuesCoordinator = refreshCodeIssuesCoordinator
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -525,46 +575,83 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let shouldPinUpstream = MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
-        guard let upstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: shouldPinUpstream) else {
-            if requestIDs.isEmpty {
-                sendPlain(
-                    on: context.channel,
-                    status: .serviceUnavailable,
-                    body: "upstream unavailable",
-                    keepAlive: head.isKeepAlive,
-                    sessionId: sessionId,
-                    requestLog: requestLog
-                )
-            } else {
+        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
+        if let refreshRequest, requestIDs.isEmpty == false {
+            if headerSessionId == nil {
                 sendMCPError(
                     on: context.channel,
                     ids: requestIDs,
-                    code: -32001,
-                    message: "upstream unavailable",
+                    code: -32000,
+                    message: "expected initialize request",
                     forceBatchArray: requestIsBatch,
                     prefersEventStream: prefersEventStream,
                     keepAlive: head.isKeepAlive,
                     sessionId: sessionId,
                     requestLog: requestLog
                 )
+                return
+            }
+
+            let keepAlive = head.isKeepAlive
+            let channel = context.channel
+            let eventLoop = context.eventLoop
+            let promise = eventLoop.makePromise(of: RefreshForwardAttemptResult.self)
+            promise.futureResult.whenSuccess { attemptResult in
+                self.respondToRefreshForwardAttempt(
+                    attemptResult,
+                    on: channel,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            }
+            Task { [self] in
+                let attemptResult = await forwardRefreshCodeIssuesRequest(
+                    refreshRequest,
+                    bodyData: bodyData,
+                    sessionId: sessionId,
+                    requestIDs: requestIDs,
+                    requestIsBatch: requestIsBatch,
+                    eventLoop: eventLoop
+                )
+                promise.succeed(attemptResult)
             }
             return
         }
 
-        let transform: RequestTransform
+        let prepared: PreparedForwardRequest
         do {
-            transform = try RequestInspector.transform(
-                bodyData,
-                sessionId: sessionId,
-                mapId: { sessionId, originalId in
-                    sessionManager.assignUpstreamId(
+            guard let candidate = try prepareForwardRequest(
+                bodyData: bodyData,
+                parsedRequestJSON: parsedRequestJSON,
+                sessionId: sessionId
+            ) else {
+                if requestIDs.isEmpty {
+                    sendPlain(
+                        on: context.channel,
+                        status: .serviceUnavailable,
+                        body: "upstream unavailable",
+                        keepAlive: head.isKeepAlive,
                         sessionId: sessionId,
-                        originalId: originalId,
-                        upstreamIndex: upstreamIndex
+                        requestLog: requestLog
+                    )
+                } else {
+                    sendMCPError(
+                        on: context.channel,
+                        ids: requestIDs,
+                        code: -32001,
+                        message: "upstream unavailable",
+                        forceBatchArray: requestIsBatch,
+                        prefersEventStream: prefersEventStream,
+                        keepAlive: head.isKeepAlive,
+                        sessionId: sessionId,
+                        requestLog: requestLog
                     )
                 }
-            )
+                return
+            }
+            prepared = candidate
         } catch {
             sendMCPError(
                 on: context.channel,
@@ -579,7 +666,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        if transform.method == "tools/list" {
+        if prepared.transform.method == "tools/list" {
             let hasCache = sessionManager.cachedToolsListResult() != nil
             let params = (try? JSONSerialization.jsonObject(with: bodyData, options: []))
                 .flatMap { $0 as? [String: Any] }?["params"]
@@ -590,14 +677,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     "session": .string(sessionId),
                     "has_cache": .string(hasCache ? "true" : "false"),
                     "has_params": .string(hasParams ? "true" : "false"),
-                    "upstream": .string("\(upstreamIndex)"),
+                    "upstream": .string("\(prepared.upstreamIndex)"),
                 ]
             )
         }
 
         if headerSessionId == nil {
-            if transform.isBatch || transform.method != "initialize" || !transform.expectsResponse {
-                if transform.responseIds.isEmpty {
+            if prepared.transform.isBatch || prepared.transform.method != "initialize" || !prepared.transform.expectsResponse {
+                if prepared.transform.responseIds.isEmpty {
                     sendPlain(
                         on: context.channel,
                         status: .unprocessableEntity,
@@ -609,10 +696,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 } else {
                     sendMCPError(
                         on: context.channel,
-                        ids: transform.responseIds,
+                        ids: prepared.transform.responseIds,
                         code: -32000,
                         message: "expected initialize request",
-                        forceBatchArray: transform.isBatch,
+                        forceBatchArray: prepared.transform.isBatch,
                         prefersEventStream: prefersEventStream,
                         keepAlive: head.isKeepAlive,
                         sessionId: sessionId,
@@ -625,17 +712,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let session = sessionManager.session(id: sessionId)
 
-        if transform.expectsResponse {
-            let future: EventLoopFuture<ByteBuffer>
-            let requestTimeout = MCPMethodDispatcher.timeoutForMethod(
-                transform.method,
-                defaultSeconds: config.requestTimeout
-            )
-            if transform.isBatch {
-                future = session.router.registerBatch(on: context.eventLoop, timeout: requestTimeout)
-            } else if let idKey = transform.idKey {
-                future = session.router.registerRequest(idKey: idKey, on: context.eventLoop, timeout: requestTimeout)
-            } else {
+        if prepared.transform.expectsResponse {
+            let started: StartedForwardRequest
+            do {
+                started = try startPreparedForwardRequest(
+                    prepared,
+                    session: session,
+                    on: context.eventLoop
+                )
+            } catch {
                 sendMCPError(
                     on: context.channel,
                     id: nil,
@@ -649,38 +734,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 return
             }
 
-            sessionManager.sendUpstream(transform.upstreamData, upstreamIndex: upstreamIndex)
             let keepAlive = head.isKeepAlive
             let sessionIdCopy = sessionId
             let channel = context.channel
-            future.whenComplete { result in
-                switch result {
-                case .success(let buffer):
-                    var buffer = buffer
-                    guard let data = buffer.readData(length: buffer.readableBytes) else {
-                        self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
-                        return
-                    }
-                    let responseData = self.rewriteUnsupportedResourcesListResponseIfNeeded(
-                        method: transform.method,
-                        originalId: transform.originalId,
-                        upstreamData: data
-                    )
-                    if transform.isCacheableToolsListRequest,
-                       let object = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
-                       let resultAny = object["result"],
-                       let result = JSONValue(any: resultAny) {
-                        self.sessionManager.setCachedToolsListResult(result)
-                    }
-                    if self.shouldNotifyUpstreamSuccess(for: responseData) {
-                        for responseId in transform.responseIds {
-                            self.sessionManager.onRequestSucceeded(
-                                sessionId: sessionIdCopy,
-                                requestIdKey: responseId.key,
-                                upstreamIndex: upstreamIndex
-                            )
-                        }
-                    }
+            started.future.whenComplete { result in
+                switch self.resolveForwardResponse(
+                    result,
+                    started: started,
+                    sessionId: sessionIdCopy
+                ) {
+                case .success(let responseData):
                     if prefersEventStream {
                         self.sendSingleSSE(on: channel, data: responseData, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                     } else {
@@ -688,27 +751,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         out.writeBytes(responseData)
                         self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
                     }
-                case .failure:
-                    if let firstResponseId = transform.responseIds.first {
-                        self.sessionManager.onRequestTimeout(
-                            sessionId: sessionIdCopy,
-                            requestIdKey: firstResponseId.key,
-                            upstreamIndex: upstreamIndex
-                        )
-                        for responseId in transform.responseIds.dropFirst() {
-                            self.sessionManager.removeUpstreamIdMapping(
-                                sessionId: sessionIdCopy,
-                                requestIdKey: responseId.key,
-                                upstreamIndex: upstreamIndex
-                            )
-                        }
-                    }
+                case .invalidUpstreamResponse:
+                    self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionIdCopy, requestLog: requestLog)
+                case .timeout:
                     self.sendMCPError(
                         on: channel,
-                        ids: transform.responseIds,
+                        ids: started.transform.responseIds,
                         code: -32000,
                         message: "upstream timeout",
-                        forceBatchArray: transform.isBatch,
+                        forceBatchArray: started.transform.isBatch,
                         prefersEventStream: prefersEventStream,
                         keepAlive: keepAlive,
                         sessionId: sessionIdCopy,
@@ -717,12 +768,382 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
         } else {
-            if transform.method == "notifications/initialized" && sessionManager.isInitialized() {
+            if prepared.transform.method == "notifications/initialized" && sessionManager.isInitialized() {
                 sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             } else {
-                sessionManager.sendUpstream(transform.upstreamData, upstreamIndex: upstreamIndex)
+                sessionManager.sendUpstream(prepared.transform.upstreamData, upstreamIndex: prepared.upstreamIndex)
                 sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             }
+        }
+    }
+
+    private func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssuesRequest? {
+        guard let object = requestJSON as? [String: Any],
+            let method = object["method"] as? String,
+            method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let toolName = params["name"] as? String,
+            toolName == RefreshCodeIssuesRequest.toolName
+        else {
+            return nil
+        }
+
+        let arguments = params["arguments"] as? [String: Any]
+        let tabIdentifier = arguments?["tabIdentifier"] as? String
+        return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier)
+    }
+
+    private func prepareForwardRequest(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        sessionId: String
+    ) throws -> PreparedForwardRequest? {
+        let shouldPinUpstream = MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
+        guard let upstreamIndex = sessionManager.chooseUpstreamIndex(
+            sessionId: sessionId,
+            shouldPin: shouldPinUpstream
+        ) else {
+            return nil
+        }
+
+        let transform = try RequestInspector.transform(
+            bodyData,
+            sessionId: sessionId,
+            mapId: { sessionId, originalId in
+                sessionManager.assignUpstreamId(
+                    sessionId: sessionId,
+                    originalId: originalId,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        )
+        return PreparedForwardRequest(
+            transform: transform,
+            upstreamIndex: upstreamIndex
+        )
+    }
+
+    private func startPreparedForwardRequest(
+        _ prepared: PreparedForwardRequest,
+        session: SessionContext,
+        on eventLoop: EventLoop
+    ) throws -> StartedForwardRequest {
+        let requestTimeout = MCPMethodDispatcher.timeoutForMethod(
+            prepared.transform.method,
+            defaultSeconds: config.requestTimeout
+        )
+        let future: EventLoopFuture<ByteBuffer>
+        if prepared.transform.isBatch {
+            future = session.router.registerBatch(
+                on: eventLoop,
+                timeout: requestTimeout
+            )
+        } else if let idKey = prepared.transform.idKey {
+            future = session.router.registerRequest(
+                idKey: idKey,
+                on: eventLoop,
+                timeout: requestTimeout
+            )
+        } else {
+            struct MissingRequestIDError: Error {}
+            throw MissingRequestIDError()
+        }
+
+        sessionManager.sendUpstream(
+            prepared.transform.upstreamData,
+            upstreamIndex: prepared.upstreamIndex
+        )
+        return StartedForwardRequest(
+            transform: prepared.transform,
+            upstreamIndex: prepared.upstreamIndex,
+            future: future
+        )
+    }
+
+    private func resolveForwardResponse(
+        _ result: Result<ByteBuffer, Error>,
+        started: StartedForwardRequest,
+        sessionId: String
+    ) -> ForwardResponseResolution {
+        switch result {
+        case .success(let buffer):
+            var buffer = buffer
+            guard let data = buffer.readData(length: buffer.readableBytes) else {
+                return .invalidUpstreamResponse
+            }
+            let responseData = rewriteUnsupportedResourcesListResponseIfNeeded(
+                method: started.transform.method,
+                originalId: started.transform.originalId,
+                upstreamData: data
+            )
+            if started.transform.isCacheableToolsListRequest,
+                let object = try? JSONSerialization.jsonObject(
+                    with: responseData,
+                    options: []
+                ) as? [String: Any],
+                let resultAny = object["result"],
+                let result = JSONValue(any: resultAny)
+            {
+                sessionManager.setCachedToolsListResult(result)
+            }
+            if shouldNotifyUpstreamSuccess(for: responseData) {
+                for responseId in started.transform.responseIds {
+                    sessionManager.onRequestSucceeded(
+                        sessionId: sessionId,
+                        requestIdKey: responseId.key,
+                        upstreamIndex: started.upstreamIndex
+                    )
+                }
+            }
+            return .success(responseData)
+        case .failure:
+            if let firstResponseId = started.transform.responseIds.first {
+                sessionManager.onRequestTimeout(
+                    sessionId: sessionId,
+                    requestIdKey: firstResponseId.key,
+                    upstreamIndex: started.upstreamIndex
+                )
+                for responseId in started.transform.responseIds.dropFirst() {
+                    sessionManager.removeUpstreamIdMapping(
+                        sessionId: sessionId,
+                        requestIdKey: responseId.key,
+                        upstreamIndex: started.upstreamIndex
+                    )
+                }
+            }
+            return .timeout
+        }
+    }
+
+    private func forwardOnce(
+        bodyData: Data,
+        sessionId: String,
+        requestIDs: [RPCId],
+        requestIsBatch: Bool,
+        eventLoop: EventLoop
+    ) async -> RefreshForwardAttemptResult {
+        let parsedRequestJSON: Any
+        do {
+            parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
+        } catch {
+            return .invalidRequest
+        }
+
+        let prepared: PreparedForwardRequest
+        do {
+            guard let candidate = try prepareForwardRequest(
+                bodyData: bodyData,
+                parsedRequestJSON: parsedRequestJSON,
+                sessionId: sessionId
+            ) else {
+                return .upstreamUnavailable(
+                    responseIds: requestIDs,
+                    isBatch: requestIsBatch
+                )
+            }
+            prepared = candidate
+        } catch {
+            return .invalidRequest
+        }
+
+        let session = sessionManager.session(id: sessionId)
+        let started: StartedForwardRequest
+        do {
+            started = try startPreparedForwardRequest(
+                prepared,
+                session: session,
+                on: eventLoop
+            )
+        } catch {
+            return .invalidRequest
+        }
+
+        let resolution: ForwardResponseResolution
+        do {
+            let buffer = try await started.future.get()
+            resolution = resolveForwardResponse(
+                .success(buffer),
+                started: started,
+                sessionId: sessionId
+            )
+        } catch {
+            resolution = resolveForwardResponse(
+                .failure(error),
+                started: started,
+                sessionId: sessionId
+            )
+        }
+
+        switch resolution {
+        case .success(let responseData):
+            return .success(responseData)
+        case .timeout:
+            return .timeout(
+                responseIds: started.transform.responseIds,
+                isBatch: started.transform.isBatch
+            )
+        case .invalidUpstreamResponse:
+            return .invalidUpstreamResponse
+        }
+    }
+
+    private func forwardRefreshCodeIssuesRequest(
+        _ refreshRequest: RefreshCodeIssuesRequest,
+        bodyData: Data,
+        sessionId: String,
+        requestIDs: [RPCId],
+        requestIsBatch: Bool,
+        eventLoop: EventLoop
+    ) async -> RefreshForwardAttemptResult {
+        await refreshCodeIssuesCoordinator.withPermit(key: refreshRequest.queueKey) { queuePosition in
+            let baseMetadata: Logger.Metadata = [
+                "session": .string(sessionId),
+                "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
+                "queue_key": .string(refreshRequest.queueKey),
+            ]
+            if queuePosition > 0 {
+                logger.debug(
+                    "Queued refresh code issues request",
+                    metadata: baseMetadata.merging(
+                        ["queued_ahead": .string("\(queuePosition)")],
+                        uniquingKeysWith: { _, new in new }
+                    )
+                )
+            }
+            logger.debug(
+                "Dequeued refresh code issues request",
+                metadata: baseMetadata
+            )
+
+            for attemptIndex in 0...Self.refreshRetryDelaysNanos.count {
+                let attempt = attemptIndex + 1
+                let attemptMetadata = baseMetadata.merging(
+                    ["attempt": .string("\(attempt)")],
+                    uniquingKeysWith: { _, new in new }
+                )
+                let result = await forwardOnce(
+                    bodyData: bodyData,
+                    sessionId: sessionId,
+                    requestIDs: requestIDs,
+                    requestIsBatch: requestIsBatch,
+                    eventLoop: eventLoop
+                )
+
+                switch result {
+                case .success(let responseData):
+                    let retryable = isRetryableRefreshCodeIssuesFailure(responseData)
+                    if retryable, attemptIndex < Self.refreshRetryDelaysNanos.count {
+                        let delayNanos = Self.refreshRetryDelaysNanos[attemptIndex]
+                        logger.debug(
+                            "Retrying refresh code issues request after error 5",
+                            metadata: attemptMetadata.merging(
+                                ["delay_ms": .string("\(delayNanos / 1_000_000)")],
+                                uniquingKeysWith: { _, new in new }
+                            )
+                        )
+                        try? await Task.sleep(nanoseconds: delayNanos)
+                        continue
+                    }
+                    if retryable {
+                        logger.debug(
+                            "Refresh code issues request still failing after retries",
+                            metadata: attemptMetadata
+                        )
+                    }
+                    return .success(responseData)
+                case .timeout, .upstreamUnavailable, .invalidRequest, .invalidUpstreamResponse:
+                    return result
+                }
+            }
+
+            return .invalidRequest
+        }
+    }
+
+    private func respondToRefreshForwardAttempt(
+        _ result: RefreshForwardAttemptResult,
+        on channel: Channel,
+        prefersEventStream: Bool,
+        keepAlive: Bool,
+        sessionId: String,
+        requestLog: RequestLogContext
+    ) {
+        switch result {
+        case .success(let responseData):
+            if prefersEventStream {
+                sendSingleSSE(
+                    on: channel,
+                    data: responseData,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            } else {
+                var out = channel.allocator.buffer(capacity: responseData.count)
+                out.writeBytes(responseData)
+                sendJSON(
+                    on: channel,
+                    buffer: out,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            }
+        case .timeout(let responseIds, let isBatch):
+            sendMCPError(
+                on: channel,
+                ids: responseIds,
+                code: -32000,
+                message: "upstream timeout",
+                forceBatchArray: isBatch,
+                prefersEventStream: prefersEventStream,
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+        case .upstreamUnavailable(let responseIds, let isBatch):
+            if responseIds.isEmpty {
+                sendPlain(
+                    on: channel,
+                    status: .serviceUnavailable,
+                    body: "upstream unavailable",
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            } else {
+                sendMCPError(
+                    on: channel,
+                    ids: responseIds,
+                    code: -32001,
+                    message: "upstream unavailable",
+                    forceBatchArray: isBatch,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            }
+        case .invalidRequest:
+            sendMCPError(
+                on: channel,
+                id: nil,
+                code: -32700,
+                message: "invalid json",
+                prefersEventStream: prefersEventStream,
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+        case .invalidUpstreamResponse:
+            sendPlain(
+                on: channel,
+                status: .badGateway,
+                body: "invalid upstream response",
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
         }
     }
 
@@ -946,6 +1367,33 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         return true
+    }
+
+    private func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
+                as? [String: Any],
+            let result = object["result"] as? [String: Any],
+            let isError = result["isError"] as? Bool,
+            isError,
+            let content = result["content"] as? [Any]
+        else {
+            return false
+        }
+
+        for item in content {
+            guard let contentObject = item as? [String: Any],
+                let text = contentObject["text"] as? String
+            else {
+                continue
+            }
+            if text.contains("Failed to retrieve diagnostics for"),
+                text.contains("SourceEditor.SourceEditorCallableDiagnosticError error 5")
+            {
+                return true
+            }
+        }
+        return false
     }
 
     private func isUpstreamOverloadedErrorResponse(_ object: [String: Any]) -> Bool {

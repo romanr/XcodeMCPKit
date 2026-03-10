@@ -73,6 +73,13 @@ it usually means the MCP server process (`xcode-mcp-proxy`) was terminated while
   - `pkill -f xcode-mcp-proxy`
   - `pkill -f mcpbridge`
 
+## `XcodeRefreshCodeIssuesInFile` intermittently returns `error 5`
+Xcode's live diagnostics service is prone to transient failures when `XcodeRefreshCodeIssuesInFile` is fired in bursts for the same `tabIdentifier`.
+
+- `xcode-mcp-proxy-server` now serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
+- This reduces cold-start contention, but it can increase latency when many refresh requests target the same tab at once.
+- For broad issue sweeps, prefer `XcodeListNavigatorIssues` first and only use `XcodeRefreshCodeIssuesInFile` for files that need per-file diagnostics output.
+
 ## Xcode dialog does not appear
 Make sure `--lazy-init` is not set (when enabled, the dialog appears on the first request instead of at startup).
 

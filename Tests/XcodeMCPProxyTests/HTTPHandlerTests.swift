@@ -1448,10 +1448,324 @@ struct HTTPHandlerTests {
         #expect((result?["isError"] as? Bool) == true)
         #expect(result?["resources"] == nil)
     }
+
+    @Test func httpRefreshCodeIssuesSerializesRequestsForSameTabIdentifier() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let coordinator = RefreshCodeIssuesCoordinator()
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                return .delayed(
+                    try makeToolSuccessResponse(id: originalId, text: "ok"),
+                    delayNanos: 150_000_000
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: coordinator
+        )
+
+        do {
+            let firstTask = Task<Int, Error> {
+                let (response, _) = try await postHTTPJSON(
+                    url: server.url,
+                    sessionId: "session-1",
+                    payload: toolsCallPayload(
+                        id: 1,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-same",
+                            "filePath": "App.swift",
+                        ]
+                    )
+                )
+                return response.statusCode
+            }
+
+            #expect(
+                await waitUntil(timeoutNanoseconds: 100_000_000) {
+                    sessionManager.sentUpstreamCount() == 1
+                }
+            )
+
+            let secondTask = Task<Int, Error> {
+                let (response, _) = try await postHTTPJSON(
+                    url: server.url,
+                    sessionId: "session-2",
+                    payload: toolsCallPayload(
+                        id: 2,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-same",
+                            "filePath": "Other.swift",
+                        ]
+                    )
+                )
+                return response.statusCode
+            }
+
+            #expect(sessionManager.sentUpstreamCount() == 1)
+            #expect(
+                await waitUntil(timeoutNanoseconds: 75_000_000) {
+                    sessionManager.sentUpstreamCount() == 2
+                } == false
+            )
+            #expect(
+                await waitUntil(timeoutNanoseconds: 350_000_000) {
+                    sessionManager.sentUpstreamCount() == 2
+                }
+            )
+
+            let response1 = try await firstTask.value
+            let response2 = try await secondTask.value
+            #expect(response1 == 200)
+            #expect(response2 == 200)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpRefreshCodeIssuesKeepsDifferentTabIdentifiersConcurrent() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let coordinator = RefreshCodeIssuesCoordinator()
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                return .delayed(
+                    try makeToolSuccessResponse(id: originalId, text: "ok"),
+                    delayNanos: 150_000_000
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: coordinator
+        )
+
+        do {
+            let firstTask = Task<Int, Error> {
+                let (response, _) = try await postHTTPJSON(
+                    url: server.url,
+                    sessionId: "session-a",
+                    payload: toolsCallPayload(
+                        id: 3,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-a",
+                            "filePath": "A.swift",
+                        ]
+                    )
+                )
+                return response.statusCode
+            }
+            let secondTask = Task<Int, Error> {
+                let (response, _) = try await postHTTPJSON(
+                    url: server.url,
+                    sessionId: "session-b",
+                    payload: toolsCallPayload(
+                        id: 4,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-b",
+                            "filePath": "B.swift",
+                        ]
+                    )
+                )
+                return response.statusCode
+            }
+
+            #expect(
+                await waitUntil(timeoutNanoseconds: 100_000_000) {
+                    sessionManager.sentUpstreamCount() == 2
+                }
+            )
+
+            let response1 = try await firstTask.value
+            let response2 = try await secondTask.value
+            #expect(response1 == 200)
+            #expect(response2 == 200)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let attempts = NIOLockedValueBox(0)
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                let attempt = attempts.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalId,
+                            text:
+                                "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
+                        )
+                    )
+                }
+                return .immediate(try makeToolSuccessResponse(id: originalId, text: "ok"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionId: "session-retry",
+                payload: toolsCallPayload(
+                    id: 10,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-retry",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) != true)
+            #expect(sessionManager.sentUpstreamCount() == 2)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpRefreshCodeIssuesDoesNotRetryNonRetryableToolError() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                return .immediate(
+                    try makeToolErrorResponse(
+                        id: originalId,
+                        text: "permission denied"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionId: "session-no-retry",
+                payload: toolsCallPayload(
+                    id: 11,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-no-retry",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) == true)
+            #expect(sessionManager.sentUpstreamCount() == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpNonTargetToolsCallDoesNotUseRefreshRetryPath() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                return .immediate(
+                    try makeToolErrorResponse(
+                        id: originalId,
+                        text:
+                            "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionId: "session-other-tool",
+                payload: toolsCallPayload(
+                    id: 12,
+                    name: "XcodeListWindows",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) == true)
+            #expect(sessionManager.sentUpstreamCount() == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
 }
 
 private enum HTTPTestError: Error {
     case missingResponseHead
+}
+
+private struct UpstreamResponsePlan {
+    let data: Data
+    let delayNanos: UInt64?
+    let deliverManually: Bool
+
+    static func immediate(_ data: Data) -> UpstreamResponsePlan {
+        UpstreamResponsePlan(data: data, delayNanos: nil, deliverManually: false)
+    }
+
+    static func delayed(
+        _ data: Data,
+        delayNanos: UInt64
+    ) -> UpstreamResponsePlan {
+        UpstreamResponsePlan(data: data, delayNanos: delayNanos, deliverManually: false)
+    }
+
+    static func manual(_ data: Data) -> UpstreamResponsePlan {
+        UpstreamResponsePlan(data: data, delayNanos: nil, deliverManually: true)
+    }
 }
 
 private final class TestSessionManager: SessionManaging {
@@ -1466,6 +1780,11 @@ private final class TestSessionManager: SessionManaging {
     }
 
     private struct State: Sendable {
+        struct PendingResponse: Sendable {
+            let sessionId: String
+            let data: Data
+        }
+
         var sessions: [String: SessionContext] = [:]
         var nextUpstreamId: Int64 = 1
         var assignUpstreamIdCount = 0
@@ -1478,11 +1797,14 @@ private final class TestSessionManager: SessionManaging {
         var availableUpstreamIndex: Int? = 0
         var requestTimeoutNotifications = 0
         var requestSuccessNotifications = 0
+        var pendingResponses: [PendingResponse] = []
     }
 
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
     private let upstreamResponder:
+        (@Sendable (_ method: String, _ originalId: RPCId) throws -> UpstreamResponsePlan)?
+    private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalId: RPCId) throws -> Data)?
 
     init(
@@ -1490,7 +1812,17 @@ private final class TestSessionManager: SessionManaging {
         upstreamResponder: (@Sendable (_ method: String, _ originalId: RPCId) throws -> Data)? = nil
     ) {
         self.config = config
-        self.upstreamResponder = upstreamResponder
+        self.upstreamResponder = nil
+        self.legacyUpstreamResponder = upstreamResponder
+    }
+
+    init(
+        config: ProxyConfig,
+        upstreamPlanResponder: (@Sendable (_ method: String, _ originalId: RPCId) throws -> UpstreamResponsePlan)?
+    ) {
+        self.config = config
+        self.upstreamResponder = upstreamPlanResponder
+        self.legacyUpstreamResponder = nil
     }
 
     func session(id: String) -> SessionContext {
@@ -1612,7 +1944,6 @@ private final class TestSessionManager: SessionManaging {
             state.upstreamSendCount += 1
         }
 
-        guard let upstreamResponder else { return }
         guard
             let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],
@@ -1623,14 +1954,45 @@ private final class TestSessionManager: SessionManaging {
         }
         let upstreamId = (upstreamIdValue as? NSNumber)?.int64Value ?? (upstreamIdValue as? Int64)
         guard let upstreamId,
-            let mapping = state.withLockedValue({ $0.upstreamIdMapping[upstreamId] }),
-            let responseData = try? upstreamResponder(method, mapping.originalId)
+            let mapping = state.withLockedValue({ $0.upstreamIdMapping[upstreamId] })
         else {
             return
         }
 
-        let session = self.session(id: mapping.sessionId)
-        session.router.handleIncoming(responseData)
+        let responsePlan: UpstreamResponsePlan
+        if let upstreamResponder,
+            let planned = try? upstreamResponder(method, mapping.originalId)
+        {
+            responsePlan = planned
+        } else if let legacyUpstreamResponder,
+            let responseData = try? legacyUpstreamResponder(method, mapping.originalId)
+        {
+            responsePlan = .immediate(responseData)
+        } else {
+            return
+        }
+
+        let deliverResponse = { [self] in
+            let session = self.session(id: mapping.sessionId)
+            session.router.handleIncoming(responsePlan.data)
+        }
+        if responsePlan.deliverManually {
+            state.withLockedValue { state in
+                state.pendingResponses.append(
+                    State.PendingResponse(
+                        sessionId: mapping.sessionId,
+                        data: responsePlan.data
+                    )
+                )
+            }
+        } else if let delayNanos = responsePlan.delayNanos {
+            Task {
+                try? await Task.sleep(nanoseconds: delayNanos)
+                deliverResponse()
+            }
+        } else {
+            deliverResponse()
+        }
     }
 
     func debugSnapshot() -> ProxyDebugSnapshot {
@@ -1698,6 +2060,20 @@ private final class TestSessionManager: SessionManaging {
     func requestSuccessNotificationCount() -> Int {
         state.withLockedValue { $0.requestSuccessNotifications }
     }
+
+    func setInitialized(_ value: Bool) {
+        state.withLockedValue { $0.initialized = value }
+    }
+
+    func deliverNextPendingResponse() {
+        let pending = state.withLockedValue { state -> State.PendingResponse? in
+            guard state.pendingResponses.isEmpty == false else { return nil }
+            return state.pendingResponses.removeFirst()
+        }
+        guard let pending else { return }
+        let session = session(id: pending.sessionId)
+        session.router.handleIncoming(pending.data)
+    }
 }
 
 private func makeConfig(
@@ -1720,9 +2096,14 @@ private func makeConfig(
 private func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: ProxyConfig,
-    sessionManager: any SessionManaging
+    sessionManager: any SessionManaging,
+    refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
 ) throws {
-    let handler = HTTPHandler(config: config, sessionManager: sessionManager)
+    let handler = HTTPHandler(
+        config: config,
+        sessionManager: sessionManager,
+        refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator
+    )
     try channel.pipeline.addHandler(handler).wait()
 }
 
@@ -1757,4 +2138,158 @@ private func collectResponse(from channel: EmbeddedChannel) throws -> (
 
 private func advanceEventLoopTime(on channel: EmbeddedChannel, by amount: TimeAmount) {
     channel.embeddedEventLoop.advanceTime(by: amount)
+}
+
+private func toolsCallPayload(
+    id: Int,
+    name: String,
+    arguments: [String: Any]
+) -> [String: Any] {
+    [
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": [
+            "name": name,
+            "arguments": arguments,
+        ],
+    ]
+}
+
+private func postJSON(
+    _ payload: [String: Any],
+    sessionId: String,
+    to channel: EmbeddedChannel
+) throws {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    head.headers.add(name: "Mcp-Session-Id", value: sessionId)
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+}
+
+private func waitUntil(
+    timeoutNanoseconds: UInt64 = 1_000_000_000,
+    intervalNanoseconds: UInt64 = 20_000_000,
+    condition: @escaping @Sendable () -> Bool
+) async -> Bool {
+    let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        if condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: intervalNanoseconds)
+    }
+    return condition()
+}
+
+private struct TestHTTPHandlerServer {
+    let group: MultiThreadedEventLoopGroup
+    let channel: Channel
+    let url: URL
+    let sessionManager: any SessionManaging
+
+    static func start(
+        config: ProxyConfig,
+        sessionManager: any SessionManaging,
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+    ) throws -> TestHTTPHandlerServer {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.backlog, value: 256)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                    channel.pipeline.addHandler(
+                        HTTPHandler(
+                            config: config,
+                            sessionManager: sessionManager,
+                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator
+                        )
+                    )
+                }
+            }
+            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+
+        let channel = try bootstrap.bind(host: config.listenHost, port: 0).wait()
+        let port = channel.localAddress?.port ?? 0
+        let url = URL(string: "http://\(config.listenHost):\(port)/mcp")!
+        return TestHTTPHandlerServer(
+            group: group,
+            channel: channel,
+            url: url,
+            sessionManager: sessionManager
+        )
+    }
+
+    func shutdown() async {
+        sessionManager.shutdown()
+        channel.close(promise: nil)
+        await withCheckedContinuation { continuation in
+            group.shutdownGracefully { _ in
+                continuation.resume()
+            }
+        }
+    }
+}
+
+private func postHTTPJSON(
+    url: URL,
+    sessionId: String,
+    payload: [String: Any]
+) async throws -> (HTTPURLResponse, [String: Any]) {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
+
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw HTTPTestError.missingResponseHead
+    }
+    let object =
+        (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
+        ?? [:]
+    return (httpResponse, object)
+}
+
+private func makeToolSuccessResponse(id: RPCId, text: String) throws -> Data {
+    let response: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": id.value.foundationObject,
+        "result": [
+            "content": [
+                [
+                    "type": "text",
+                    "text": text,
+                ]
+            ]
+        ],
+    ]
+    return try JSONSerialization.data(withJSONObject: response, options: [])
+}
+
+private func makeToolErrorResponse(id: RPCId, text: String) throws -> Data {
+    let response: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": id.value.foundationObject,
+        "result": [
+            "content": [
+                [
+                    "type": "text",
+                    "text": text,
+                ]
+            ],
+            "isError": true,
+        ],
+    ]
+    return try JSONSerialization.data(withJSONObject: response, options: [])
 }

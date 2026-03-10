@@ -1975,12 +1975,14 @@ private func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: ProxyConfig,
     sessionManager: any SessionManaging,
-    refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+    refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator(),
+    warmupDriver: XcodeEditorWarmupDriver = .disabled()
 ) throws {
     let handler = HTTPHandler(
         config: config,
         sessionManager: sessionManager,
-        refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator
+        refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+        warmupDriver: warmupDriver
     )
     try channel.pipeline.addHandler(handler).wait()
 }
@@ -2060,7 +2062,8 @@ private struct TestHTTPHandlerServer {
     static func start(
         config: ProxyConfig,
         sessionManager: any SessionManaging,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator(),
+        warmupDriver: XcodeEditorWarmupDriver = .disabled()
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
@@ -2072,7 +2075,8 @@ private struct TestHTTPHandlerServer {
                         HTTPHandler(
                             config: config,
                             sessionManager: sessionManager,
-                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator
+                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+                            warmupDriver: warmupDriver
                         )
                     )
                 }

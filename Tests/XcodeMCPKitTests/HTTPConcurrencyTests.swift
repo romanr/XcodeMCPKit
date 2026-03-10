@@ -211,6 +211,7 @@ private struct TestHTTPServer {
         let sessionManager = SessionManager(
             config: config, eventLoop: group.next(), upstreams: [upstream])
         let refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+        let warmupDriver = XcodeEditorWarmupDriver.disabled()
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -221,7 +222,8 @@ private struct TestHTTPServer {
                         HTTPHandler(
                             config: config,
                             sessionManager: sessionManager,
-                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator
+                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+                            warmupDriver: warmupDriver
                         )
                     )
                 }

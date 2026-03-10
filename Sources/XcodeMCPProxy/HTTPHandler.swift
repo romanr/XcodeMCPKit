@@ -29,6 +29,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         static let globalQueueKey = "__global__"
 
         let tabIdentifier: String?
+        let filePath: String?
 
         var queueKey: String {
             guard let tabIdentifier, tabIdentifier.isEmpty == false else {
@@ -72,16 +73,19 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private let config: ProxyConfig
     private let sessionManager: any SessionManaging
     private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
+    private let warmupDriver: XcodeEditorWarmupDriver
     private let logger: Logger = ProxyLogging.make("http")
 
     init(
         config: ProxyConfig,
         sessionManager: any SessionManaging,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator(),
+        warmupDriver: XcodeEditorWarmupDriver = XcodeEditorWarmupDriver()
     ) {
         self.config = config
         self.sessionManager = sessionManager
         self.refreshCodeIssuesCoordinator = refreshCodeIssuesCoordinator
+        self.warmupDriver = warmupDriver
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -790,7 +794,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let arguments = params["arguments"] as? [String: Any]
         let tabIdentifier = arguments?["tabIdentifier"] as? String
-        return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier)
+        let filePath = arguments?["filePath"] as? String
+        return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier, filePath: filePath)
     }
 
     private func prepareForwardRequest(
@@ -863,7 +868,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private func resolveForwardResponse(
         _ result: Result<ByteBuffer, Error>,
         started: StartedForwardRequest,
-        sessionId: String
+        sessionId: String,
+        accountSuccess: Bool = true,
+        accountTimeout: Bool = true
     ) -> ForwardResponseResolution {
         switch result {
         case .success(let buffer):
@@ -886,7 +893,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             {
                 sessionManager.setCachedToolsListResult(result)
             }
-            if shouldNotifyUpstreamSuccess(for: responseData) {
+            if accountSuccess, shouldNotifyUpstreamSuccess(for: responseData) {
                 for responseId in started.transform.responseIds {
                     sessionManager.onRequestSucceeded(
                         sessionId: sessionId,
@@ -898,11 +905,19 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return .success(responseData)
         case .failure:
             if let firstResponseId = started.transform.responseIds.first {
-                sessionManager.onRequestTimeout(
-                    sessionId: sessionId,
-                    requestIdKey: firstResponseId.key,
-                    upstreamIndex: started.upstreamIndex
-                )
+                if accountTimeout {
+                    sessionManager.onRequestTimeout(
+                        sessionId: sessionId,
+                        requestIdKey: firstResponseId.key,
+                        upstreamIndex: started.upstreamIndex
+                    )
+                } else {
+                    sessionManager.removeUpstreamIdMapping(
+                        sessionId: sessionId,
+                        requestIdKey: firstResponseId.key,
+                        upstreamIndex: started.upstreamIndex
+                    )
+                }
                 for responseId in started.transform.responseIds.dropFirst() {
                     sessionManager.removeUpstreamIdMapping(
                         sessionId: sessionId,
@@ -913,6 +928,146 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
             return .timeout
         }
+    }
+
+    private func callInternalTool(
+        name: String,
+        arguments: [String: Any],
+        sessionId: String,
+        eventLoop: EventLoop
+    ) async -> [String: Any]? {
+        let requestObject: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "__internal-\(UUID().uuidString)",
+            "method": "tools/call",
+            "params": [
+                "name": name,
+                "arguments": arguments,
+            ],
+        ]
+
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
+        else {
+            return nil
+        }
+
+        let prepared: PreparedForwardRequest
+        do {
+            guard let candidate = try prepareForwardRequest(
+                bodyData: bodyData,
+                parsedRequestJSON: requestObject,
+                sessionId: sessionId
+            ) else {
+                return nil
+            }
+            prepared = candidate
+        } catch {
+            return nil
+        }
+
+        let session = sessionManager.session(id: sessionId)
+        let started: StartedForwardRequest
+        do {
+            started = try startPreparedForwardRequest(
+                prepared,
+                session: session,
+                on: eventLoop
+            )
+        } catch {
+            return nil
+        }
+
+        let resolution: ForwardResponseResolution
+        do {
+            let buffer = try await started.future.get()
+            resolution = resolveForwardResponse(
+                .success(buffer),
+                started: started,
+                sessionId: sessionId
+            )
+        } catch {
+            resolution = resolveForwardResponse(
+                .failure(error),
+                started: started,
+                sessionId: sessionId
+            )
+        }
+
+        guard case .success(let responseData) = resolution,
+            let object = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
+            let result = object["result"] as? [String: Any]
+        else {
+            return nil
+        }
+        if let isError = result["isError"] as? Bool, isError {
+            return nil
+        }
+        return result
+    }
+
+    private func listXcodeWindows(
+        sessionId: String,
+        eventLoop: EventLoop
+    ) async -> [XcodeWindowInfo]? {
+        guard let result = await callInternalTool(
+            name: "XcodeListWindows",
+            arguments: [:],
+            sessionId: sessionId,
+            eventLoop: eventLoop
+        ),
+            let message = extractToolMessage(from: result)
+        else {
+            return nil
+        }
+        return parseXcodeListWindowsMessage(message)
+    }
+
+    private func extractToolMessage(from result: [String: Any]) -> String? {
+        if let structuredContent = result["structuredContent"] as? [String: Any],
+            let message = structuredContent["message"] as? String,
+            message.isEmpty == false
+        {
+            return message
+        }
+
+        guard let content = result["content"] as? [[String: Any]] else {
+            return nil
+        }
+        for item in content {
+            guard let text = item["text"] as? String, text.isEmpty == false else {
+                continue
+            }
+            if let textData = text.data(using: .utf8),
+                let object = try? JSONSerialization.jsonObject(with: textData, options: []) as? [String: Any],
+                let message = object["message"] as? String
+            {
+                return message
+            }
+            return text
+        }
+        return nil
+    }
+
+    private func parseXcodeListWindowsMessage(_ message: String) -> [XcodeWindowInfo] {
+        message
+            .split(separator: "\n")
+            .compactMap { line -> XcodeWindowInfo? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.hasPrefix("* tabIdentifier: ") else { return nil }
+                let parts = trimmed.components(separatedBy: ", workspacePath: ")
+                guard parts.count == 2 else { return nil }
+                let tabIdentifier = parts[0]
+                    .replacingOccurrences(of: "* tabIdentifier: ", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let workspacePath = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard tabIdentifier.isEmpty == false, workspacePath.isEmpty == false else {
+                    return nil
+                }
+                return XcodeWindowInfo(
+                    tabIdentifier: tabIdentifier,
+                    workspacePath: workspacePath
+                )
+            }
     }
 
     private func forwardOnce(
@@ -1015,12 +1170,74 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 metadata: baseMetadata
             )
 
-            for attemptIndex in 0...Self.refreshRetryDelaysNanos.count {
+            let warmupResult = await warmupDriver.warmUp(
+                tabIdentifier: refreshRequest.tabIdentifier,
+                filePath: refreshRequest.filePath,
+                sessionId: sessionId,
+                eventLoop: eventLoop,
+                windowsProvider: { sessionId, eventLoop in
+                    await self.listXcodeWindows(
+                        sessionId: sessionId,
+                        eventLoop: eventLoop
+                    )
+                }
+            )
+            let warmupMetadata = baseMetadata
+                .merging(
+                    [
+                        "workspace_path": .string(warmupResult.workspacePath ?? "none"),
+                        "requested_file_path": .string(refreshRequest.filePath ?? "none"),
+                        "resolved_file_path": .string(warmupResult.resolvedFilePath ?? "none"),
+                    ],
+                    uniquingKeysWith: { _, new in new }
+                )
+
+            if let failureReason = warmupResult.failureReason,
+                failureReason != "disabled",
+                failureReason != "missing tabIdentifier",
+                failureReason != "missing filePath"
+            {
+                logger.debug(
+                    "Refresh code issues warm-up fell back to plain refresh",
+                    metadata: warmupMetadata.merging(
+                        [
+                            "warmup_stage": .string("fallback"),
+                            "failure_reason": .string(failureReason),
+                        ],
+                        uniquingKeysWith: { _, new in new }
+                    )
+                )
+            } else if warmupResult.context != nil {
+                logger.debug(
+                    "Refresh code issues warm-up completed",
+                    metadata: warmupMetadata.merging(
+                        ["warmup_stage": .string("ready")],
+                        uniquingKeysWith: { _, new in new }
+                    )
+                )
+            }
+            var finalResult: RefreshForwardAttemptResult = .invalidRequest
+
+            resultLoop: for attemptIndex in 0...Self.refreshRetryDelaysNanos.count {
                 let attempt = attemptIndex + 1
-                let attemptMetadata = baseMetadata.merging(
+                let attemptMetadata = warmupMetadata.merging(
                     ["attempt": .string("\(attempt)")],
                     uniquingKeysWith: { _, new in new }
                 )
+                if let context = warmupResult.context {
+                    let touched = await warmupDriver.touchResolvedTarget(context)
+                    logger.debug(
+                        "Refresh code issues warm-up touch",
+                        metadata: attemptMetadata.merging(
+                            [
+                                "warmup_stage": .string("touch"),
+                                "touch_result": .string(touched ? "ready" : "failed"),
+                            ],
+                            uniquingKeysWith: { _, new in new }
+                        )
+                    )
+                }
+
                 let result = await forwardOnce(
                     bodyData: bodyData,
                     sessionId: sessionId,
@@ -1050,13 +1267,25 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                             metadata: attemptMetadata
                         )
                     }
-                    return .success(responseData)
+                    finalResult = .success(responseData)
+                    break resultLoop
                 case .timeout, .upstreamUnavailable, .invalidRequest, .invalidUpstreamResponse:
-                    return result
+                    finalResult = result
+                    break resultLoop
                 }
             }
 
-            return .invalidRequest
+            let restoreResult = await warmupDriver.restore(warmupResult.context)
+            if warmupResult.context?.snapshot != nil {
+                logger.debug(
+                    "Refresh code issues restore finished",
+                    metadata: warmupMetadata.merging(
+                        ["restore_result": .string(restoreResult)],
+                        uniquingKeysWith: { _, new in new }
+                    )
+                )
+            }
+            return finalResult
         }
     }
 

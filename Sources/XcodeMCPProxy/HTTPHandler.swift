@@ -14,6 +14,21 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let method: String
         let path: String
         let remoteAddress: String?
+        let clientName: String?
+
+        func withClientName(_ name: String?) -> RequestLogContext {
+            guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else {
+                return self
+            }
+            return RequestLogContext(
+                id: id,
+                method: method,
+                path: path,
+                remoteAddress: remoteAddress,
+                clientName: name
+            )
+        }
     }
 
     private struct State: Sendable {
@@ -28,6 +43,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private let config: ProxyConfig
     private let sessionManager: any SessionManaging
     private let logger: Logger = ProxyLogging.make("http")
+    private let maxLoggedBodyBytes = 4096
 
     init(config: ProxyConfig, sessionManager: any SessionManaging) {
         self.config = config
@@ -107,7 +123,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             id: UUID().uuidString,
             method: head.method.rawValue,
             path: path,
-            remoteAddress: remoteAddressString(for: context.channel)
+            remoteAddress: remoteAddressString(for: context.channel),
+            clientName: nil
         )
         logRequest(requestLog)
 
@@ -313,6 +330,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             sendPlain(on: context.channel, status: .badRequest, body: "invalid body", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
             return
         }
+
+        let clientName = clientName(from: head.headers, bodyData: bodyData)
+        let requestLog = requestLog.withClientName(clientName)
+        logRequestBody(bodyData, requestLog: requestLog)
 
         let headerSessionId = HTTPRequestValidator.sessionId(from: head.headers)
         let headerSessionExists = headerSessionId.map { sessionManager.hasSession(id: $0) } ?? false
@@ -743,6 +764,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         }
+        logResponseBody(data, requestLog: requestLog, status: .ok, sessionId: sessionId)
         logResponse(requestLog, status: .ok, sessionId: sessionId)
     }
 
@@ -839,6 +861,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
+        if let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) {
+            logResponseBody(data, requestLog: requestLog, status: .ok, sessionId: sessionId)
+        }
         logResponse(requestLog, status: .ok, sessionId: sessionId)
         MCPResponseEmitter.sendJSON(
             on: channel,
@@ -855,6 +880,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         sessionId: String?,
         requestLog: RequestLogContext
     ) {
+        logResponseBody(data, requestLog: requestLog, status: .ok, sessionId: sessionId)
         logResponse(requestLog, status: .ok, sessionId: sessionId)
         var buffer = channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
@@ -874,6 +900,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         sessionId: String?,
         requestLog: RequestLogContext
     ) {
+        logResponseBody(body, requestLog: requestLog, status: status, sessionId: sessionId)
         logResponse(requestLog, status: status, sessionId: sessionId)
         MCPResponseEmitter.sendPlain(
             on: channel,
@@ -1024,6 +1051,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         if let remote = request.remoteAddress {
             metadata["remote"] = .string(remote)
         }
+        if let clientName = request.clientName {
+            metadata["client"] = .string(clientName)
+        }
         logger.info("HTTP request", metadata: metadata)
     }
 
@@ -1037,10 +1067,113 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         if let remote = request.remoteAddress {
             metadata["remote"] = .string(remote)
         }
+        if let clientName = request.clientName {
+            metadata["client"] = .string(clientName)
+        }
         if let sessionId {
             metadata["session"] = .string(sessionId)
         }
         logger.info("HTTP response", metadata: metadata)
+    }
+
+    private func logRequestBody(_ data: Data, requestLog: RequestLogContext) {
+        logBody(
+            label: "HTTP request body",
+            data: data,
+            requestLog: requestLog,
+            status: nil,
+            sessionId: nil
+        )
+    }
+
+    private func logResponseBody(_ data: Data, requestLog: RequestLogContext, status: HTTPResponseStatus, sessionId: String?) {
+        logBody(
+            label: "HTTP response body",
+            data: data,
+            requestLog: requestLog,
+            status: status,
+            sessionId: sessionId
+        )
+    }
+
+    private func logResponseBody(_ body: String, requestLog: RequestLogContext, status: HTTPResponseStatus, sessionId: String?) {
+        let data = Data(body.utf8)
+        logBody(
+            label: "HTTP response body",
+            data: data,
+            requestLog: requestLog,
+            status: status,
+            sessionId: sessionId
+        )
+    }
+
+    private func logBody(
+        label: String,
+        data: Data,
+        requestLog: RequestLogContext,
+        status: HTTPResponseStatus?,
+        sessionId: String?
+    ) {
+        var metadata: Logger.Metadata = [
+            "id": .string(requestLog.id),
+            "method": .string(requestLog.method),
+            "path": .string(requestLog.path),
+            "bytes": .string("\(data.count)"),
+        ]
+        if let remote = requestLog.remoteAddress {
+            metadata["remote"] = .string(remote)
+        }
+        if let clientName = requestLog.clientName {
+            metadata["client"] = .string(clientName)
+        }
+        if let status {
+            metadata["status"] = .string("\(status.code)")
+        }
+        if let sessionId {
+            metadata["session"] = .string(sessionId)
+        }
+        let previewData = data.prefix(maxLoggedBodyBytes)
+        let previewText = String(decoding: previewData, as: UTF8.self)
+        metadata["preview"] = .string(previewText)
+        if data.count > maxLoggedBodyBytes {
+            metadata["truncated"] = .string("true")
+        }
+        logger.info(Logger.Message(stringLiteral: label), metadata: metadata)
+    }
+
+    private func clientName(from headers: HTTPHeaders, bodyData: Data) -> String? {
+        if let header = headers.first(name: "Mcp-Client-Name")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !header.isEmpty {
+            return header
+        }
+        return clientName(from: bodyData)
+    }
+
+    private func clientName(from bodyData: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: bodyData, options: []) else {
+            return nil
+        }
+        if let object = json as? [String: Any] {
+            return clientName(from: object)
+        }
+        if let array = json as? [Any] {
+            for item in array {
+                if let object = item as? [String: Any], let name = clientName(from: object) {
+                    return name
+                }
+            }
+        }
+        return nil
+    }
+
+    private func clientName(from object: [String: Any]) -> String? {
+        guard let params = object["params"] as? [String: Any],
+              let clientInfo = params["clientInfo"] as? [String: Any],
+              let name = clientInfo["name"] as? String else {
+            return nil
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func remoteAddressString(for channel: Channel) -> String? {

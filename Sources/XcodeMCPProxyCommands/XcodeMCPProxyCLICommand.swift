@@ -19,6 +19,7 @@ package struct CLICommandLogSink {
 
 package struct CLICommandInvocation {
     package var showHelp = false
+    package var showVersion = false
     package var usesRemovedURLHelper = false
     package var hasExplicitURL = false
     package var hasStdioFlag = false
@@ -93,6 +94,11 @@ package struct XcodeMCPProxyCLICommand {
             return 0
         }
 
+        if invocation.showVersion {
+            dependencies.stdout("xcode-mcp-proxy \(Version.current)")
+            return 0
+        }
+
         if invocation.usesRemovedURLHelper {
             logSink.error(
                 "url helper mode was removed; configure your HTTP client with a concrete URL (default: http://localhost:8765/mcp)."
@@ -157,6 +163,9 @@ package struct XcodeMCPProxyCLICommand {
             switch arg {
             case "-h", "--help":
                 invocation.showHelp = true
+                index += 1
+            case "--version":
+                invocation.showVersion = true
                 index += 1
             case "url" where index == 1:
                 invocation.usesRemovedURLHelper = true
@@ -259,6 +268,7 @@ package struct XcodeMCPProxyCLICommand {
         Options:
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
           --url url                  Explicit upstream URL (default: env/discovery/http://localhost:8765/mcp)
+          --version                  Show version
           -h, --help                 Show help
 
         Environment:

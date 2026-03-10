@@ -27,7 +27,7 @@ public final class ProxyServer {
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
         writeDiscovery(resolvedHost: host, port: port)
-        logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
+        logger.info("Xcode MCP proxy \(Version.current) listening on http://\(displayHost):\(port)")
         return (host, port)
     }
 

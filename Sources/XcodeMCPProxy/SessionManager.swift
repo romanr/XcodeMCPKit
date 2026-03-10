@@ -57,6 +57,14 @@ final class SessionManager: Sendable, SessionManaging {
             let healthState: UpstreamHealthState
         }
 
+        struct Session: Sendable {
+            let generation: UInt64
+            let pinnedUpstreamIndex: Int?
+            let initializeUpstreamIndex: Int?
+            let preferInitializeUpstreamOnNextPin: Bool
+            let didReceiveInitializeUpstreamMessage: Bool
+        }
+
         let hasInitResult: Bool
         let initInFlight: Bool
         let didWarmSecondary: Bool
@@ -554,8 +562,15 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
-    private func clearInitializeUpstreamIndex(sessionId: String) {
+    private func clearInitializeUpstreamIndex(
+        sessionId: String,
+        onlyIfGeneration sessionGeneration: UInt64? = nil
+    ) {
         sessionsState.withLockedValue { state in
+            guard let record = state.sessions[sessionId] else { return }
+            if let sessionGeneration, record.generation != sessionGeneration {
+                return
+            }
             state.sessions[sessionId]?.initializeUpstreamIndex = nil
             state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
             state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
@@ -832,7 +847,10 @@ final class SessionManager: Sendable, SessionManaging {
                 idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
             }
             for item in globalInit.pending {
-                clearInitializeUpstreamIndex(sessionId: item.sessionId)
+                clearInitializeUpstreamIndex(
+                    sessionId: item.sessionId,
+                    onlyIfGeneration: item.sessionGeneration
+                )
                 item.eventLoop.execute {
                     item.promise.fail(TimeoutError())
                 }
@@ -1070,6 +1088,36 @@ final class SessionManager: Sendable, SessionManaging {
                 .shouldRetryEagerInitializePrimaryAfterWarmInitFailure,
             upstreams: upstreams
         )
+    }
+
+    func testSessionSnapshot(id: String) -> TestSnapshot.Session? {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[id] else { return nil }
+            return TestSnapshot.Session(
+                generation: record.generation,
+                pinnedUpstreamIndex: record.pinnedUpstreamIndex,
+                initializeUpstreamIndex: record.initializeUpstreamIndex,
+                preferInitializeUpstreamOnNextPin: record.preferInitializeUpstreamOnNextPin,
+                didReceiveInitializeUpstreamMessage: record.didReceiveInitializeUpstreamMessage
+            )
+        }
+    }
+
+    func testSetInitializeRoutingState(
+        sessionId: String,
+        upstreamIndex: Int,
+        preferOnNextPin: Bool,
+        didReceiveInitializeUpstreamMessage: Bool = false
+    ) {
+        setInitializeUpstreamIndexIfNeeded(
+            sessionId: sessionId,
+            upstreamIndex: upstreamIndex,
+            preferOnNextPin: preferOnNextPin
+        )
+        guard didReceiveInitializeUpstreamMessage else { return }
+        sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = true
+        }
     }
 
     private func redactedDebugEvent(_ event: ProxyDebugEvent?) -> ProxyDebugEvent? {
@@ -1512,7 +1560,10 @@ final class SessionManager: Sendable, SessionManaging {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
-            clearInitializeUpstreamIndex(sessionId: item.sessionId)
+            clearInitializeUpstreamIndex(
+                sessionId: item.sessionId,
+                onlyIfGeneration: item.sessionGeneration
+            )
             if let buffer = encodeInitializeErrorResponse(
                 originalId: item.originalId, errorObject: errorObject)
             {
@@ -1603,7 +1654,10 @@ final class SessionManager: Sendable, SessionManaging {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
-            clearInitializeUpstreamIndex(sessionId: item.sessionId)
+            clearInitializeUpstreamIndex(
+                sessionId: item.sessionId,
+                onlyIfGeneration: item.sessionGeneration
+            )
             item.eventLoop.execute {
                 item.promise.fail(error)
             }

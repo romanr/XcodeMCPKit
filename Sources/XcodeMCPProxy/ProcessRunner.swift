@@ -1,24 +1,43 @@
 import Foundation
 import NIOConcurrencyHelpers
 
+final class DispatchGroupLeaveGuard: @unchecked Sendable {
+    private let group: DispatchGroup
+    private let didLeave = NIOLockedValueBox(false)
+
+    init(group: DispatchGroup) {
+        self.group = group
+        self.group.enter()
+    }
+
+    func leaveIfNeeded() {
+        let shouldLeave = didLeave.withLockedValue { didLeave in
+            guard didLeave == false else { return false }
+            didLeave = true
+            return true
+        }
+        guard shouldLeave else { return }
+        group.leave()
+    }
+}
+
 private final class PipeCollector: @unchecked Sendable {
     private let fileHandle: FileHandle
-    private let drainGroup: DispatchGroup
+    private let drainGuard: DispatchGroupLeaveGuard
     private let buffer = NIOLockedValueBox(Data())
 
     init(fileHandle: FileHandle, drainGroup: DispatchGroup) {
         self.fileHandle = fileHandle
-        self.drainGroup = drainGroup
-        self.drainGroup.enter()
+        self.drainGuard = DispatchGroupLeaveGuard(group: drainGroup)
     }
 
     func start() {
-        fileHandle.readabilityHandler = { [buffer, drainGroup] handle in
+        fileHandle.readabilityHandler = { [buffer, drainGuard] handle in
             let chunk = handle.availableData
             if chunk.isEmpty {
                 handle.readabilityHandler = nil
                 try? handle.close()
-                drainGroup.leave()
+                drainGuard.leaveIfNeeded()
                 return
             }
             buffer.withLockedValue { data in
@@ -34,7 +53,7 @@ private final class PipeCollector: @unchecked Sendable {
     func cancel() {
         fileHandle.readabilityHandler = nil
         try? fileHandle.close()
-        drainGroup.leave()
+        drainGuard.leaveIfNeeded()
     }
 }
 

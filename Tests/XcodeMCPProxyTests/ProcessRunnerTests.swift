@@ -1,9 +1,20 @@
+import Foundation
 import Testing
 
 @testable import XcodeMCPProxy
 
 @Suite
 struct ProcessRunnerTests {
+    @Test func dispatchGroupLeaveGuardLeavesOnlyOnce() {
+        let group = DispatchGroup()
+        let guarder = DispatchGroupLeaveGuard(group: group)
+
+        guarder.leaveIfNeeded()
+        guarder.leaveIfNeeded()
+
+        #expect(group.wait(timeout: .now()) == .success)
+    }
+
     @Test func processRunnerDrainsLargeStdoutWithoutHanging() async throws {
         let runner = ProcessRunner()
         let output = try await runner.run(

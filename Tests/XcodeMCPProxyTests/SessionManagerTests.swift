@@ -342,6 +342,108 @@ struct SessionManagerTests {
         #expect((await upstream.sent()).count == 2)
     }
 
+    @Test func sessionManagerTimeoutDoesNotClearRecreatedSessionInitializeRoutingState()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: false, requestTimeout: 0.1)
+        let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+        let sessionId = "session-timeout-recreated"
+        _ = manager.session(id: sessionId)
+        let future = manager.registerInitialize(
+            sessionId: sessionId,
+            originalId: RPCId(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+
+        manager.removeSession(id: sessionId)
+        _ = manager.session(id: sessionId)
+        manager.testSetInitializeRoutingState(
+            sessionId: sessionId,
+            upstreamIndex: 0,
+            preferOnNextPin: true,
+            didReceiveInitializeUpstreamMessage: true
+        )
+        let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionId))
+
+        await #expect(throws: TimeoutError.self) {
+            try await future.get()
+        }
+
+        let replacementSnapshotAfterTimeout = try #require(manager.testSessionSnapshot(id: sessionId))
+        #expect(replacementSnapshotAfterTimeout.generation == replacementSnapshotBeforeTimeout.generation)
+        #expect(replacementSnapshotAfterTimeout.initializeUpstreamIndex == 0)
+        #expect(replacementSnapshotAfterTimeout.preferInitializeUpstreamOnNextPin)
+        #expect(replacementSnapshotAfterTimeout.didReceiveInitializeUpstreamMessage)
+    }
+
+    @Test func sessionManagerInitializeErrorDoesNotClearRecreatedSessionInitializeRoutingState()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+        let sessionId = "session-error-recreated"
+        _ = manager.session(id: sessionId)
+        let future = manager.registerInitialize(
+            sessionId: sessionId,
+            originalId: RPCId(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        let sent = await upstream.sent()
+        let initId = try extractUpstreamId(from: sent[0])
+
+        manager.removeSession(id: sessionId)
+        _ = manager.session(id: sessionId)
+        manager.testSetInitializeRoutingState(
+            sessionId: sessionId,
+            upstreamIndex: 0,
+            preferOnNextPin: true,
+            didReceiveInitializeUpstreamMessage: true
+        )
+        let replacementSnapshotBeforeError = try #require(manager.testSessionSnapshot(id: sessionId))
+
+        await upstream.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": initId,
+                        "error": [
+                            "code": -32000,
+                            "message": "boom",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        let response = try decodeJSON(from: try await future.get())
+        let errorObject = try #require(response["error"] as? [String: Any])
+        #expect(errorObject["message"] as? String == "boom")
+
+        let replacementSnapshotAfterError = try #require(manager.testSessionSnapshot(id: sessionId))
+        #expect(replacementSnapshotAfterError.generation == replacementSnapshotBeforeError.generation)
+        #expect(replacementSnapshotAfterError.initializeUpstreamIndex == 0)
+        #expect(replacementSnapshotAfterError.preferInitializeUpstreamOnNextPin)
+        #expect(replacementSnapshotAfterError.didReceiveInitializeUpstreamMessage)
+    }
+
     @Test func sessionManagerEagerInitializeRestartsAfterExit() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

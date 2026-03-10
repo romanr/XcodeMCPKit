@@ -1711,7 +1711,7 @@ struct HTTPHandlerTests {
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
         let runner = HTTPHandlerFakeProcessRunner()
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — Foo.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — Foo.swift\n")
         await runner.enqueue(label: "source-document-paths", stdout: "")
 
         let warmupDriver = XcodeEditorWarmupDriver(processRunner: runner)
@@ -1765,6 +1765,7 @@ struct HTTPHandlerTests {
             #expect(sessionManager.sentUpstreamCount() == 2)
             #expect(sessionManager.requestSuccessNotificationCount() == 0)
             #expect(sessionManager.requestTimeoutNotificationCount() == 1)
+            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
         } catch {
             await server.shutdown()
             throw error
@@ -2089,6 +2090,10 @@ private final class TestSessionManager: SessionManaging {
 
     func lastChooseUpstreamShouldPin() -> Bool {
         state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
+    }
+
+    func chooseUpstreamShouldPinValues() -> [Bool] {
+        state.withLockedValue { $0.chooseUpstreamCalls.map(\.shouldPin) }
     }
 
     func refreshToolsListCallCount() -> Int {

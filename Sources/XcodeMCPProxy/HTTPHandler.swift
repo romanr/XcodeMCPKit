@@ -801,9 +801,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private func prepareForwardRequest(
         bodyData: Data,
         parsedRequestJSON: Any,
-        sessionId: String
+        sessionId: String,
+        shouldPinUpstreamOverride: Bool? = nil
     ) throws -> PreparedForwardRequest? {
-        let shouldPinUpstream = MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
+        let shouldPinUpstream =
+            shouldPinUpstreamOverride ?? MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
         guard let upstreamIndex = sessionManager.chooseUpstreamIndex(
             sessionId: sessionId,
             shouldPin: shouldPinUpstream
@@ -956,7 +958,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             guard let candidate = try prepareForwardRequest(
                 bodyData: bodyData,
                 parsedRequestJSON: requestObject,
-                sessionId: sessionId
+                sessionId: sessionId,
+                shouldPinUpstreamOverride: false
             ) else {
                 return nil
             }

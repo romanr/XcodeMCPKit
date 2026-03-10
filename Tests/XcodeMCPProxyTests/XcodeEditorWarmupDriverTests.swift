@@ -33,7 +33,7 @@ struct XcodeEditorWarmupDriverTests {
         defer { try? FileManager.default.removeItem(atPath: root) }
 
         let target = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/TimeLine/View/Regular/RegularTimelineView.swift")
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
         try FileManager.default.createDirectory(
             at: target.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -44,7 +44,7 @@ struct XcodeEditorWarmupDriverTests {
         let resolved = await driver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
-            requestedFilePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift"
+            requestedFilePath: "SampleProject/Feature/Scene/PrimaryView.swift"
         )
 
         #expect(resolved?.lowercased() == target.path.lowercased())
@@ -55,8 +55,8 @@ struct XcodeEditorWarmupDriverTests {
         defer { try? FileManager.default.removeItem(atPath: root) }
 
         let candidates = [
-            "A/Timeline/View/Foo.swift",
-            "B/Timeline/View/Foo.swift",
+            "A/Feature/Screen/Foo.swift",
+            "B/Feature/Screen/Foo.swift",
         ]
         for relativePath in candidates {
             let url = URL(fileURLWithPath: root).appendingPathComponent(relativePath)
@@ -71,7 +71,7 @@ struct XcodeEditorWarmupDriverTests {
         let resolved = await driver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
-            requestedFilePath: "Timeline/View/Foo.swift"
+            requestedFilePath: "Feature/Screen/Foo.swift"
         )
 
         #expect(resolved == nil)
@@ -177,15 +177,15 @@ struct XcodeEditorWarmupDriverTests {
         defer { try? FileManager.default.removeItem(atPath: root) }
 
         let workspacePath = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd.xcworkspace").path
+            .appendingPathComponent("SampleProject.xcworkspace").path
         try FileManager.default.createDirectory(
             atPath: workspacePath,
             withIntermediateDirectories: true
         )
         let target = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/TimeLine/View/Regular/RegularTimelineView.swift")
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
         let restorePath = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/Store/AccountStore.swift")
+            .appendingPathComponent("SampleProject/Data/StateStore.swift")
         try FileManager.default.createDirectory(
             at: target.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -200,7 +200,7 @@ struct XcodeEditorWarmupDriverTests {
         let runner = FakeProcessRunner()
         await runner.enqueue(
             label: "window-title",
-            stdout: "tweetpd — AccountStore.swift\n"
+            stdout: "SampleProject — StateStore.swift\n"
         )
         await runner.enqueue(
             label: "source-document-paths",
@@ -208,7 +208,7 @@ struct XcodeEditorWarmupDriverTests {
         )
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — RegularTimelineView.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — PrimaryView.swift\n")
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
 
@@ -216,7 +216,7 @@ struct XcodeEditorWarmupDriverTests {
         let eventLoop = EmbeddedEventLoop()
         let result = await driver.warmUp(
             tabIdentifier: "windowtab2",
-            filePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
             sessionId: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
@@ -225,7 +225,7 @@ struct XcodeEditorWarmupDriverTests {
         )
 
         #expect(result.context?.resolvedFilePath.lowercased() == target.path.lowercased())
-        #expect(result.snapshot?.visibleSourceBasename == "AccountStore.swift")
+        #expect(result.snapshot?.visibleSourceBasename == "StateStore.swift")
 
         let restoreResult = await driver.restore(result.context)
         #expect(restoreResult == "restored")
@@ -251,17 +251,17 @@ struct XcodeEditorWarmupDriverTests {
         }
 
         let workspacePath = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd.xcworkspace").path
+            .appendingPathComponent("SampleProject.xcworkspace").path
         try FileManager.default.createDirectory(
             atPath: workspacePath,
             withIntermediateDirectories: true
         )
         let target = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/Timeline/View/Regular/RegularTimelineView.swift")
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
         let insideRestorePath = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/Store/AccountStore.swift")
+            .appendingPathComponent("SampleProject/Data/StateStore.swift")
         let outsideRestorePath = URL(fileURLWithPath: outsideRoot)
-            .appendingPathComponent("tweetpd/Store/AccountStore.swift")
+            .appendingPathComponent("SampleProject/Data/StateStore.swift")
 
         try FileManager.default.createDirectory(
             at: target.deletingLastPathComponent(),
@@ -282,7 +282,7 @@ struct XcodeEditorWarmupDriverTests {
         let runner = FakeProcessRunner()
         await runner.enqueue(
             label: "window-title",
-            stdout: "tweetpd — AccountStore.swift\n"
+            stdout: "SampleProject — StateStore.swift\n"
         )
         await runner.enqueue(
             label: "source-document-paths",
@@ -290,7 +290,7 @@ struct XcodeEditorWarmupDriverTests {
         )
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — RegularTimelineView.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — PrimaryView.swift\n")
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
 
@@ -298,7 +298,7 @@ struct XcodeEditorWarmupDriverTests {
         let eventLoop = EmbeddedEventLoop()
         let result = await driver.warmUp(
             tabIdentifier: "windowtab2",
-            filePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
             sessionId: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
@@ -321,19 +321,19 @@ struct XcodeEditorWarmupDriverTests {
         }
 
         let workspacePath = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd.xcworkspace").path
+            .appendingPathComponent("SampleProject.xcworkspace").path
         try FileManager.default.createDirectory(
             atPath: workspacePath,
             withIntermediateDirectories: true
         )
 
         let target = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/Timeline/View/Regular/RegularTimelineView.swift")
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
         let insideRestorePath = URL(fileURLWithPath: root)
-            .appendingPathComponent("tweetpd/Store/AccountStore.swift")
+            .appendingPathComponent("SampleProject/Data/StateStore.swift")
         let symlinkPath = URL(fileURLWithPath: root).appendingPathComponent("linked").path
         let outsideRestorePath = URL(fileURLWithPath: outsideRoot)
-            .appendingPathComponent("AccountStore.swift")
+            .appendingPathComponent("StateStore.swift")
 
         try FileManager.default.createDirectory(
             at: target.deletingLastPathComponent(),
@@ -354,15 +354,15 @@ struct XcodeEditorWarmupDriverTests {
         let runner = FakeProcessRunner()
         await runner.enqueue(
             label: "window-title",
-            stdout: "tweetpd — AccountStore.swift\n"
+            stdout: "SampleProject — StateStore.swift\n"
         )
         await runner.enqueue(
             label: "source-document-paths",
-            stdout: "\(insideRestorePath.path)\n\(symlinkPath)/AccountStore.swift\n"
+            stdout: "\(insideRestorePath.path)\n\(symlinkPath)/StateStore.swift\n"
         )
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — RegularTimelineView.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — PrimaryView.swift\n")
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
 
@@ -370,7 +370,7 @@ struct XcodeEditorWarmupDriverTests {
         let eventLoop = EmbeddedEventLoop()
         let result = await driver.warmUp(
             tabIdentifier: "windowtab2",
-            filePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
             sessionId: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
@@ -390,16 +390,16 @@ struct XcodeEditorWarmupDriverTests {
         }
 
         let workspaceA = URL(fileURLWithPath: rootA)
-            .appendingPathComponent("tweetpd.xcworkspace").path
+            .appendingPathComponent("SampleProject.xcworkspace").path
         let workspaceB = URL(fileURLWithPath: rootB)
-            .appendingPathComponent("tweetpd.xcworkspace").path
+            .appendingPathComponent("SampleProject.xcworkspace").path
         try FileManager.default.createDirectory(atPath: workspaceA, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: workspaceB, withIntermediateDirectories: true)
 
         let targetA = URL(fileURLWithPath: rootA)
-            .appendingPathComponent("tweetpd/Timeline/View/Regular/RegularTimelineView.swift")
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
         let targetB = URL(fileURLWithPath: rootB)
-            .appendingPathComponent("tweetpd/Timeline/View/Regular/RegularTimelineView.swift")
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
         try FileManager.default.createDirectory(
             at: targetA.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -412,11 +412,11 @@ struct XcodeEditorWarmupDriverTests {
         try "".write(to: targetB, atomically: true, encoding: .utf8)
 
         let runner = FakeProcessRunner()
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — RegularTimelineView.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — PrimaryView.swift\n")
         await runner.enqueue(label: "source-document-paths", stdout: "\(targetA.path)\n")
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — RegularTimelineView.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — PrimaryView.swift\n")
         await runner.enqueue(label: "source-document-paths", stdout: "\(targetB.path)\n")
         await runner.enqueue(label: "open-source-document", stdout: "ok\n")
         await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
@@ -426,7 +426,7 @@ struct XcodeEditorWarmupDriverTests {
 
         let first = await driver.warmUp(
             tabIdentifier: "windowtab2",
-            filePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
             sessionId: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
@@ -435,7 +435,7 @@ struct XcodeEditorWarmupDriverTests {
         )
         let second = await driver.warmUp(
             tabIdentifier: "windowtab2",
-            filePath: "tweetpd/Timeline/View/Regular/RegularTimelineView.swift",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
             sessionId: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
@@ -448,6 +448,55 @@ struct XcodeEditorWarmupDriverTests {
         #expect(second.context?.resolvedFilePath == targetB.path)
     }
 
+    @Test func warmupDriverDoesNotReuseWorkspaceCacheAcrossSessions() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let workspacePath = URL(fileURLWithPath: root)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(atPath: workspacePath, withIntermediateDirectories: true)
+
+        let target = URL(fileURLWithPath: root)
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let runner = FakeProcessRunner()
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — PrimaryView.swift\n")
+        await runner.enqueue(label: "source-document-paths", stdout: "")
+        await runner.enqueue(label: "open-source-document", stdout: "ok\n")
+        await runner.enqueue(label: "touch-source-document", stdout: "ready\n")
+
+        let driver = XcodeEditorWarmupDriver(processRunner: runner)
+        let eventLoop = EmbeddedEventLoop()
+
+        let first = await driver.warmUp(
+            tabIdentifier: "windowtab2",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
+            sessionId: "session-A",
+            eventLoop: eventLoop,
+            windowsProvider: { _, _ in
+                [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
+            }
+        )
+        let second = await driver.warmUp(
+            tabIdentifier: "windowtab2",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
+            sessionId: "session-B",
+            eventLoop: eventLoop,
+            windowsProvider: { _, _ in
+                nil
+            }
+        )
+
+        #expect(first.failureReason == nil)
+        #expect(second.workspacePath == nil)
+        #expect(second.failureReason == "workspacePath not found")
+    }
+
     @Test func warmupDriverRestoreSkipsAmbiguousCandidate() async throws {
         let runner = FakeProcessRunner()
         let driver = XcodeEditorWarmupDriver(processRunner: runner)
@@ -458,7 +507,7 @@ struct XcodeEditorWarmupDriverTests {
             snapshot: EditorSnapshot(
                 workspacePath: "/tmp/workspace",
                 workspaceRoot: "/tmp/workspace",
-                windowTitle: "tweetpd — Foo.swift",
+                windowTitle: "SampleProject — Foo.swift",
                 candidateSourceDocumentPaths: [
                     "/tmp/workspace/A/Foo.swift",
                     "/tmp/workspace/B/Foo.swift",
@@ -467,7 +516,7 @@ struct XcodeEditorWarmupDriverTests {
             )
         )
 
-        await runner.enqueue(label: "window-title", stdout: "tweetpd — Foo.swift\n")
+        await runner.enqueue(label: "window-title", stdout: "SampleProject — Foo.swift\n")
         let restoreResult = await driver.restore(context)
         #expect(restoreResult == "restore_candidate_ambiguous")
         #expect(await runner.requests().map(\.label) == ["window-title"])

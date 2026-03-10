@@ -38,12 +38,17 @@ actor XcodeEditorWarmupDriver {
         let filePath: String
     }
 
+    private struct WorkspaceCacheKey: Hashable {
+        let sessionId: String
+        let tabIdentifier: String
+    }
+
     private let processRunner: any ProcessRunning
     private let fileManager = FileManager.default
     private let logger: Logger
     private let isEnabled: Bool
 
-    private var workspacePathCache: [String: String] = [:]
+    private var workspacePathCache: [WorkspaceCacheKey: String] = [:]
     private var resolvedFilePathCache: [FileResolutionKey: String] = [:]
 
     init(
@@ -316,15 +321,19 @@ actor XcodeEditorWarmupDriver {
         eventLoop: EventLoop,
         windowsProvider: WindowsProvider
     ) async -> String? {
-        let cached = workspacePathCache[tabIdentifier]
+        let cacheKey = WorkspaceCacheKey(
+            sessionId: sessionId,
+            tabIdentifier: tabIdentifier
+        )
+        let cached = workspacePathCache[cacheKey]
         guard let windows = await windowsProvider(sessionId, eventLoop) else {
             return cached
         }
         guard let workspacePath = windows.first(where: { $0.tabIdentifier == tabIdentifier })?.workspacePath else {
-            workspacePathCache.removeValue(forKey: tabIdentifier)
+            workspacePathCache.removeValue(forKey: cacheKey)
             return nil
         }
-        workspacePathCache[tabIdentifier] = workspacePath
+        workspacePathCache[cacheKey] = workspacePath
         return workspacePath
     }
 

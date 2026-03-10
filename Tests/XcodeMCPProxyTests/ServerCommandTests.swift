@@ -188,6 +188,36 @@ struct ServerCommandTests {
         #expect(line.contains("--xcode-pid 7777"))
         #expect(line.contains("Usage:") == false)
     }
+
+    @Test func serverCommandPreservesExplicitHelpBeforeLaterParseErrors() async throws {
+        let output = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { errors.append($0) },
+                resolveXcodePid: { "7777" },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in RecordingProxyServer() },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy-server",
+                "--help",
+                "--url",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(errors.snapshot().isEmpty)
+        #expect(output.snapshot().first?.contains("Usage:") == true)
+    }
 }
 
 private final class RecordingProxyServer: ProxyServerCommandServer {

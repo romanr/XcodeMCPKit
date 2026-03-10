@@ -195,8 +195,17 @@ package struct XcodeMCPProxyServerCommand {
             switch arg {
             case "-h", "--help":
                 showHelp = true
-                index += 1
-                continue
+                return ProxyServerOptions(
+                    forwardedArgs: forwarded,
+                    showHelp: showHelp,
+                    hasListenFlag: hasListen,
+                    hasHostFlag: hasHost,
+                    hasPortFlag: hasPort,
+                    hasXcodePidFlag: hasXcodePid,
+                    hasLazyInitFlag: hasLazyInit,
+                    forceRestart: forceRestart,
+                    dryRun: dryRun
+                )
             case "--dry-run":
                 dryRun = true
                 index += 1

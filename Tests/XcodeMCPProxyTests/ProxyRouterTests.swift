@@ -1,148 +1,140 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import NIOEmbedded
 import Testing
+
 @testable import XcodeMCPProxy
 
-@Test func proxyRouterMatchesId() async throws {
-    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-    defer { Task { await shutdown(group) } }
+@Suite
+struct ProxyRouterTests {
+    @Test func proxyRouterMatchesId() async throws {
+        let eventLoop = EmbeddedEventLoop()
 
-    let router = ProxyRouter(
-        requestTimeout: .seconds(5),
+        let router = ProxyRouter(
+            requestTimeout: .seconds(5),
             hasActiveClients: { false },
-        sendNotification: { _ in }
-    )
+            sendNotification: { _ in }
+        )
 
-    let future = router.registerRequest(idKey: "1", on: group.next())
-    let response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
-    router.handleIncoming(Data(response.utf8))
+        let future = router.registerRequest(idKey: "1", on: eventLoop)
+        let response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
+        router.handleIncoming(Data(response.utf8))
 
-    let buffer = try await future.get()
-    let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
-    #expect(string == response)
-}
+        let buffer = try await future.get()
+        let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
+        #expect(string == response)
+    }
 
-@Test func proxyRouterBuffersNotifications() async throws {
-    let router = ProxyRouter(
-        requestTimeout: .seconds(5),
+    @Test func proxyRouterBuffersNotifications() async throws {
+        let router = ProxyRouter(
+            requestTimeout: .seconds(5),
             hasActiveClients: { false },
-        sendNotification: { _ in }
-    )
+            sendNotification: { _ in }
+        )
 
-    let notification = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}"
-    router.handleIncoming(Data(notification.utf8))
+        let notification = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}"
+        router.handleIncoming(Data(notification.utf8))
 
-    let buffered = router.drainBufferedNotifications()
-    #expect(buffered.count == 1)
-    #expect(String(data: buffered[0], encoding: .utf8) == notification)
-}
+        let buffered = router.drainBufferedNotifications()
+        #expect(buffered.count == 1)
+        #expect(String(data: buffered[0], encoding: .utf8) == notification)
+    }
 
-@Test func proxyRouterSendsNotifications() async throws {
-    let received = NIOLockedValueBox<[String]>([])
-    let router = ProxyRouter(
-        requestTimeout: .seconds(5),
+    @Test func proxyRouterSendsNotifications() async throws {
+        let received = NIOLockedValueBox<[String]>([])
+        let router = ProxyRouter(
+            requestTimeout: .seconds(5),
             hasActiveClients: { true },
-        sendNotification: { data in
-            received.withLockedValue { values in
-                values.append(String(decoding: data, as: UTF8.self))
+            sendNotification: { data in
+                received.withLockedValue { values in
+                    values.append(String(decoding: data, as: UTF8.self))
+                }
             }
+        )
+
+        let notification = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}"
+        router.handleIncoming(Data(notification.utf8))
+        #expect(received.withLockedValue { $0 } == [notification])
+    }
+
+    @Test func proxyRouterHandlesBatchResponse() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = ProxyRouter(
+            requestTimeout: .seconds(5),
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+
+        let future = router.registerBatch(on: eventLoop)
+        let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
+        router.handleIncoming(Data(response.utf8))
+
+        let buffer = try await future.get()
+        let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
+        #expect(string == response)
+    }
+
+    @Test func proxyRouterTimesOutRequests() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = ProxyRouter(
+            requestTimeout: .seconds(1),
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+
+        let future = router.registerRequest(idKey: "1", on: eventLoop)
+        eventLoop.advanceTime(by: .seconds(1))
+        eventLoop.run()
+
+        do {
+            _ = try await future.get()
+            #expect(Bool(false))
+        } catch {
+            #expect(error is TimeoutError)
         }
-    )
+    }
 
-    let notification = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}"
-    router.handleIncoming(Data(notification.utf8))
-    #expect(received.withLockedValue { $0 } == [notification])
-}
+    @Test func proxyRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = ProxyRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
 
-private func shutdown(_ group: EventLoopGroup) async {
-    await withCheckedContinuation { continuation in
-        group.shutdownGracefully { _ in
-            continuation.resume()
+        let future = router.registerRequest(idKey: "1", on: eventLoop)
+        let failed = NIOLockedValueBox(false)
+        let succeeded = NIOLockedValueBox(false)
+        future.whenFailure { _ in
+            failed.withLockedValue { $0 = true }
         }
-    }
-}
+        future.whenSuccess { _ in
+            succeeded.withLockedValue { $0 = true }
+        }
 
-@Test func proxyRouterHandlesBatchResponse() async throws {
-    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-    defer { Task { await shutdown(group) } }
-    let eventLoop = group.next()
-    let router = ProxyRouter(
-        requestTimeout: .seconds(5),
-            hasActiveClients: { false },
-        sendNotification: { _ in }
-    )
+        eventLoop.advanceTime(by: .seconds(5))
+        eventLoop.run()
 
-    let future = router.registerBatch(on: eventLoop)
-    let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
-    router.handleIncoming(Data(response.utf8))
-
-    let buffer = try await future.get()
-    let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
-    #expect(string == response)
-}
-
-@Test func proxyRouterTimesOutRequests() async throws {
-    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-    defer { Task { await shutdown(group) } }
-    let eventLoop = group.next()
-    let router = ProxyRouter(
-        requestTimeout: .seconds(1),
-            hasActiveClients: { false },
-        sendNotification: { _ in }
-    )
-
-    let future = router.registerRequest(idKey: "1", on: eventLoop)
-    try await Task.sleep(nanoseconds: 1_500_000_000)
-
-    do {
-        _ = try await future.get()
-        #expect(Bool(false))
-    } catch {
-        #expect(error is TimeoutError)
-    }
-}
-
-@Test func proxyRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {
-    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-    defer { Task { await shutdown(group) } }
-    let eventLoop = group.next()
-    let router = ProxyRouter(
-        requestTimeout: nil,
-            hasActiveClients: { false },
-        sendNotification: { _ in }
-    )
-
-    let future = router.registerRequest(idKey: "1", on: eventLoop)
-    let failed = NIOLockedValueBox(false)
-    let succeeded = NIOLockedValueBox(false)
-    future.whenFailure { _ in
-        failed.withLockedValue { $0 = true }
-    }
-    future.whenSuccess { _ in
-        succeeded.withLockedValue { $0 = true }
+        #expect(failed.withLockedValue { $0 } == false)
+        #expect(succeeded.withLockedValue { $0 } == false)
     }
 
-    try await Task.sleep(nanoseconds: 1_500_000_000)
-
-    #expect(failed.withLockedValue { $0 } == false)
-    #expect(succeeded.withLockedValue { $0 } == false)
-}
-
-@Test func proxyRouterEnforcesNotificationBufferLimit() async throws {
-    let router = ProxyRouter(
-        requestTimeout: .seconds(5),
-        notificationBufferLimit: 2,
+    @Test func proxyRouterEnforcesNotificationBufferLimit() async throws {
+        let router = ProxyRouter(
+            requestTimeout: .seconds(5),
+            notificationBufferLimit: 2,
             hasActiveClients: { false },
-        sendNotification: { _ in }
-    )
+            sendNotification: { _ in }
+        )
 
-    router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n1\"}".utf8))
-    router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n2\"}".utf8))
-    router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n3\"}".utf8))
+        router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n1\"}".utf8))
+        router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n2\"}".utf8))
+        router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n3\"}".utf8))
 
-    let buffered = router.drainBufferedNotifications()
-    #expect(buffered.count == 2)
-    #expect(String(data: buffered[0], encoding: .utf8)?.contains("n2") == true)
-    #expect(String(data: buffered[1], encoding: .utf8)?.contains("n3") == true)
+        let buffered = router.drainBufferedNotifications()
+        #expect(buffered.count == 2)
+        #expect(String(data: buffered[0], encoding: .utf8)?.contains("n2") == true)
+        #expect(String(data: buffered[1], encoding: .utf8)?.contains("n3") == true)
+    }
 }

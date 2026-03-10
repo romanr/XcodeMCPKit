@@ -3,6 +3,12 @@
 
 import PackageDescription
 
+let strictSwiftSettings: [SwiftSetting] = [
+    .swiftLanguageMode(.v6),
+    .defaultIsolation(nil),
+    .strictMemorySafety(),
+]
+
 let package = Package(
     name: "XcodeMCPKit",
     platforms: [
@@ -35,7 +41,8 @@ let package = Package(
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "XcodeMCPKit"
+            name: "XcodeMCPKit",
+            swiftSettings: strictSwiftSettings
         ),
         .target(
             name: "XcodeMCPProxy",
@@ -45,26 +52,31 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-            ]
+            ],
+            swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPProxyCLI",
             dependencies: [
                 "XcodeMCPProxy",
                 .product(name: "Logging", package: "swift-log"),
-            ]
+            ],
+            swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPProxyServer",
-            dependencies: ["XcodeMCPProxy"]
+            dependencies: ["XcodeMCPProxy"],
+            swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPProxyInstall",
-            dependencies: []
+            dependencies: [],
+            swiftSettings: strictSwiftSettings
         ),
         .testTarget(
             name: "XcodeMCPKitTests",
-            dependencies: ["XcodeMCPKit"]
+            dependencies: ["XcodeMCPKit"],
+            swiftSettings: strictSwiftSettings
         ),
         .testTarget(
             name: "XcodeMCPProxyTests",
@@ -72,7 +84,8 @@ let package = Package(
                 "XcodeMCPProxy",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
-            ]
+            ],
+            swiftSettings: strictSwiftSettings
         ),
     ]
 )

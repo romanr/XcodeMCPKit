@@ -1562,6 +1562,60 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpRefreshCodeIssuesRetriesShortSourceEditorErrorFiveText() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let attempts = NIOLockedValueBox(0)
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                let attempt = attempts.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalId,
+                            text:
+                                "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditorCallableDiagnosticError error 5.)"
+                        )
+                    )
+                }
+                return .immediate(try makeToolSuccessResponse(id: originalId, text: "ok"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionId: "session-retry-short",
+                payload: toolsCallPayload(
+                    id: 13,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-retry-short",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) != true)
+            #expect(sessionManager.sentUpstreamCount() == 2)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesDoesNotRetryNonRetryableToolError() async throws {
         let config = makeConfig(requestTimeout: 2)
         let sessionManager = TestSessionManager(

@@ -1599,6 +1599,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
+        let retryableErrorText = "SourceEditorCallableDiagnosticError error 5"
         guard
             let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
                 as? [String: Any],
@@ -1617,7 +1618,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 continue
             }
             if text.contains("Failed to retrieve diagnostics for"),
-                text.contains("SourceEditor.SourceEditorCallableDiagnosticError error 5")
+                text.contains(retryableErrorText)
             {
                 return true
             }

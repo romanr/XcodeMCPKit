@@ -49,6 +49,20 @@ protocol SessionManaging: Sendable {
 final class SessionManager: Sendable, SessionManaging {
     private static let redactedDebugText = "<redacted>"
 
+    struct TestSnapshot: Sendable {
+        struct Upstream: Sendable {
+            let isInitialized: Bool
+            let initInFlight: Bool
+            let healthState: UpstreamHealthState
+        }
+
+        let hasInitResult: Bool
+        let initInFlight: Bool
+        let didWarmSecondary: Bool
+        let shouldRetryEagerInitializePrimaryAfterWarmInitFailure: Bool
+        let upstreams: [Upstream]
+    }
+
     private struct DebugUpstreamState: Sendable {
         var recentStderr: [ProxyDebugEvent] = []
         var lastDecodeError: ProxyDebugEvent?
@@ -137,7 +151,8 @@ final class SessionManager: Sendable, SessionManaging {
     convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
         let sharedSessionID = config.upstreamSessionID ?? UUID().uuidString
-        let upstreams = Self.makeDefaultUpstreams(config: config, sharedSessionID: sharedSessionID, count: count)
+        let upstreams = Self.makeDefaultUpstreams(
+            config: config, sharedSessionID: sharedSessionID, count: count)
         self.init(config: config, eventLoop: eventLoop, upstreams: upstreams)
     }
 
@@ -196,7 +211,8 @@ final class SessionManager: Sendable, SessionManaging {
                 return existing.context
             }
             let context = SessionContext(id: id, config: config)
-            state.sessions[id] = SessionState.SessionRecord(context: context, pinnedUpstreamIndex: nil)
+            state.sessions[id] = SessionState.SessionRecord(
+                context: context, pinnedUpstreamIndex: nil)
             return context
         }
     }
@@ -307,7 +323,9 @@ final class SessionManager: Sendable, SessionManaging {
         }
         if let pinnedIndex = pinned {
             let isUsable = upstreamState.withLockedValue { state in
-                guard pinnedIndex >= 0, pinnedIndex < state.upstreamStates.count else { return false }
+                guard pinnedIndex >= 0, pinnedIndex < state.upstreamStates.count else {
+                    return false
+                }
                 let health = classifyHealthAndCollectProbeIfNeeded(
                     upstreamIndex: pinnedIndex,
                     nowUptimeNs: nowUptimeNs,
@@ -406,10 +424,11 @@ final class SessionManager: Sendable, SessionManaging {
             if state.upstreamStates[upstreamIndex].healthProbeInFlight == false {
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = true
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
-                probesToStart.append((
-                    upstreamIndex: upstreamIndex,
-                    probeGeneration: state.upstreamStates[upstreamIndex].healthProbeGeneration
-                ))
+                probesToStart.append(
+                    (
+                        upstreamIndex: upstreamIndex,
+                        probeGeneration: state.upstreamStates[upstreamIndex].healthProbeGeneration
+                    ))
             }
             return .quarantined(untilUptimeNs: untilUptimeNs)
         }
@@ -495,15 +514,17 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         if var object = json as? [String: Any],
-           let upstreamId = upstreamId(from: object["id"]),
-           let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId) {
+            let upstreamId = upstreamId(from: object["id"]),
+            let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+        {
             if mapping.isInitialize {
                 handleInitializeResponse(object, upstreamIndex: upstreamIndex)
                 return
             }
             if let sessionId = mapping.sessionId, let originalId = mapping.originalId {
                 object["id"] = originalId.value.foundationObject
-                if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: []) {
+                if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: [])
+                {
                     recordTraffic(
                         upstreamIndex: upstreamIndex,
                         direction: "inbound",
@@ -522,8 +543,10 @@ final class SessionManager: Sendable, SessionManaging {
             var transformed: [Any] = []
             for item in array {
                 guard var object = item as? [String: Any],
-                      let upstreamId = upstreamId(from: object["id"]),
-                      let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId) else {
+                    let upstreamId = upstreamId(from: object["id"]),
+                    let mapping = idMapper.consume(
+                        upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                else {
                     transformed.append(item)
                     continue
                 }
@@ -540,7 +563,10 @@ final class SessionManager: Sendable, SessionManaging {
                 rewrittenAny = true
                 transformed.append(object)
             }
-            if rewrittenAny, let sessionId, let rewritten = try? JSONSerialization.data(withJSONObject: transformed, options: []) {
+            if rewrittenAny, let sessionId,
+                let rewritten = try? JSONSerialization.data(
+                    withJSONObject: transformed, options: [])
+            {
                 recordTraffic(
                     upstreamIndex: upstreamIndex,
                     direction: "inbound",
@@ -556,7 +582,12 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
-        let globalInit = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, hadGlobalInit: Bool, wasInFlight: Bool, primaryInitUpstreamId: Int64?)? in
+        let globalInit = initState.withLockedValue {
+            state -> (
+                pending: [InitPending], timeout: Scheduled<Void>?, hadGlobalInit: Bool,
+                wasInFlight: Bool,
+                primaryInitUpstreamId: Int64?
+            )? in
             if state.isShuttingDown {
                 return nil
             }
@@ -606,7 +637,11 @@ final class SessionManager: Sendable, SessionManaging {
             return cleared
         }
         if clearedPins > 0 {
-            logger.debug("Cleared pinned sessions for exited upstream", metadata: ["upstream": .string("\(upstreamIndex)"), "cleared": .string("\(clearedPins)")])
+            logger.debug(
+                "Cleared pinned sessions for exited upstream",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"), "cleared": .string("\(clearedPins)"),
+                ])
         }
 
         // If an upstream dies after a successful global initialize and there are no remaining
@@ -662,7 +697,9 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64 {
-        idMapper.assign(upstreamIndex: upstreamIndex, sessionId: sessionId, originalId: originalId, isInitialize: false)
+        idMapper.assign(
+            upstreamIndex: upstreamIndex, sessionId: sessionId, originalId: originalId,
+            isInitialize: false)
     }
 
     func removeUpstreamIdMapping(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
@@ -674,7 +711,8 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     func onRequestTimeout(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
-        removeUpstreamIdMapping(sessionId: sessionId, requestIdKey: requestIdKey, upstreamIndex: upstreamIndex)
+        removeUpstreamIdMapping(
+            sessionId: sessionId, requestIdKey: requestIdKey, upstreamIndex: upstreamIndex)
         markRequestTimedOut(upstreamIndex: upstreamIndex)
     }
 
@@ -781,6 +819,35 @@ final class SessionManager: Sendable, SessionManaging {
         )
     }
 
+    func testStateSnapshot() -> TestSnapshot {
+        let initSnapshot = initState.withLockedValue { state in
+            (
+                hasInitResult: state.initResult != nil,
+                initInFlight: state.initInFlight,
+                didWarmSecondary: state.didWarmSecondary,
+                shouldRetryEagerInitializePrimaryAfterWarmInitFailure: state
+                    .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+            )
+        }
+        let upstreams = upstreamState.withLockedValue { state in
+            state.upstreamStates.map { upstream in
+                TestSnapshot.Upstream(
+                    isInitialized: upstream.isInitialized,
+                    initInFlight: upstream.initInFlight,
+                    healthState: upstream.healthState
+                )
+            }
+        }
+        return TestSnapshot(
+            hasInitResult: initSnapshot.hasInitResult,
+            initInFlight: initSnapshot.initInFlight,
+            didWarmSecondary: initSnapshot.didWarmSecondary,
+            shouldRetryEagerInitializePrimaryAfterWarmInitFailure: initSnapshot
+                .shouldRetryEagerInitializePrimaryAfterWarmInitFailure,
+            upstreams: upstreams
+        )
+    }
+
     private func redactedDebugEvent(_ event: ProxyDebugEvent?) -> ProxyDebugEvent? {
         event.map(redactedDebugEvent)
     }
@@ -806,7 +873,8 @@ final class SessionManager: Sendable, SessionManaging {
         originalRequestData: Data,
         upstreamIndex: Int
     ) {
-        guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: []) else {
+        guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: [])
+        else {
             return
         }
 
@@ -827,8 +895,9 @@ final class SessionManager: Sendable, SessionManaging {
             if let array = any as? [Any] {
                 let objects = array.compactMap { item -> [String: Any]? in
                     guard let object = item as? [String: Any],
-                          let id = object["id"],
-                          !(id is NSNull) else {
+                        let id = object["id"],
+                        !(id is NSNull)
+                    else {
                         return nil
                     }
                     return [
@@ -846,8 +915,9 @@ final class SessionManager: Sendable, SessionManaging {
         }()
 
         guard let responseAny,
-              JSONSerialization.isValidJSONObject(responseAny),
-              let data = try? JSONSerialization.data(withJSONObject: responseAny, options: []) else {
+            JSONSerialization.isValidJSONObject(responseAny),
+            let data = try? JSONSerialization.data(withJSONObject: responseAny, options: [])
+        else {
             return
         }
 
@@ -913,9 +983,11 @@ final class SessionManager: Sendable, SessionManaging {
                 payloads.reserveCapacity(array.count)
                 for item in array {
                     guard let object = item as? [String: Any],
-                          object["method"] is String,
-                          JSONSerialization.isValidJSONObject(object),
-                          let encoded = try? JSONSerialization.data(withJSONObject: object, options: []) else {
+                        object["method"] is String,
+                        JSONSerialization.isValidJSONObject(object),
+                        let encoded = try? JSONSerialization.data(
+                            withJSONObject: object, options: [])
+                    else {
                         continue
                     }
                     payloads.append(encoded)
@@ -936,7 +1008,8 @@ final class SessionManager: Sendable, SessionManaging {
             return
         }
 
-        let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue { state -> ([SessionContext], [SessionContext]) in
+        let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue {
+            state -> ([SessionContext], [SessionContext]) in
             var pinned: [SessionContext] = []
             var unpinned: [SessionContext] = []
             pinned.reserveCapacity(state.sessions.count)
@@ -1110,7 +1183,9 @@ final class SessionManager: Sendable, SessionManaging {
             return
         }
 
-        let update = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, shouldWarmSecondary: Bool)? in
+        let update = initState.withLockedValue {
+            state -> (pending: [InitPending], timeout: Scheduled<Void>?, shouldWarmSecondary: Bool)?
+            in
             if state.isShuttingDown {
                 return nil
             }
@@ -1160,7 +1235,8 @@ final class SessionManager: Sendable, SessionManaging {
             "result": result.foundationObject,
         ]
         guard JSONSerialization.isValidJSONObject(response),
-              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            let data = try? JSONSerialization.data(withJSONObject: response, options: [])
+        else {
             return nil
         }
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
@@ -1168,14 +1244,17 @@ final class SessionManager: Sendable, SessionManaging {
         return buffer
     }
 
-    private func encodeInitializeErrorResponse(originalId: RPCId, errorObject: [String: Any]) -> ByteBuffer? {
+    private func encodeInitializeErrorResponse(originalId: RPCId, errorObject: [String: Any])
+        -> ByteBuffer?
+    {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalId.value.foundationObject,
             "error": errorObject,
         ]
         guard JSONSerialization.isValidJSONObject(response),
-              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            let data = try? JSONSerialization.data(withJSONObject: response, options: [])
+        else {
             return nil
         }
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
@@ -1184,11 +1263,17 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func completeInitPendingWithError(_ errorObject: [String: Any]) {
-        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?, shouldRetryEagerInit: Bool)? in
+        let result = initState.withLockedValue {
+            state -> (
+                pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?,
+                shouldRetryEagerInit: Bool
+            )? in
             if state.isShuttingDown {
                 return nil
             }
-            let shouldRetryEagerInit = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            let shouldRetryEagerInit =
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+                && state.initResult == nil
             if shouldRetryEagerInit {
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
@@ -1208,7 +1293,9 @@ final class SessionManager: Sendable, SessionManaging {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
-            if let buffer = encodeInitializeErrorResponse(originalId: item.originalId, errorObject: errorObject) {
+            if let buffer = encodeInitializeErrorResponse(
+                originalId: item.originalId, errorObject: errorObject)
+            {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)
                 }
@@ -1226,7 +1313,9 @@ final class SessionManager: Sendable, SessionManaging {
 
     private func sendInitializedNotificationIfNeeded(upstreamIndex: Int) {
         let shouldSend = upstreamState.withLockedValue { state -> Bool in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
+                return false
+            }
             if state.upstreamStates[upstreamIndex].didSendInitialized {
                 return false
             }
@@ -1245,7 +1334,10 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func scheduleInitTimeout() {
-        guard let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout) else {
+        guard
+            let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(
+                defaultSeconds: config.requestTimeout)
+        else {
             return
         }
         let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
@@ -1261,11 +1353,17 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func failInitPending(error: Error) {
-        let result = initState.withLockedValue { state -> (pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?, shouldRetryEagerInit: Bool)? in
+        let result = initState.withLockedValue {
+            state -> (
+                pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?,
+                shouldRetryEagerInit: Bool
+            )? in
             if state.isShuttingDown {
                 return nil
             }
-            let shouldRetryEagerInit = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            let shouldRetryEagerInit =
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+                && state.initResult == nil
             if shouldRetryEagerInit {
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
@@ -1451,7 +1549,8 @@ final class SessionManager: Sendable, SessionManaging {
             timeoutCount = state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts
             if timeoutCount >= 3 {
                 let quarantineUntil = nowUptimeNs &+ 15_000_000_000
-                state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
+                state.upstreamStates[upstreamIndex].healthState = .quarantined(
+                    untilUptimeNs: quarantineUntil)
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = false
                 // Invalidate any in-flight probe completion that started before this newer timeout-based quarantine.
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
@@ -1497,7 +1596,8 @@ final class SessionManager: Sendable, SessionManaging {
             "method": "tools/list",
         ]
         guard JSONSerialization.isValidJSONObject(request),
-              let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
+            let requestData = try? JSONSerialization.data(withJSONObject: request, options: [])
+        else {
             finishHealthProbe(
                 upstreamIndex: upstreamIndex,
                 probeGeneration: probeGeneration,
@@ -1514,9 +1614,11 @@ final class SessionManager: Sendable, SessionManaging {
             do {
                 var buffer = try await future.get()
                 guard let responseData = buffer.readData(length: buffer.readableBytes),
-                      let object = try JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
-                      object["error"] == nil,
-                      object["result"] != nil else {
+                    let object = try JSONSerialization.jsonObject(with: responseData, options: [])
+                        as? [String: Any],
+                    object["error"] == nil,
+                    object["result"] != nil
+                else {
                     self.idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
                     self.finishHealthProbe(
                         upstreamIndex: upstreamIndex,
@@ -1553,7 +1655,10 @@ final class SessionManager: Sendable, SessionManaging {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         upstreamState.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            guard state.upstreamStates[upstreamIndex].healthProbeGeneration == probeGeneration else { return }
+            guard state.upstreamStates[upstreamIndex].healthProbeGeneration == probeGeneration
+            else {
+                return
+            }
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             if success {
                 state.upstreamStates[upstreamIndex].healthState = .healthy
@@ -1585,14 +1690,16 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
-    private func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String) {
+    private func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String)
+    {
         let quarantineNs: UInt64 = 30 * 1_000_000_000
         let quarantineUntil = nowUptimeNs &+ quarantineNs
 
         var failures = 0
         upstreamState.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
+            state.upstreamStates[upstreamIndex].healthState = .quarantined(
+                untilUptimeNs: quarantineUntil)
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             state.upstreamStates[upstreamIndex].consecutiveToolsListFailures += 1
             failures = state.upstreamStates[upstreamIndex].consecutiveToolsListFailures
@@ -1625,9 +1732,11 @@ final class SessionManager: Sendable, SessionManaging {
         let internalSessionId = toolsListInternalSessionId()
         _ = session(id: internalSessionId)
 
-        guard let upstreamIndex = chooseUpstreamIndex(sessionId: internalSessionId, shouldPin: false),
-              upstreamIndex >= 0,
-              upstreamIndex < upstreams.count else {
+        guard
+            let upstreamIndex = chooseUpstreamIndex(sessionId: internalSessionId, shouldPin: false),
+            upstreamIndex >= 0,
+            upstreamIndex < upstreams.count
+        else {
             logger.debug("tools/list refresh: no available upstream")
             return
         }
@@ -1651,9 +1760,12 @@ final class SessionManager: Sendable, SessionManaging {
             "method": "tools/list",
         ]
         guard JSONSerialization.isValidJSONObject(request),
-              let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
+            let requestData = try? JSONSerialization.data(withJSONObject: request, options: [])
+        else {
             idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
-            markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "encode_request_failed")
+            markToolsListRefreshFailed(
+                upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs,
+                reason: "encode_request_failed")
             return
         }
 
@@ -1669,12 +1781,16 @@ final class SessionManager: Sendable, SessionManaging {
         do {
             var buffer = try await future.get()
             guard let responseData = buffer.readData(length: buffer.readableBytes),
-                  let response = try JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
-                  let resultAny = response["result"],
-                  let result = JSONValue(any: resultAny),
-                  isValidToolsListResult(result) else {
+                let response = try JSONSerialization.jsonObject(with: responseData, options: [])
+                    as? [String: Any],
+                let resultAny = response["result"],
+                let result = JSONValue(any: resultAny),
+                isValidToolsListResult(result)
+            else {
                 idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
-                markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "invalid_response")
+                markToolsListRefreshFailed(
+                    upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs,
+                    reason: "invalid_response")
                 return
             }
 
@@ -1682,11 +1798,15 @@ final class SessionManager: Sendable, SessionManaging {
             setCachedToolsListResult(result)
             logger.debug(
                 "tools/list refresh succeeded",
-                metadata: ["upstream": .string("\(upstreamIndex)"), "bytes": .string("\(responseData.count)")]
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(responseData.count)"),
+                ]
             )
         } catch {
             idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
-            markToolsListRefreshFailed(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "timeout")
+            markToolsListRefreshFailed(
+                upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "timeout")
         }
     }
 
@@ -1704,7 +1824,9 @@ final class SessionManager: Sendable, SessionManaging {
         var upstreamId: Int64?
         upstreamState.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            if state.upstreamStates[upstreamIndex].isInitialized || state.upstreamStates[upstreamIndex].initInFlight {
+            if state.upstreamStates[upstreamIndex].isInitialized
+                || state.upstreamStates[upstreamIndex].initInFlight
+            {
                 return
             }
             state.upstreamStates[upstreamIndex].initInFlight = true
@@ -1730,7 +1852,10 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     private func scheduleUpstreamInitTimeout(upstreamIndex: Int, upstreamId: Int64) {
-        guard let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout) else {
+        guard
+            let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(
+                defaultSeconds: config.requestTimeout)
+        else {
             return
         }
         let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
@@ -1748,8 +1873,12 @@ final class SessionManager: Sendable, SessionManaging {
 
     private func handleUpstreamInitTimeout(upstreamIndex: Int, upstreamId: Int64) {
         let shouldClear = upstreamState.withLockedValue { state -> Bool in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
-            guard state.upstreamStates[upstreamIndex].initUpstreamId == upstreamId else { return false }
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
+                return false
+            }
+            guard state.upstreamStates[upstreamIndex].initUpstreamId == upstreamId else {
+                return false
+            }
             state.upstreamStates[upstreamIndex].initTimeout = nil
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].isInitialized = false
@@ -1761,7 +1890,9 @@ final class SessionManager: Sendable, SessionManaging {
 
         guard upstreamIndex == 0, config.eagerInitialize else { return }
         let shouldRetryEagerInit = initState.withLockedValue { state -> Bool in
-            let shouldRetry = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure && state.initResult == nil
+            let shouldRetry =
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+                && state.initResult == nil
             if shouldRetry {
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
@@ -1795,8 +1926,8 @@ func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
     return .nanoseconds(nanos)
 }
 
-private extension SessionManager {
-    static func makeDefaultUpstreams(
+extension SessionManager {
+    fileprivate static func makeDefaultUpstreams(
         config: ProxyConfig,
         sharedSessionID: String,
         count: Int
@@ -1855,9 +1986,13 @@ private final class UpstreamIdMapper: Sendable {
         }
     }
 
-    func assign(upstreamIndex: Int, sessionId: String, originalId: RPCId, isInitialize: Bool) -> Int64 {
+    func assign(upstreamIndex: Int, sessionId: String, originalId: RPCId, isInitialize: Bool)
+        -> Int64
+    {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return 0 }
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
+                return 0
+            }
             let id = state.nextId
             state.nextId += 1
             state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
@@ -1866,7 +2001,8 @@ private final class UpstreamIdMapper: Sendable {
                 isInitialize: isInitialize
             )
             if isInitialize == false {
-                let requestKey = Self.requestLookupKey(sessionId: sessionId, requestIdKey: originalId.key)
+                let requestKey = Self.requestLookupKey(
+                    sessionId: sessionId, requestIdKey: originalId.key)
                 state.upstreamIdByRequestKeyByUpstream[upstreamIndex][requestKey] = id
             }
             return id
@@ -1875,7 +2011,9 @@ private final class UpstreamIdMapper: Sendable {
 
     func assignInitialize(upstreamIndex: Int) -> Int64 {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return 0 }
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
+                return 0
+            }
             let id = state.nextId
             state.nextId += 1
             state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
@@ -1889,13 +2027,18 @@ private final class UpstreamIdMapper: Sendable {
 
     func consume(upstreamIndex: Int, upstreamId: Int64) -> UpstreamMapping? {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return nil }
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
+                return nil
+            }
             let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
             if let mapping,
-               let sessionId = mapping.sessionId,
-               let originalId = mapping.originalId {
-                let requestKey = Self.requestLookupKey(sessionId: sessionId, requestIdKey: originalId.key)
-                state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(forKey: requestKey)
+                let sessionId = mapping.sessionId,
+                let originalId = mapping.originalId
+            {
+                let requestKey = Self.requestLookupKey(
+                    sessionId: sessionId, requestIdKey: originalId.key)
+                state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(
+                    forKey: requestKey)
             }
             return mapping
         }
@@ -1906,10 +2049,13 @@ private final class UpstreamIdMapper: Sendable {
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
             let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
             if let mapping,
-               let sessionId = mapping.sessionId,
-               let originalId = mapping.originalId {
-                let requestKey = Self.requestLookupKey(sessionId: sessionId, requestIdKey: originalId.key)
-                state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(forKey: requestKey)
+                let sessionId = mapping.sessionId,
+                let originalId = mapping.originalId
+            {
+                let requestKey = Self.requestLookupKey(
+                    sessionId: sessionId, requestIdKey: originalId.key)
+                state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(
+                    forKey: requestKey)
             }
         }
     }
@@ -1920,9 +2066,14 @@ private final class UpstreamIdMapper: Sendable {
         requestIdKey: String
     ) -> Int64? {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return nil }
+            guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
+                return nil
+            }
             let requestKey = Self.requestLookupKey(sessionId: sessionId, requestIdKey: requestIdKey)
-            guard let upstreamId = state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(forKey: requestKey) else {
+            guard
+                let upstreamId = state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(
+                    forKey: requestKey)
+            else {
                 return nil
             }
             state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
@@ -1938,7 +2089,9 @@ private final class UpstreamIdMapper: Sendable {
         }
     }
 
-    private static func requestLookupKey(sessionId: String, requestIdKey: String) -> RequestLookupKey {
+    private static func requestLookupKey(sessionId: String, requestIdKey: String)
+        -> RequestLookupKey
+    {
         RequestLookupKey(sessionId: sessionId, requestIdKey: requestIdKey)
     }
 }

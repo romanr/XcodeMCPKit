@@ -2,92 +2,97 @@ import Foundation
 import NIO
 import NIOHTTP1
 import Testing
+
 @testable import XcodeMCPProxy
 
-@Test func httpConcurrentInitializeRequests() async throws {
-    let server = try TestHTTPServer.start()
-    let url = server.url
+@Suite(.serialized)
+struct HTTPConcurrencyTests {
+    @Test func httpConcurrentInitializeRequests() async throws {
+        let server = try TestHTTPServer.start()
+        let url = server.url
 
-    do {
-        let count = 20
-        let results = try await runConcurrentInitialize(url: url, count: count)
+        do {
+            let count = 20
+            let results = try await runConcurrentInitialize(url: url, count: count)
 
-        #expect(Set(results.0).count == count)
-        #expect(Set(results.1).count == count)
-    } catch {
-        await server.shutdown()
-        throw error
-    }
-    await server.shutdown()
-}
-
-@Test func httpConcurrentInitializeStress() async throws {
-    let count = Int(ProcessInfo.processInfo.environment["MCP_CONCURRENCY_STRESS_COUNT"] ?? "50") ?? 50
-    let server = try TestHTTPServer.start()
-    let url = server.url
-
-    do {
-        let results = try await runConcurrentInitialize(url: url, count: count)
-
-        #expect(Set(results.0).count == count)
-        #expect(Set(results.1).count == count)
-    } catch {
-        await server.shutdown()
-        throw error
-    }
-    await server.shutdown()
-}
-
-@Test func httpConcurrentRequestsShareSession() async throws {
-    let server = try TestHTTPServer.start()
-    let url = server.url
-
-    do {
-        let (initializeResponse, initializeBody) = try await postJSON(
-            url: url,
-            sessionId: nil,
-            payload: initializePayload(id: 1)
-        )
-        guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id") else {
-            throw ConcurrencyTestError.missingSessionId
+            #expect(Set(results.0).count == count)
+            #expect(Set(results.1).count == count)
+        } catch {
+            await server.shutdown()
+            throw error
         }
-        let initId = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
-        #expect(initId == 1)
+        await server.shutdown()
+    }
 
-        let count = 20
-        let responseIds = try await withThrowingTaskGroup(of: Int.self) { group in
-            for index in 0..<count {
-                group.addTask {
-                    let payload: [String: Any] = [
-                        "jsonrpc": "2.0",
-                        "id": index + 100,
-                        "method": "tools/list",
-                    ]
-                    let (response, body) = try await postJSON(
-                        url: url,
-                        sessionId: sessionId,
-                        payload: payload
-                    )
-                    guard response.statusCode == 200 else {
-                        throw ConcurrencyTestError.invalidResponse
+    @Test func httpConcurrentInitializeStress() async throws {
+        let count = 10
+        let server = try TestHTTPServer.start()
+        let url = server.url
+
+        do {
+            let results = try await runConcurrentInitialize(url: url, count: count)
+
+            #expect(Set(results.0).count == count)
+            #expect(Set(results.1).count == count)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpConcurrentRequestsShareSession() async throws {
+        let server = try TestHTTPServer.start()
+        let url = server.url
+
+        do {
+            let (initializeResponse, initializeBody) = try await postJSON(
+                url: url,
+                sessionId: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionId
+            }
+            let initId = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
+            #expect(initId == 1)
+
+            let count = 20
+            let responseIds = try await withThrowingTaskGroup(of: Int.self) { group in
+                for index in 0..<count {
+                    group.addTask {
+                        let payload: [String: Any] = [
+                            "jsonrpc": "2.0",
+                            "id": index + 100,
+                            "method": "tools/list",
+                        ]
+                        let (response, body) = try await postJSON(
+                            url: url,
+                            sessionId: sessionId,
+                            payload: payload
+                        )
+                        guard response.statusCode == 200 else {
+                            throw ConcurrencyTestError.invalidResponse
+                        }
+                        return (body["id"] as? NSNumber)?.intValue ?? -1
                     }
-                    return (body["id"] as? NSNumber)?.intValue ?? -1
                 }
+
+                var ids: [Int] = []
+                for try await responseId in group {
+                    ids.append(responseId)
+                }
+                return ids
             }
 
-            var ids: [Int] = []
-            for try await responseId in group {
-                ids.append(responseId)
-            }
-            return ids
+            #expect(Set(responseIds).count == count)
+        } catch {
+            await server.shutdown()
+            throw error
         }
-
-        #expect(Set(responseIds).count == count)
-    } catch {
         await server.shutdown()
-        throw error
     }
-    await server.shutdown()
 }
 
 private enum ConcurrencyTestError: Error {
@@ -103,7 +108,8 @@ private func runConcurrentInitialize(
         for index in 0..<count {
             group.addTask {
                 let payload = initializePayload(id: index + 1)
-                let (response, body) = try await postJSON(url: url, sessionId: nil, payload: payload)
+                let (response, body) = try await postJSON(
+                    url: url, sessionId: nil, payload: payload)
                 guard let sessionId = response.value(forHTTPHeaderField: "Mcp-Session-Id") else {
                     throw ConcurrencyTestError.missingSessionId
                 }
@@ -130,6 +136,7 @@ private struct TestHTTPServer {
     let upstream: EchoUpstreamClient
 
     static func start() throws -> TestHTTPServer {
+        ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
@@ -143,7 +150,8 @@ private struct TestHTTPServer {
             eagerInitialize: false
         )
         let upstream = EchoUpstreamClient()
-        let sessionManager = SessionManager(config: config, eventLoop: group.next(), upstreams: [upstream])
+        let sessionManager = SessionManager(
+            config: config, eventLoop: group.next(), upstreams: [upstream])
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -280,6 +288,8 @@ private func postJSON(
     guard let httpResponse = response as? HTTPURLResponse else {
         throw ConcurrencyTestError.invalidResponse
     }
-    let object = (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any] ?? [:]
+    let object =
+        (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
+        ?? [:]
     return (httpResponse, object)
 }

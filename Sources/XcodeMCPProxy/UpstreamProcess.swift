@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Logging
 
 actor UpstreamProcess: UpstreamClient {
@@ -124,6 +125,7 @@ actor UpstreamProcess: UpstreamClient {
         stdinPipe = Pipe()
         stdoutPipe = Pipe()
         stderrPipe = Pipe()
+        configureNoSigPipe(on: stdinPipe.fileHandleForWriting)
         framer = StdioFramer()
         queuedWriteBytes = 0
         writeGeneration &+= 1
@@ -342,6 +344,17 @@ actor UpstreamProcess: UpstreamClient {
         }
         let env = "/usr/bin/env"
         return (URL(fileURLWithPath: env), [command] + args)
+    }
+
+    private func configureNoSigPipe(on handle: FileHandle) {
+        let fd = handle.fileDescriptor
+        let result = fcntl(fd, F_SETNOSIGPIPE, 1)
+        if result == -1 {
+            logger.warning(
+                "Failed to disable SIGPIPE on upstream stdin pipe",
+                metadata: ["errno": "\(errno)"]
+            )
+        }
     }
 
     private func completeQueuedWrite(

@@ -23,6 +23,7 @@ public actor StdioAdapter {
     private let session: URLSession
     private let sessionId: String
     private var framer = StdioFramer()
+    private var requestTasks: [UUID: Task<Void, Never>] = [:]
     private var readTask: Task<Void, Never>?
     private var sseTask: Task<Void, Never>?
     private var started = false
@@ -61,22 +62,10 @@ public actor StdioAdapter {
     }
 
     public func stop() async {
-        guard !stopped else { return }
-        stopped = true
-        readTask?.cancel()
-        sseTask?.cancel()
-        readTask = nil
-        sseTask = nil
-        session.invalidateAndCancel()
+        await stop(cancelReadTask: true)
     }
 
     private func readLoop() async {
-        defer {
-            Task { [weak self] in
-                await self?.stop()
-            }
-        }
-
         do {
             for try await byte in inputHandle.bytes {
                 if Task.isCancelled { break }
@@ -87,6 +76,9 @@ public actor StdioAdapter {
         } catch {
             logger.error("STDIO read failed", metadata: ["error": "\(error)"])
         }
+
+        await drainRequestTasksAfterInputClosed()
+        await stop(cancelReadTask: false)
     }
 
     private func handleInput(_ data: Data) {
@@ -102,10 +94,20 @@ public actor StdioAdapter {
             )
         }
         for message in result.messages {
-            Task { [weak self] in
-                await self?.processMessage(message)
+            let requestID = UUID()
+            let task = Task { [weak self] in
+                guard let self else { return }
+                await self.runRequestTask(id: requestID, data: message)
             }
+            requestTasks[requestID] = task
         }
+    }
+
+    private func runRequestTask(id: UUID, data: Data) async {
+        defer {
+            requestTasks.removeValue(forKey: id)
+        }
+        await processMessage(data)
     }
 
     private func processMessage(_ data: Data) async {
@@ -232,6 +234,46 @@ public actor StdioAdapter {
         let capped = min(attempt, 4)
         let seconds = min(5.0, 0.5 * Double(1 << capped))
         return UInt64(seconds * 1_000_000_000)
+    }
+
+    private func drainRequestTasks() async {
+        while !requestTasks.isEmpty {
+            let tasks = Array(requestTasks.values)
+            for task in tasks {
+                _ = await task.result
+            }
+        }
+    }
+
+    private func drainRequestTasksAfterInputClosed() async {
+        guard !requestTasks.isEmpty else { return }
+
+        // Allow in-flight requests to finish normally on clean EOF, but cap how long shutdown waits
+        // before canceling the session to avoid hanging indefinitely on stalled requests.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while !requestTasks.isEmpty, clock.now < deadline {
+            try? await clock.sleep(until: clock.now.advanced(by: .milliseconds(10)))
+        }
+
+        guard !requestTasks.isEmpty else { return }
+        stopped = true
+        sseTask?.cancel()
+        session.invalidateAndCancel()
+        await drainRequestTasks()
+    }
+
+    private func stop(cancelReadTask: Bool) async {
+        if cancelReadTask {
+            readTask?.cancel()
+        }
+        sseTask?.cancel()
+        readTask = nil
+        sseTask = nil
+        if !stopped {
+            stopped = true
+            session.invalidateAndCancel()
+        }
     }
 
     private func inspectRequest(_ data: Data) -> RequestEnvelope {

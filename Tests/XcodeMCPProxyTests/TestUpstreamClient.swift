@@ -1,10 +1,12 @@
 import Foundation
+import XcodeMCPTestSupport
+
 @testable import XcodeMCPProxy
 
 actor TestUpstreamClient: UpstreamClient {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
-    private var sentMessages: [Data] = []
+    private let sentMessages = RecordedValues<Data>()
     private var startCountValue = 0
     private var stopCountValue = 0
 
@@ -26,7 +28,7 @@ actor TestUpstreamClient: UpstreamClient {
     }
 
     func send(_ data: Data) async -> UpstreamSendResult {
-        sentMessages.append(data)
+        await sentMessages.append(data)
         return .accepted
     }
 
@@ -35,7 +37,19 @@ actor TestUpstreamClient: UpstreamClient {
     }
 
     func sent() async -> [Data] {
-        sentMessages
+        await sentMessages.snapshot()
+    }
+
+    func sentCount() async -> Int {
+        await sentMessages.count()
+    }
+
+    func sentValue(at index: Int) async -> Data? {
+        await sentMessages.value(at: index)
+    }
+
+    func nextSent(at index: Int) async throws -> Data {
+        try await sentMessages.nextValue(at: index)
     }
 
     func startCount() async -> Int {

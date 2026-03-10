@@ -15,6 +15,7 @@ struct ServerCommandTests {
         ])
 
         #expect(options.forwardedArgs == ["--listen", "127.0.0.1:9000"])
+        #expect(options.showHelp == false)
         #expect(options.hasListenFlag == true)
         #expect(options.forceRestart == true)
         #expect(options.dryRun == true)
@@ -23,6 +24,7 @@ struct ServerCommandTests {
     @Test func serverCommandAppliesEnvironmentDefaultsAndResolvedXcodePID() throws {
         var options = ProxyServerOptions(
             forwardedArgs: [],
+            showHelp: false,
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,
@@ -152,6 +154,39 @@ struct ServerCommandTests {
         #expect(line.contains("--listen 127.0.0.1:9999"))
         #expect(line.contains("--xcode-pid 5678"))
         #expect(line.contains("--lazy-init"))
+    }
+
+    @Test func serverCommandTreatsHelpOnlyAsTopLevelFlag() async throws {
+        let output = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { errors.append($0) },
+                resolveXcodePid: { "7777" },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in RecordingProxyServer() },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy-server",
+                "--upstream-arg", "--help",
+                "--dry-run",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(errors.snapshot().isEmpty)
+        let line = try #require(output.snapshot().first)
+        #expect(line.contains("--upstream-arg --help"))
+        #expect(line.contains("--xcode-pid 7777"))
+        #expect(line.contains("Usage:") == false)
     }
 }
 

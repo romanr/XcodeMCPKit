@@ -6,6 +6,7 @@ extension ProxyServer: ProxyServerCommandServer {}
 
 package struct ProxyServerOptions {
     package var forwardedArgs: [String]
+    package var showHelp: Bool
     package var hasListenFlag: Bool
     package var hasHostFlag: Bool
     package var hasPortFlag: Bool
@@ -16,6 +17,7 @@ package struct ProxyServerOptions {
 
     package init(
         forwardedArgs: [String],
+        showHelp: Bool,
         hasListenFlag: Bool,
         hasHostFlag: Bool,
         hasPortFlag: Bool,
@@ -25,6 +27,7 @@ package struct ProxyServerOptions {
         dryRun: Bool
     ) {
         self.forwardedArgs = forwardedArgs
+        self.showHelp = showHelp
         self.hasListenFlag = hasListenFlag
         self.hasHostFlag = hasHostFlag
         self.hasPortFlag = hasPortFlag
@@ -100,13 +103,12 @@ package struct XcodeMCPProxyServerCommand {
     package func run(args: [String], environment: [String: String]) async -> Int32 {
         dependencies.bootstrapLogging(environment)
 
-        if args.contains("-h") || args.contains("--help") {
-            dependencies.stdout(Self.serverUsage())
-            return 0
-        }
-
         do {
             var options = try Self.parseOptions(args: args)
+            if options.showHelp {
+                dependencies.stdout(Self.serverUsage())
+                return 0
+            }
             Self.applyDefaults(
                 from: environment,
                 to: &options,
@@ -164,6 +166,7 @@ package struct XcodeMCPProxyServerCommand {
 
     package static func parseOptions(args: [String]) throws -> ProxyServerOptions {
         var forwarded: [String] = []
+        var showHelp = false
         var hasListen = false
         var hasHost = false
         var hasPort = false
@@ -190,6 +193,10 @@ package struct XcodeMCPProxyServerCommand {
         while index < args.count {
             let arg = args[index]
             switch arg {
+            case "-h", "--help":
+                showHelp = true
+                index += 1
+                continue
             case "--dry-run":
                 dryRun = true
                 index += 1
@@ -237,6 +244,7 @@ package struct XcodeMCPProxyServerCommand {
 
         return ProxyServerOptions(
             forwardedArgs: forwarded,
+            showHelp: showHelp,
             hasListenFlag: hasListen,
             hasHostFlag: hasHost,
             hasPortFlag: hasPort,

@@ -93,6 +93,62 @@ struct HTTPConcurrencyTests {
         }
         await server.shutdown()
     }
+
+    @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFive() async throws {
+        let server = try TestHTTPServer.start(upstream: RefreshSensitiveUpstreamClient())
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionId: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionId
+            }
+
+            let responses = try await withThrowingTaskGroup(
+                of: (Int, Bool).self
+            ) { group in
+                for index in 0..<3 {
+                    group.addTask {
+                        let (response, body) = try await postJSON(
+                            url: url,
+                            sessionId: sessionId,
+                            payload: toolCallPayload(
+                                id: index + 200,
+                                name: "XcodeRefreshCodeIssuesInFile",
+                                arguments: [
+                                    "tabIdentifier": "windowtab-refresh",
+                                    "filePath": "App\(index).swift",
+                                ]
+                            )
+                        )
+                        let result = body["result"] as? [String: Any]
+                        return (response.statusCode, (result?["isError"] as? Bool) == true)
+                    }
+                }
+
+                var responses: [(Int, Bool)] = []
+                for try await response in group {
+                    responses.append(response)
+                }
+                return responses
+            }
+
+            #expect(responses.count == 3)
+            for (statusCode, isError) in responses {
+                #expect(statusCode == 200)
+                #expect(isError == false)
+            }
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
 }
 
 private enum ConcurrencyTestError: Error {
@@ -133,9 +189,11 @@ private struct TestHTTPServer {
     let channel: Channel
     let url: URL
     let sessionManager: SessionManager
-    let upstream: EchoUpstreamClient
+    let upstream: any UpstreamClient
 
-    static func start() throws -> TestHTTPServer {
+    static func start(
+        upstream providedUpstream: (any UpstreamClient)? = nil
+    ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let config = ProxyConfig(
@@ -149,9 +207,11 @@ private struct TestHTTPServer {
             requestTimeout: 5,
             eagerInitialize: false
         )
-        let upstream = EchoUpstreamClient()
+        let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = SessionManager(
             config: config, eventLoop: group.next(), upstreams: [upstream])
+        let refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+        let warmupDriver = XcodeEditorWarmupDriver.disabled()
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -161,7 +221,9 @@ private struct TestHTTPServer {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
-                            sessionManager: sessionManager
+                            sessionManager: sessionManager,
+                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+                            warmupDriver: warmupDriver
                         )
                     )
                 }
@@ -253,6 +315,133 @@ private actor EchoUpstreamClient: UpstreamClient {
     }
 }
 
+private actor RefreshSensitiveUpstreamClient: UpstreamClient {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private var activeTabs: Set<String> = []
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return .accepted
+        }
+
+        if let object = json as? [String: Any] {
+            await handle(object)
+            return .accepted
+        }
+
+        if let array = json as? [Any] {
+            for item in array {
+                guard let object = item as? [String: Any] else { continue }
+                await handle(object)
+            }
+        }
+        return .accepted
+    }
+
+    private func handle(_ object: [String: Any]) async {
+        guard let id = object["id"] else { return }
+        let method = object["method"] as? String
+
+        if method == "initialize" {
+            continuation.yield(.message(makeInitializeResponse(id: id)))
+            return
+        }
+
+        guard
+            method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let name = params["name"] as? String,
+            name == "XcodeRefreshCodeIssuesInFile"
+        else {
+            continuation.yield(.message(makeSuccessResponse(id: id)))
+            return
+        }
+
+        let arguments = params["arguments"] as? [String: Any]
+        let tabIdentifier =
+            (arguments?["tabIdentifier"] as? String) ?? "__global__"
+        if activeTabs.contains(tabIdentifier) {
+            continuation.yield(.message(makeErrorFiveResponse(id: id)))
+            return
+        }
+
+        activeTabs.insert(tabIdentifier)
+        let responseData = makeSuccessResponse(id: id)
+        Task { [tabIdentifier, responseData] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            completeRefresh(
+                tabIdentifier: tabIdentifier,
+                responseData: responseData
+            )
+        }
+    }
+
+    private func completeRefresh(tabIdentifier: String, responseData: Data) {
+        activeTabs.remove(tabIdentifier)
+        continuation.yield(.message(responseData))
+    }
+
+    private func makeInitializeResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "capabilities": [String: Any]()
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeSuccessResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "ok",
+                    ]
+                ]
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeErrorFiveResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text":
+                            "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)",
+                    ]
+                ],
+                "isError": true,
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+}
+
 private func initializePayload(id: Int) -> [String: Any] {
     [
         "jsonrpc": "2.0",
@@ -265,6 +454,22 @@ private func initializePayload(id: Int) -> [String: Any] {
                 "name": "xcode-mcp-proxy-concurrency-tests",
                 "version": "0.0",
             ],
+        ],
+    ]
+}
+
+private func toolCallPayload(
+    id: Int,
+    name: String,
+    arguments: [String: Any]
+) -> [String: Any] {
+    [
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": [
+            "name": name,
+            "arguments": arguments,
         ],
     ]
 }

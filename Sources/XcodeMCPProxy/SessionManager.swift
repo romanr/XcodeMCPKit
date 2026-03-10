@@ -33,6 +33,7 @@ protocol SessionManaging: Sendable {
     func setCachedToolsListResult(_ result: JSONValue)
     func refreshToolsListIfNeeded()
     func registerInitialize(
+        sessionId: String,
         originalId: RPCId,
         requestObject: [String: Any],
         on eventLoop: EventLoop
@@ -54,6 +55,14 @@ final class SessionManager: Sendable, SessionManaging {
             let isInitialized: Bool
             let initInFlight: Bool
             let healthState: UpstreamHealthState
+        }
+
+        struct Session: Sendable {
+            let generation: UInt64
+            let pinnedUpstreamIndex: Int?
+            let initializeUpstreamIndex: Int?
+            let preferInitializeUpstreamOnNextPin: Bool
+            let didReceiveInitializeUpstreamMessage: Bool
         }
 
         let hasInitResult: Bool
@@ -82,6 +91,8 @@ final class SessionManager: Sendable, SessionManaging {
     private struct InitPending: Sendable {
         let eventLoop: EventLoop
         let promise: EventLoopPromise<ByteBuffer>
+        let sessionId: String
+        let sessionGeneration: UInt64
         let originalId: RPCId
     }
 
@@ -95,10 +106,15 @@ final class SessionManager: Sendable, SessionManaging {
     private struct SessionState: Sendable {
         struct SessionRecord: Sendable {
             let context: SessionContext
+            let generation: UInt64
             var pinnedUpstreamIndex: Int?
+            var initializeUpstreamIndex: Int?
+            var preferInitializeUpstreamOnNextPin: Bool
+            var didReceiveInitializeUpstreamMessage: Bool
         }
 
         var sessions: [String: SessionRecord] = [:]
+        var nextGeneration: UInt64 = 0
     }
 
     private struct InitState: Sendable {
@@ -211,8 +227,15 @@ final class SessionManager: Sendable, SessionManaging {
                 return existing.context
             }
             let context = SessionContext(id: id, config: config)
+            state.nextGeneration &+= 1
             state.sessions[id] = SessionState.SessionRecord(
-                context: context, pinnedUpstreamIndex: nil)
+                context: context,
+                generation: state.nextGeneration,
+                pinnedUpstreamIndex: nil,
+                initializeUpstreamIndex: nil,
+                preferInitializeUpstreamOnNextPin: false,
+                didReceiveInitializeUpstreamMessage: false
+            )
             return context
         }
     }
@@ -347,8 +370,68 @@ final class SessionManager: Sendable, SessionManaging {
 
             sessionsState.withLockedValue { state in
                 state.sessions[sessionId]?.pinnedUpstreamIndex = nil
+                state.sessions[sessionId]?.initializeUpstreamIndex = nil
+                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
             }
             pinned = nil
+        }
+
+        let preferredInitializeUpstreamIndex = sessionsState.withLockedValue { state -> Int? in
+            guard let record = state.sessions[sessionId],
+                record.pinnedUpstreamIndex == nil,
+                (record.preferInitializeUpstreamOnNextPin || record.didReceiveInitializeUpstreamMessage),
+                let upstreamIndex = record.initializeUpstreamIndex
+            else {
+                return nil
+            }
+            return upstreamIndex
+        }
+
+        if shouldPin, let preferredInitializeUpstreamIndex {
+            let isUsable = upstreamState.withLockedValue { state in
+                guard preferredInitializeUpstreamIndex >= 0,
+                    preferredInitializeUpstreamIndex < state.upstreamStates.count
+                else {
+                    return false
+                }
+                let health = classifyHealthAndCollectProbeIfNeeded(
+                    upstreamIndex: preferredInitializeUpstreamIndex,
+                    nowUptimeNs: nowUptimeNs,
+                    state: &state,
+                    probesToStart: &probesToStart
+                )
+                let isHealthyEnough: Bool
+                switch health {
+                case .healthy, .degraded:
+                    isHealthyEnough = true
+                case .quarantined:
+                    isHealthyEnough = false
+                }
+                return isHealthyEnough
+                    && state.upstreamStates[preferredInitializeUpstreamIndex].isInitialized
+            }
+            if isUsable {
+                for probe in probesToStart {
+                    probeUpstreamHealth(
+                        upstreamIndex: probe.upstreamIndex,
+                        probeGeneration: probe.probeGeneration
+                    )
+                }
+                sessionsState.withLockedValue { state in
+                    state.sessions[sessionId]?.pinnedUpstreamIndex = preferredInitializeUpstreamIndex
+                    state.sessions[sessionId]?.initializeUpstreamIndex = nil
+                    state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+                    state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+                }
+                return preferredInitializeUpstreamIndex
+            }
+
+            sessionsState.withLockedValue { state in
+                state.sessions[sessionId]?.initializeUpstreamIndex = nil
+                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            }
         }
 
         let chosen = upstreamState.withLockedValue { state -> Int? in
@@ -397,9 +480,111 @@ final class SessionManager: Sendable, SessionManaging {
         if pinned == nil, shouldPin {
             sessionsState.withLockedValue { state in
                 state.sessions[sessionId]?.pinnedUpstreamIndex = chosen
+                state.sessions[sessionId]?.initializeUpstreamIndex = nil
+                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
             }
         }
         return chosen
+    }
+
+    private func chooseInitializeUpstreamIndex(sessionId: String) -> Int? {
+        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        var probesToStart: [(upstreamIndex: Int, probeGeneration: UInt64)] = []
+        probesToStart.reserveCapacity(1)
+
+        let hintedUpstreamIndex = sessionsState.withLockedValue { state -> Int? in
+            if let pinned = state.sessions[sessionId]?.pinnedUpstreamIndex {
+                return pinned
+            }
+            return state.sessions[sessionId]?.initializeUpstreamIndex
+        }
+
+        if let hintedUpstreamIndex {
+            let isUsable = upstreamState.withLockedValue { state in
+                guard hintedUpstreamIndex >= 0, hintedUpstreamIndex < state.upstreamStates.count else {
+                    return false
+                }
+                let health = classifyHealthAndCollectProbeIfNeeded(
+                    upstreamIndex: hintedUpstreamIndex,
+                    nowUptimeNs: nowUptimeNs,
+                    state: &state,
+                    probesToStart: &probesToStart
+                )
+                let isHealthyEnough: Bool
+                switch health {
+                case .healthy, .degraded:
+                    isHealthyEnough = true
+                case .quarantined:
+                    isHealthyEnough = false
+                }
+                return isHealthyEnough && state.upstreamStates[hintedUpstreamIndex].isInitialized
+            }
+
+            for probe in probesToStart {
+                probeUpstreamHealth(
+                    upstreamIndex: probe.upstreamIndex,
+                    probeGeneration: probe.probeGeneration
+                )
+            }
+
+            if isUsable {
+                return hintedUpstreamIndex
+            }
+
+            sessionsState.withLockedValue { state in
+                if state.sessions[sessionId]?.pinnedUpstreamIndex == nil {
+                    state.sessions[sessionId]?.initializeUpstreamIndex = nil
+                    state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+                }
+            }
+        }
+
+        return chooseUpstreamIndex(sessionId: sessionId, shouldPin: false)
+    }
+
+    private func setInitializeUpstreamIndexIfNeeded(
+        sessionId: String,
+        upstreamIndex: Int,
+        preferOnNextPin: Bool
+    ) {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[sessionId] else { return }
+            if record.pinnedUpstreamIndex == nil {
+                state.sessions[sessionId]?.initializeUpstreamIndex = upstreamIndex
+                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = preferOnNextPin
+                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            } else {
+                state.sessions[sessionId]?.initializeUpstreamIndex = nil
+                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            }
+        }
+    }
+
+    private func clearInitializeUpstreamIndex(
+        sessionId: String,
+        onlyIfGeneration sessionGeneration: UInt64? = nil
+    ) {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[sessionId] else { return }
+            if let sessionGeneration, record.generation != sessionGeneration {
+                return
+            }
+            state.sessions[sessionId]?.initializeUpstreamIndex = nil
+            state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
+            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+        }
+    }
+
+    private func sessionStillMatchesPendingInitialize(
+        sessionId: String,
+        sessionGeneration: UInt64
+    ) -> Bool {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[sessionId] else { return false }
+            return record.generation == sessionGeneration
+        }
     }
 
     private func classifyHealthAndCollectProbeIfNeeded(
@@ -435,10 +620,15 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     func registerInitialize(
+        sessionId: String,
         originalId: RPCId,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
+        _ = session(id: sessionId)
+        let sessionGeneration = sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.generation ?? 0
+        }
         var shouldSend = false
         var shouldScheduleTimeout = false
         var initRequest: [String: Any]?
@@ -461,6 +651,8 @@ final class SessionManager: Sendable, SessionManaging {
                 InitPending(
                     eventLoop: eventLoop,
                     promise: promise,
+                    sessionId: sessionId,
+                    sessionGeneration: sessionGeneration,
                     originalId: originalId
                 )
             )
@@ -477,6 +669,25 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         if let cachedResult {
+            _ = session(id: sessionId)
+            if let upstreamIndex = chooseInitializeUpstreamIndex(sessionId: sessionId) {
+                let shouldPreferOnNextPin = upstreamState.withLockedValue { state in
+                    state.upstreamStates.reduce(into: 0) { count, upstream in
+                        guard upstream.isInitialized else { return }
+                        switch upstream.healthState {
+                        case .healthy, .degraded:
+                            count += 1
+                        case .quarantined:
+                            break
+                        }
+                    } > 1
+                }
+                setInitializeUpstreamIndexIfNeeded(
+                    sessionId: sessionId,
+                    upstreamIndex: upstreamIndex,
+                    preferOnNextPin: shouldPreferOnNextPin
+                )
+            }
             if let buffer = encodeInitializeResponse(originalId: originalId, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
@@ -485,6 +696,15 @@ final class SessionManager: Sendable, SessionManaging {
 
         if shuttingDown {
             return eventLoop.makeFailedFuture(TimeoutError())
+        }
+
+        if pendingPromise != nil {
+            _ = session(id: sessionId)
+            setInitializeUpstreamIndexIfNeeded(
+                sessionId: sessionId,
+                upstreamIndex: 0,
+                preferOnNextPin: false
+            )
         }
 
         if shouldSend, var initRequest {
@@ -505,6 +725,19 @@ final class SessionManager: Sendable, SessionManaging {
             return eventLoop.makeFailedFuture(TimeoutError())
         }
         return promise.futureResult
+    }
+
+    func registerInitialize(
+        originalId: RPCId,
+        requestObject: [String: Any],
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ByteBuffer> {
+        registerInitialize(
+            sessionId: "__initialize_pending__:\(originalId.key)",
+            originalId: originalId,
+            requestObject: requestObject,
+            on: eventLoop
+        )
     }
 
     private func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
@@ -614,6 +847,10 @@ final class SessionManager: Sendable, SessionManaging {
                 idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
             }
             for item in globalInit.pending {
+                clearInitializeUpstreamIndex(
+                    sessionId: item.sessionId,
+                    onlyIfGeneration: item.sessionGeneration
+                )
                 item.eventLoop.execute {
                     item.promise.fail(TimeoutError())
                 }
@@ -631,7 +868,12 @@ final class SessionManager: Sendable, SessionManaging {
             for key in keys {
                 if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
                     state.sessions[key]?.pinnedUpstreamIndex = nil
+                    state.sessions[key]?.initializeUpstreamIndex = nil
+                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
                     cleared += 1
+                } else if state.sessions[key]?.initializeUpstreamIndex == upstreamIndex {
+                    state.sessions[key]?.initializeUpstreamIndex = nil
+                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
                 }
             }
             return cleared
@@ -848,6 +1090,36 @@ final class SessionManager: Sendable, SessionManaging {
         )
     }
 
+    func testSessionSnapshot(id: String) -> TestSnapshot.Session? {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[id] else { return nil }
+            return TestSnapshot.Session(
+                generation: record.generation,
+                pinnedUpstreamIndex: record.pinnedUpstreamIndex,
+                initializeUpstreamIndex: record.initializeUpstreamIndex,
+                preferInitializeUpstreamOnNextPin: record.preferInitializeUpstreamOnNextPin,
+                didReceiveInitializeUpstreamMessage: record.didReceiveInitializeUpstreamMessage
+            )
+        }
+    }
+
+    func testSetInitializeRoutingState(
+        sessionId: String,
+        upstreamIndex: Int,
+        preferOnNextPin: Bool,
+        didReceiveInitializeUpstreamMessage: Bool = false
+    ) {
+        setInitializeUpstreamIndexIfNeeded(
+            sessionId: sessionId,
+            upstreamIndex: upstreamIndex,
+            preferOnNextPin: preferOnNextPin
+        )
+        guard didReceiveInitializeUpstreamMessage else { return }
+        sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = true
+        }
+    }
+
     private func redactedDebugEvent(_ event: ProxyDebugEvent?) -> ProxyDebugEvent? {
         event.map(redactedDebugEvent)
     }
@@ -954,10 +1226,9 @@ final class SessionManager: Sendable, SessionManaging {
             data: data
         )
         // We have no id-based mapping for this upstream message, so we can't unambiguously route it to a
-        // single session. To reduce cross-talk across multiple concurrent agents, only deliver it to
-        // sessions pinned to the same upstream. If no session is pinned to this upstream yet, still
-        // deliver server-initiated notifications/requests to unpinned sessions so they don't miss
-        // pre-pin messages.
+        // single session. To avoid cross-session disclosure, only deliver server-initiated
+        // notifications/requests to sessions already pinned to the same upstream or to sessions that
+        // have only been initialized against that upstream and have not chosen a permanent pin yet.
         //
         // Never forward unmapped JSON-RPC responses (no `method`) to sessions: if we dropped a mapping
         // due to timeouts (e.g. a best-effort tools/list warmup) then a late response must not leak
@@ -1008,42 +1279,28 @@ final class SessionManager: Sendable, SessionManaging {
             return
         }
 
-        let (pinnedTargets, unpinnedTargets) = sessionsState.withLockedValue {
-            state -> ([SessionContext], [SessionContext]) in
-            var pinned: [SessionContext] = []
-            var unpinned: [SessionContext] = []
-            pinned.reserveCapacity(state.sessions.count)
-            unpinned.reserveCapacity(state.sessions.count)
-            for record in state.sessions.values {
+        let routedTargets = sessionsState.withLockedValue {
+            state -> [SessionContext] in
+            var targets: [SessionContext] = []
+            targets.reserveCapacity(state.sessions.count)
+            let keys = Array(state.sessions.keys)
+            for key in keys {
+                guard let record = state.sessions[key] else { continue }
                 if record.pinnedUpstreamIndex == upstreamIndex {
-                    pinned.append(record.context)
-                } else if record.pinnedUpstreamIndex == nil {
-                    unpinned.append(record.context)
+                    targets.append(record.context)
+                } else if record.pinnedUpstreamIndex == nil
+                    && record.initializeUpstreamIndex == upstreamIndex
+                {
+                    state.sessions[key]?.didReceiveInitializeUpstreamMessage = true
+                    targets.append(record.context)
                 }
             }
-            return (pinned, unpinned)
+            return targets
         }
 
-        if !pinnedTargets.isEmpty {
+        if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
-                for session in pinnedTargets {
-                    session.router.handleIncoming(payload)
-                }
-            }
-            return
-        }
-
-        if !unpinnedTargets.isEmpty {
-            logger.debug(
-                "Routing unmapped upstream message to unpinned sessions",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
-                    "bytes": .string("\(data.count)"),
-                    "targets": .string("\(unpinnedTargets.count)"),
-                ]
-            )
-            for payload in serverInitiatedPayloads {
-                for session in unpinnedTargets {
+                for session in routedTargets {
                     session.router.handleIncoming(payload)
                 }
             }
@@ -1051,7 +1308,7 @@ final class SessionManager: Sendable, SessionManaging {
         }
 
         logger.debug(
-            "Dropping unmapped upstream message (no target sessions)",
+            "Dropping unmapped upstream message (no routed target sessions)",
             metadata: [
                 "upstream": .string("\(upstreamIndex)"),
                 "bytes": .string("\(data.count)"),
@@ -1209,6 +1466,16 @@ final class SessionManager: Sendable, SessionManaging {
         update.timeout?.cancel()
 
         for item in update.pending {
+            if sessionStillMatchesPendingInitialize(
+                sessionId: item.sessionId,
+                sessionGeneration: item.sessionGeneration
+            ) {
+                setInitializeUpstreamIndexIfNeeded(
+                    sessionId: item.sessionId,
+                    upstreamIndex: upstreamIndex,
+                    preferOnNextPin: false
+                )
+            }
             if let buffer = encodeInitializeResponse(originalId: item.originalId, result: result) {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)
@@ -1293,6 +1560,10 @@ final class SessionManager: Sendable, SessionManaging {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
+            clearInitializeUpstreamIndex(
+                sessionId: item.sessionId,
+                onlyIfGeneration: item.sessionGeneration
+            )
             if let buffer = encodeInitializeErrorResponse(
                 originalId: item.originalId, errorObject: errorObject)
             {
@@ -1383,6 +1654,10 @@ final class SessionManager: Sendable, SessionManaging {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
+            clearInitializeUpstreamIndex(
+                sessionId: item.sessionId,
+                onlyIfGeneration: item.sessionGeneration
+            )
             item.eventLoop.execute {
                 item.promise.fail(error)
             }
@@ -1486,7 +1761,12 @@ final class SessionManager: Sendable, SessionManaging {
             for key in keys {
                 if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
                     state.sessions[key]?.pinnedUpstreamIndex = nil
+                    state.sessions[key]?.initializeUpstreamIndex = nil
+                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
                     cleared += 1
+                } else if state.sessions[key]?.initializeUpstreamIndex == upstreamIndex {
+                    state.sessions[key]?.initializeUpstreamIndex = nil
+                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
                 }
             }
             return cleared

@@ -80,6 +80,14 @@ products=(
   "xcode-mcp-proxy-install"
 )
 
+restore_execute_bits() {
+  local bin_dir="$1"
+
+  for product in "${products[@]}"; do
+    chmod +x "$bin_dir/$product"
+  done
+}
+
 for product in "${products[@]}"; do
   arm_product="$arm_bin/$product"
   x86_product="$x86_bin/$product"
@@ -92,6 +100,9 @@ for product in "${products[@]}"; do
     exit 1
   fi
 done
+
+restore_execute_bits "$arm_bin"
+restore_execute_bits "$x86_bin"
 
 mkdir -p "$tmp_dir/universal/bin"
 for product in "${products[@]}"; do

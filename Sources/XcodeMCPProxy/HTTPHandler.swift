@@ -983,13 +983,17 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             resolution = resolveForwardResponse(
                 .success(buffer),
                 started: started,
-                sessionId: sessionId
+                sessionId: sessionId,
+                accountSuccess: false,
+                accountTimeout: false
             )
         } catch {
             resolution = resolveForwardResponse(
                 .failure(error),
                 started: started,
-                sessionId: sessionId
+                sessionId: sessionId,
+                accountSuccess: false,
+                accountTimeout: false
             )
         }
 

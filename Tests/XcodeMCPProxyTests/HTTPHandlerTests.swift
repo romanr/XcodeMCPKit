@@ -1703,6 +1703,74 @@ struct HTTPHandlerTests {
         }
         await server.shutdown()
     }
+
+    @Test func httpRefreshWarmupInternalWindowLookupDoesNotResetUpstreamSuccessState() async throws {
+        let config = makeConfig(requestTimeout: 0.05)
+        let attempts = NIOLockedValueBox(0)
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let runner = HTTPHandlerFakeProcessRunner()
+        await runner.enqueue(label: "window-title", stdout: "tweetpd — Foo.swift\n")
+        await runner.enqueue(label: "source-document-paths", stdout: "")
+
+        let warmupDriver = XcodeEditorWarmupDriver(processRunner: runner)
+        let sessionManager = TestSessionManager(
+            config: config,
+            upstreamPlanResponder: { method, originalId in
+                #expect(method == "tools/call")
+                let attempt = attempts.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalId,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-timeout, workspacePath: \(temporaryRoot)\"}"
+                        )
+                    )
+                }
+                return .delayed(
+                    try makeToolSuccessResponse(id: originalId, text: "late"),
+                    delayNanos: 500_000_000
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            warmupDriver: warmupDriver
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionId: "session-internal-window-lookup",
+                payload: toolsCallPayload(
+                    id: 14,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-timeout",
+                        "filePath": "Missing.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let error = body["error"] as? [String: Any]
+            #expect(error != nil)
+            #expect(sessionManager.sentUpstreamCount() == 2)
+            #expect(sessionManager.requestSuccessNotificationCount() == 0)
+            #expect(sessionManager.requestTimeoutNotificationCount() == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
 }
 
 private enum HTTPTestError: Error {
@@ -1722,6 +1790,46 @@ private struct UpstreamResponsePlan {
         delayNanos: UInt64
     ) -> UpstreamResponsePlan {
         UpstreamResponsePlan(data: data, delayNanos: delayNanos)
+    }
+}
+
+private actor HTTPHandlerFakeProcessRunner: ProcessRunning {
+    private struct PlannedOutput {
+        let label: String
+        let stdout: String
+        let stderr: String
+        let terminationStatus: Int32
+    }
+
+    private var plannedOutputs: [PlannedOutput] = []
+
+    func enqueue(
+        label: String,
+        stdout: String = "",
+        stderr: String = "",
+        terminationStatus: Int32 = 0
+    ) {
+        plannedOutputs.append(
+            PlannedOutput(
+                label: label,
+                stdout: stdout,
+                stderr: stderr,
+                terminationStatus: terminationStatus
+            )
+        )
+    }
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        guard plannedOutputs.isEmpty == false else {
+            return ProcessOutput(terminationStatus: 1, stdout: "", stderr: "no output")
+        }
+        let next = plannedOutputs.removeFirst()
+        #expect(next.label == request.label)
+        return ProcessOutput(
+            terminationStatus: next.terminationStatus,
+            stdout: next.stdout,
+            stderr: next.stderr
+        )
     }
 }
 
@@ -2023,6 +2131,13 @@ private func makeConfig(
         requestTimeout: requestTimeout,
         eagerInitialize: false
     )
+}
+
+private func makeHTTPTemporaryWorkspaceRoot() -> String {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url.path
 }
 
 private func addHTTPHandler(

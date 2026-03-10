@@ -182,6 +182,8 @@ struct HTTPHandlerTests {
             as? [String: Any]
         let responseId = (responseObject?["id"] as? NSNumber)?.intValue
         #expect(responseId == 1)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
@@ -770,7 +772,7 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIdCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
         #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
@@ -845,7 +847,7 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIdCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
         #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
@@ -1934,6 +1936,7 @@ private final class TestSessionManager: SessionManaging {
     }
 
     func registerInitialize(
+        sessionId: String,
         originalId: RPCId,
         requestObject: [String: Any],
         on eventLoop: EventLoop
@@ -1941,6 +1944,7 @@ private final class TestSessionManager: SessionManaging {
         state.withLockedValue { state in
             state.initialized = true
         }
+        _ = chooseUpstreamIndex(sessionId: sessionId, shouldPin: true)
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalId.value.foundationObject,

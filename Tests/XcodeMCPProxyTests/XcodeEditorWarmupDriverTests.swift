@@ -141,6 +141,37 @@ struct XcodeEditorWarmupDriverTests {
         #expect(resolved == nil)
     }
 
+    @Test func warmupDriverRejectsSuffixMatchedSymlinkEscapeOutsideWorkspaceRoot() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        let outsideRoot = makeTemporaryWorkspaceRoot()
+        defer {
+            try? FileManager.default.removeItem(atPath: root)
+            try? FileManager.default.removeItem(atPath: outsideRoot)
+        }
+
+        let outsideFile = URL(fileURLWithPath: outsideRoot)
+            .appendingPathComponent("Outside.swift")
+        try "".write(to: outsideFile, atomically: true, encoding: .utf8)
+
+        let symlinkDirectory = URL(fileURLWithPath: root)
+            .appendingPathComponent("Some")
+            .path
+        try FileManager.default.createDirectory(atPath: symlinkDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: URL(fileURLWithPath: symlinkDirectory).appendingPathComponent("Outside.swift").path,
+            withDestinationPath: outsideFile.path
+        )
+
+        let driver = XcodeEditorWarmupDriver(isEnabled: false)
+        let resolved = await driver.resolveAbsoluteFilePath(
+            workspacePath: root,
+            workspaceRoot: root,
+            requestedFilePath: "Nested/Outside.swift"
+        )
+
+        #expect(resolved == nil)
+    }
+
     @Test func warmupDriverWarmsAndRestoresUsingProcessRunner() async throws {
         let root = makeTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }

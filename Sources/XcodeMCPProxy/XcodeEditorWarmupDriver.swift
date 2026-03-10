@@ -267,6 +267,7 @@ actor XcodeEditorWarmupDriver {
         while let fileURL = enumerator?.nextObject() as? URL {
             guard fileURL.hasDirectoryPath == false else { continue }
             guard fileURL.lastPathComponent.lowercased() == requestedBasename else { continue }
+            guard isPath(fileURL.path, containedIn: workspaceRoot) else { continue }
 
             let score = suffixMatchScore(
                 requestedComponents: requestedComponents,

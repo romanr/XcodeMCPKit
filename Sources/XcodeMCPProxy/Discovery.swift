@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Network
 
 public struct DiscoveryRecord: Codable, Sendable {
     public var url: String
@@ -36,6 +37,7 @@ public enum Discovery {
         guard let data = try? Data(contentsOf: url) else { return nil }
         guard let record = try? decoder.decode(DiscoveryRecord.self, from: data) else { return nil }
         guard isProcessAlive(record.pid) else { return nil }
+        guard isLoopbackURL(record.url) else { return nil }
         return record
     }
 
@@ -104,5 +106,38 @@ public enum Discovery {
         }
         let normalizedHost = host.contains(":") ? "[\(host)]" : host
         return "\(scheme)://\(normalizedHost):\(port)/mcp"
+    }
+
+    private static func isLoopbackURL(_ raw: String) -> Bool {
+        guard let components = URLComponents(string: raw),
+              let host = components.host else {
+            return false
+        }
+        return isLoopbackHost(normalizeHost(host))
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        if host == "localhost" { return true }
+        if isIPv4Loopback(host) { return true }
+        return isIPv6Loopback(host)
+    }
+
+    private static func normalizeHost(_ host: String) -> String {
+        let value = host.lowercased()
+        if value.hasPrefix("["), value.hasSuffix("]") {
+            return String(value.dropFirst().dropLast())
+        }
+        return value
+    }
+
+    private static func isIPv4Loopback(_ host: String) -> Bool {
+        guard let address = IPv4Address(host) else { return false }
+        return address.rawValue.first == 127
+    }
+
+    private static func isIPv6Loopback(_ host: String) -> Bool {
+        guard let address = IPv6Address(host) else { return false }
+        let bytes = address.rawValue
+        return bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
     }
 }

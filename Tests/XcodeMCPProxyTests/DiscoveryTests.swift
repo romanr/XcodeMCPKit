@@ -57,6 +57,62 @@ struct DiscoveryTests {
         #expect(Discovery.read(overrideURL: url) == nil)
     }
 
+    @Test func discoveryAllowsIPv4LoopbackRange() async throws {
+        let url = makeTempDiscoveryURL()
+        defer { cleanupTempDiscoveryURL(url) }
+        let record = DiscoveryRecord(
+            url: "http://127.42.1.9:8888/mcp",
+            host: "127.42.1.9",
+            port: 8888,
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            updatedAt: Date()
+        )
+        try Discovery.write(record: record, overrideURL: url)
+        #expect(Discovery.read(overrideURL: url)?.url == record.url)
+    }
+
+    @Test func discoveryAllowsIPv6LoopbackURL() async throws {
+        let url = makeTempDiscoveryURL()
+        defer { cleanupTempDiscoveryURL(url) }
+        let record = DiscoveryRecord(
+            url: "http://[::1]:8888/mcp",
+            host: "::1",
+            port: 8888,
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            updatedAt: Date()
+        )
+        try Discovery.write(record: record, overrideURL: url)
+        #expect(Discovery.read(overrideURL: url)?.url == record.url)
+    }
+
+    @Test func discoveryAllowsExpandedIPv6LoopbackURL() async throws {
+        let url = makeTempDiscoveryURL()
+        defer { cleanupTempDiscoveryURL(url) }
+        let record = DiscoveryRecord(
+            url: "http://[0:0:0:0:0:0:0:1]:8888/mcp",
+            host: "0:0:0:0:0:0:0:1",
+            port: 8888,
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            updatedAt: Date()
+        )
+        try Discovery.write(record: record, overrideURL: url)
+        #expect(Discovery.read(overrideURL: url)?.url == record.url)
+    }
+
+    @Test func discoveryRejectsNonLoopbackURL() async throws {
+        let url = makeTempDiscoveryURL()
+        defer { cleanupTempDiscoveryURL(url) }
+        let record = DiscoveryRecord(
+            url: "http://example.com:8888/mcp",
+            host: "example.com",
+            port: 8888,
+            pid: Int(ProcessInfo.processInfo.processIdentifier),
+            updatedAt: Date()
+        )
+        try Discovery.write(record: record, overrideURL: url)
+        #expect(Discovery.read(overrideURL: url) == nil)
+    }
+
     @Test func discoveryFormatsIPv6Host() async throws {
         let record = Discovery.makeRecord(host: "::1", port: 1234, pid: 1)
         #expect(record?.url == "http://[::1]:1234/mcp")

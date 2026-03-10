@@ -77,7 +77,7 @@ public actor StdioAdapter {
             logger.error("STDIO read failed", metadata: ["error": "\(error)"])
         }
 
-        await drainRequestTasks()
+        await drainRequestTasksAfterInputClosed()
         await stop(cancelReadTask: false)
     }
 
@@ -245,16 +245,35 @@ public actor StdioAdapter {
         }
     }
 
-    private func stop(cancelReadTask: Bool) async {
-        guard !stopped else { return }
+    private func drainRequestTasksAfterInputClosed() async {
+        guard !requestTasks.isEmpty else { return }
+
+        // Allow in-flight requests to finish normally on clean EOF, but cap how long shutdown waits
+        // before canceling the session to avoid hanging indefinitely on stalled requests.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while !requestTasks.isEmpty, clock.now < deadline {
+            try? await clock.sleep(until: clock.now.advanced(by: .milliseconds(10)))
+        }
+
+        guard !requestTasks.isEmpty else { return }
         stopped = true
+        sseTask?.cancel()
+        session.invalidateAndCancel()
+        await drainRequestTasks()
+    }
+
+    private func stop(cancelReadTask: Bool) async {
         if cancelReadTask {
             readTask?.cancel()
         }
         sseTask?.cancel()
         readTask = nil
         sseTask = nil
-        session.invalidateAndCancel()
+        if !stopped {
+            stopped = true
+            session.invalidateAndCancel()
+        }
     }
 
     private func inspectRequest(_ data: Data) -> RequestEnvelope {

@@ -24,8 +24,12 @@ struct CLICommandTests {
             dependencies: .init(
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
-                logError: { output.append($0) },
-                logInfo: { _, _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { output.append($0) },
+                        info: { _, _ in }
+                    )
+                },
                 makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
                 input: .standardInput,
                 output: .standardOutput
@@ -54,8 +58,12 @@ struct CLICommandTests {
             dependencies: .init(
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
-                logError: { output.append($0) },
-                logInfo: { _, _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { output.append($0) },
+                        info: { _, _ in }
+                    )
+                },
                 makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
                 input: .standardInput,
                 output: .standardOutput
@@ -81,8 +89,12 @@ struct CLICommandTests {
             dependencies: .init(
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
-                logError: { _ in },
-                logInfo: { _, _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { _ in },
+                        info: { _, _ in }
+                    )
+                },
                 makeAdapter: { url, timeout, _, _ in
                     captured.withValue { value in
                         value = (url, timeout)
@@ -115,8 +127,12 @@ struct CLICommandTests {
             dependencies: .init(
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
-                logError: { _ in },
-                logInfo: { _, _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { _ in },
+                        info: { _, _ in }
+                    )
+                },
                 makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
                 input: .standardInput,
                 output: .standardOutput
@@ -130,6 +146,38 @@ struct CLICommandTests {
 
         #expect(exitCode == 0)
         #expect(output.snapshot().first?.contains("Usage:") == true)
+    }
+
+    @Test func cliCommandCreatesLiveLogSinkAfterBootstrapping() async throws {
+        let order = LockedBox<[String]>([])
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in
+                    order.withValue { $0.append("bootstrap") }
+                },
+                stdout: { _ in },
+                makeLogSink: {
+                    order.withValue { $0.append("makeLogSink") }
+                    return CLICommandLogSink(
+                        error: { output.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--print-url"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(order.snapshot() == ["bootstrap", "makeLogSink"])
+        #expect(output.snapshot().first?.contains("url helper mode was removed") == true)
     }
 }
 

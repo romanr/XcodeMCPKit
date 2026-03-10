@@ -17,8 +17,12 @@ struct CLICommandIntegrationTests {
             dependencies: .init(
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
-                logError: { errors.append($0) },
-                logInfo: { _, _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
                 makeAdapter: { upstreamURL, requestTimeout, input, output in
                     StdioAdapter(
                         upstreamURL: upstreamURL,

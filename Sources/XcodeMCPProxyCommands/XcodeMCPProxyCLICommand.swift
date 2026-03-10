@@ -4,12 +4,24 @@ import XcodeMCPProxy
 
 extension StdioAdapter: CLICommandAdapter {}
 
+package struct CLICommandLogSink {
+    package var error: (String) -> Void
+    package var info: (String, Logger.Metadata) -> Void
+
+    package init(
+        error: @escaping (String) -> Void,
+        info: @escaping (String, Logger.Metadata) -> Void
+    ) {
+        self.error = error
+        self.info = info
+    }
+}
+
 package struct XcodeMCPProxyCLICommand {
     package struct Dependencies {
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
-        package var logError: (String) -> Void
-        package var logInfo: (String, Logger.Metadata) -> Void
+        package var makeLogSink: () -> CLICommandLogSink
         package var makeAdapter: (URL, TimeInterval, FileHandle, FileHandle) -> any CLICommandAdapter
         package var input: FileHandle
         package var output: FileHandle
@@ -17,29 +29,31 @@ package struct XcodeMCPProxyCLICommand {
         package init(
             bootstrapLogging: @escaping ([String: String]) -> Void,
             stdout: @escaping (String) -> Void,
-            logError: @escaping (String) -> Void,
-            logInfo: @escaping (String, Logger.Metadata) -> Void,
+            makeLogSink: @escaping () -> CLICommandLogSink,
             makeAdapter: @escaping (URL, TimeInterval, FileHandle, FileHandle) -> any CLICommandAdapter,
             input: FileHandle,
             output: FileHandle
         ) {
             self.bootstrapLogging = bootstrapLogging
             self.stdout = stdout
-            self.logError = logError
-            self.logInfo = logInfo
+            self.makeLogSink = makeLogSink
             self.makeAdapter = makeAdapter
             self.input = input
             self.output = output
         }
 
         package static var live: Self {
-            let logger = ProxyLogging.make("cli")
             return Self(
                 bootstrapLogging: ProxyLogging.bootstrap,
                 stdout: { print($0) },
-                logError: { logger.error("\($0)") },
-                logInfo: { message, metadata in
-                    logger.info("\(message)", metadata: metadata)
+                makeLogSink: {
+                    let logger = ProxyLogging.make("cli")
+                    return CLICommandLogSink(
+                        error: { logger.error("\($0)") },
+                        info: { message, metadata in
+                            logger.info("\(message)", metadata: metadata)
+                        }
+                    )
                 },
                 makeAdapter: { upstreamURL, requestTimeout, input, output in
                     StdioAdapter(
@@ -63,6 +77,7 @@ package struct XcodeMCPProxyCLICommand {
 
     package func run(args: [String], environment: [String: String]) async -> Int32 {
         dependencies.bootstrapLogging(environment)
+        let logSink = dependencies.makeLogSink()
 
         if args.contains("-h") || args.contains("--help") {
             dependencies.stdout(Self.usage())
@@ -70,17 +85,17 @@ package struct XcodeMCPProxyCLICommand {
         }
 
         if (args.count > 1 && args[1] == "url") || args.contains("--print-url") {
-            dependencies.logError(
+            logSink.error(
                 "url helper mode was removed; configure your HTTP client with a concrete URL (default: http://localhost:8765/mcp)."
             )
             return 1
         }
 
         if args.contains(where: { Self.serverOnlyFlags.contains($0) }) {
-            dependencies.logError(
+            logSink.error(
                 "This option is only supported by xcode-mcp-proxy-server (proxy server)."
             )
-            dependencies.logError("Run: xcode-mcp-proxy-server --help")
+            logSink.error("Run: xcode-mcp-proxy-server --help")
             return 1
         }
 
@@ -101,11 +116,11 @@ package struct XcodeMCPProxyCLICommand {
 
             let config = try CLIParser.parse(args: parseArgs, environment: environment)
             guard let upstreamURL = config.stdioUpstreamURL else {
-                dependencies.logError("Missing upstream URL (start xcode-mcp-proxy-server).")
+                logSink.error("Missing upstream URL (start xcode-mcp-proxy-server).")
                 return 1
             }
 
-            logResolvedUpstream(config: config, upstreamURL: upstreamURL)
+            logResolvedUpstream(config: config, upstreamURL: upstreamURL, logSink: logSink)
 
             let adapter = dependencies.makeAdapter(
                 upstreamURL,
@@ -117,11 +132,11 @@ package struct XcodeMCPProxyCLICommand {
             await adapter.wait()
             return 0
         } catch let error as CLIError {
-            dependencies.logError(error.description)
-            dependencies.logError(Self.usage())
+            logSink.error(error.description)
+            logSink.error(Self.usage())
             return 1
         } catch {
-            dependencies.logError("error: \(error)")
+            logSink.error("error: \(error)")
             return 1
         }
     }
@@ -210,7 +225,11 @@ package struct XcodeMCPProxyCLICommand {
         "--lazy-init",
     ]
 
-    private func logResolvedUpstream(config: ProxyConfig, upstreamURL: URL) {
+    private func logResolvedUpstream(
+        config: ProxyConfig,
+        upstreamURL: URL,
+        logSink: CLICommandLogSink
+    ) {
         let url = upstreamURL.absoluteString
         guard let source = config.stdioUpstreamSource else {
             return
@@ -218,7 +237,7 @@ package struct XcodeMCPProxyCLICommand {
 
         switch source {
         case .discovery:
-            dependencies.logInfo(
+            logSink.info(
                 "STDIO upstream resolved from discovery file",
                 [
                     "url": "\(url)",
@@ -226,17 +245,17 @@ package struct XcodeMCPProxyCLICommand {
                 ]
             )
         case .fallback:
-            dependencies.logInfo(
+            logSink.info(
                 "STDIO upstream fell back to default",
                 ["url": "\(url)"]
             )
         case .environment:
-            dependencies.logInfo(
+            logSink.info(
                 "STDIO upstream resolved from XCODE_MCP_PROXY_ENDPOINT",
                 ["url": "\(url)"]
             )
         case .explicit:
-            dependencies.logInfo(
+            logSink.info(
                 "STDIO upstream resolved from CLI",
                 ["url": "\(url)"]
             )

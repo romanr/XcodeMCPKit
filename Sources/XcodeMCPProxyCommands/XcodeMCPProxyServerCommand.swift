@@ -102,65 +102,9 @@ package struct XcodeMCPProxyServerCommand {
 
     package func run(args: [String], environment: [String: String]) async -> Int32 {
         dependencies.bootstrapLogging(environment)
-
-        do {
-            var options = try Self.parseOptions(args: args)
-            if options.showHelp {
-                dependencies.stdout(Self.serverUsage())
-                return 0
-            }
-            Self.applyDefaults(
-                from: environment,
-                to: &options,
-                resolveXcodePid: dependencies.resolveXcodePid,
-                stderr: dependencies.stderr
-            )
-
-            let isDryRun = options.dryRun || Self.isTruthy(environment["DRY_RUN"])
-            if isDryRun {
-                let command = (["xcode-mcp-proxy-server"] + options.forwardedArgs)
-                    .joined(separator: " ")
-                dependencies.stdout(command)
-                return 0
-            }
-
-            let proxyArgs = ["xcode-mcp-proxy"] + options.forwardedArgs
-            let config = try CLIParser.parse(args: proxyArgs, environment: environment)
-            if options.forceRestart, config.listenPort > 0 {
-                _ = dependencies.terminateExistingServer(config.listenHost, config.listenPort)
-            }
-
-            do {
-                let server = dependencies.makeServer(config)
-                _ = try server.startAndWriteDiscovery()
-                try await server.wait()
-                return 0
-            } catch {
-                if config.listenPort > 0, dependencies.isAddressAlreadyInUse(error) {
-                    let message = Self.portInUseMessage(
-                        host: config.listenHost,
-                        port: config.listenPort,
-                        pids: dependencies.detectExistingProxyServerPIDs(
-                            config.listenHost,
-                            config.listenPort
-                        )
-                    )
-                    dependencies.stderr(message)
-                    return 1
-                }
-                throw error
-            }
-        } catch let error as ProxyServerCommandError {
-            dependencies.stderr("error: \(error.description)")
-            dependencies.stderr("run with --help for usage")
-            return 1
-        } catch let error as CLIError {
-            dependencies.stderr(error.description)
-            dependencies.stderr(Self.serverUsage())
-            return 1
-        } catch {
-            dependencies.stderr("error: \(error)")
-            return 1
-        }
+        return await ProxyServerCommandRuntime(dependencies: dependencies).execute(
+            args: args,
+            environment: environment
+        )
     }
 }

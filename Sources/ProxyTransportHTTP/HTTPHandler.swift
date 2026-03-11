@@ -32,6 +32,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package let sessionManager: any SessionManaging
     package let localResponder: LocalMCPResponder
     package let forwardingService: MCPForwardingService
+    package let responseWriter: HTTPResponseWriter
     package let warmupDriver: XcodeEditorWarmupDriver
     package let windowQueryService: XcodeWindowQueryService
     package let refreshWorkflow: RefreshCodeIssuesWorkflow
@@ -53,6 +54,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             config: config,
             sessionManager: sessionManager
         )
+        self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
             ?? RefreshCodeIssuesCoordinator.makeDefault(

@@ -3,101 +3,17 @@ import XcodeMCPProxy
 
 extension XcodeMCPProxyServerCommand {
     package static func parseOptions(args: [String]) throws -> ProxyServerOptions {
-        var forwarded: [String] = []
-        var showHelp = false
-        var hasListen = false
-        var hasHost = false
-        var hasPort = false
-        var hasXcodePid = false
-        var hasLazyInit = false
-        var forceRestart = false
-        var dryRun = false
-
-        let valueFlags: Set<String> = [
-            "--listen",
-            "--host",
-            "--port",
-            "--upstream-command",
-            "--upstream-args",
-            "--upstream-arg",
-            "--upstream-processes",
-            "--xcode-pid",
-            "--session-id",
-            "--max-body-bytes",
-            "--request-timeout",
-        ]
-
-        var cursor = CLIArgumentCursor(args: args)
-        while let arg = cursor.current {
-            switch arg {
-            case "-h", "--help":
-                showHelp = true
-                return ProxyServerOptions(
-                    forwardedArgs: forwarded,
-                    showHelp: showHelp,
-                    hasListenFlag: hasListen,
-                    hasHostFlag: hasHost,
-                    hasPortFlag: hasPort,
-                    hasXcodePidFlag: hasXcodePid,
-                    hasLazyInitFlag: hasLazyInit,
-                    forceRestart: forceRestart,
-                    dryRun: dryRun
-                )
-            case "--dry-run":
-                dryRun = true
-                cursor.advance()
-                continue
-            case "--force-restart":
-                forceRestart = true
-                cursor.advance()
-                continue
-            case "--stdio":
-                throw ProxyServerCommandError.message(
-                    "--stdio is not supported in server mode (use xcode-mcp-proxy)"
-                )
-            case "--url":
-                throw ProxyServerCommandError.message(
-                    "--url is not supported in server mode (use xcode-mcp-proxy)"
-                )
-            case "--lazy-init":
-                hasLazyInit = true
-                forwarded.append(arg)
-                cursor.advance()
-                continue
-            case "--listen":
-                hasListen = true
-            case "--host":
-                hasHost = true
-            case "--port":
-                hasPort = true
-            case "--xcode-pid":
-                hasXcodePid = true
-            default:
-                break
-            }
-
-            forwarded.append(arg)
-            if valueFlags.contains(arg) {
-                let value = try cursor.requiredValue(
-                    for: arg,
-                    error: { ProxyServerCommandError.message("\($0) requires a value") }
-                )
-                forwarded.append(value)
-            } else {
-                cursor.advance()
-            }
-        }
-
+        let scan = try ProxyCLIInvocationScanner.scanServer(args)
         return ProxyServerOptions(
-            forwardedArgs: forwarded,
-            showHelp: showHelp,
-            hasListenFlag: hasListen,
-            hasHostFlag: hasHost,
-            hasPortFlag: hasPort,
-            hasXcodePidFlag: hasXcodePid,
-            hasLazyInitFlag: hasLazyInit,
-            forceRestart: forceRestart,
-            dryRun: dryRun
+            forwardedArgs: scan.forwardedArgs,
+            showHelp: scan.showHelp,
+            hasListenFlag: scan.hasListenFlag,
+            hasHostFlag: scan.hasHostFlag,
+            hasPortFlag: scan.hasPortFlag,
+            hasXcodePidFlag: scan.hasXcodePidFlag,
+            hasLazyInitFlag: scan.hasLazyInitFlag,
+            forceRestart: scan.forceRestart,
+            dryRun: scan.dryRun
         )
     }
 

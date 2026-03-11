@@ -2,23 +2,9 @@ import Foundation
 
 extension XcodeMCPProxyInstallCommand {
     package static func scanInvocation(_ args: [String]) -> InstallCommandInvocation {
+        let scan = ProxyCLIInvocationScanner.scanInstall(args)
         var invocation = InstallCommandInvocation()
-        var cursor = CLIArgumentCursor(args: args)
-
-        while let arg = cursor.current {
-            switch arg {
-            case "-h", "--help":
-                invocation.showHelp = true
-                cursor.advance()
-            case "--prefix", "--bindir":
-                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
-            case "--dry-run":
-                cursor.advance()
-            default:
-                cursor.advance()
-            }
-        }
-
+        invocation.showHelp = scan.showHelp
         return invocation
     }
 

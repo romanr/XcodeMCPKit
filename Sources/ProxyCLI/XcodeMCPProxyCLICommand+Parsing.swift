@@ -3,45 +3,13 @@ import XcodeMCPProxy
 
 extension XcodeMCPProxyCLICommand {
     package static func scanInvocation(_ args: [String]) -> CLICommandInvocation {
+        let scan = ProxyCLIInvocationScanner.scanAdapter(args)
         var invocation = CLICommandInvocation()
-        var cursor = CLIArgumentCursor(args: args)
-
-        while let arg = cursor.current {
-            switch arg {
-            case "-h", "--help":
-                invocation.showHelp = true
-                cursor.advance()
-            case "url" where cursor.index == 1:
-                invocation.usesRemovedURLHelper = true
-                cursor.advance()
-            case "--print-url":
-                invocation.usesRemovedURLHelper = true
-                cursor.advance()
-            case "--url":
-                invocation.hasExplicitURL = true
-                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
-            case let value where value.hasPrefix("--url="):
-                invocation.hasExplicitURL = true
-                cursor.advance()
-            case "--stdio":
-                invocation.hasStdioFlag = true
-                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
-            case "--request-timeout":
-                cursor.advancePastCurrentAndOptionalValue(where: shouldConsumeRequestTimeoutValue)
-            case let flag where Self.serverOnlyFlags.contains(flag):
-                if invocation.serverOnlyFlag == nil {
-                    invocation.serverOnlyFlag = flag
-                }
-                if Self.serverOnlyValueFlags.contains(flag) {
-                    cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
-                } else {
-                    cursor.advance()
-                }
-            default:
-                cursor.advance()
-            }
-        }
-
+        invocation.showHelp = scan.showHelp
+        invocation.usesRemovedURLHelper = scan.usesRemovedURLHelper
+        invocation.hasExplicitURL = scan.hasExplicitURL
+        invocation.hasStdioFlag = scan.hasStdioFlag
+        invocation.serverOnlyFlag = scan.serverOnlyFlag
         return invocation
     }
 
@@ -115,40 +83,7 @@ extension XcodeMCPProxyCLICommand {
         """
     }
 
-    static let serverOnlyFlags: Set<String> = [
-        "--listen",
-        "--host",
-        "--port",
-        "--max-body-bytes",
-        "--upstream-command",
-        "--upstream-args",
-        "--upstream-arg",
-        "--upstream-processes",
-        "--xcode-pid",
-        "--session-id",
-        "--lazy-init",
-    ]
-
-    static let serverOnlyValueFlags: Set<String> = [
-        "--listen",
-        "--host",
-        "--port",
-        "--max-body-bytes",
-        "--upstream-command",
-        "--upstream-args",
-        "--upstream-arg",
-        "--upstream-processes",
-        "--xcode-pid",
-        "--session-id",
-    ]
-
     static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
-        if token == "-h" || token == "--help" {
-            return true
-        }
-        if Double(token) != nil {
-            return true
-        }
-        return !token.hasPrefix("-")
+        ProxyCLIInvocationScanner.shouldConsumeRequestTimeoutValue(token)
     }
 }

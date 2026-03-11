@@ -29,7 +29,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     package let state = NIOLockedValueBox(State())
     package let config: ProxyConfig
-    package let sessionManager: any RuntimeCoordinating
+    package let controlService: HTTPControlService
     package let postService: HTTPPostService
     package let responseWriter: HTTPResponseWriter
     package let logger: Logger = ProxyLogging.make("http")
@@ -41,7 +41,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         warmupDriver: XcodeEditorWarmupDriver = XcodeEditorWarmupDriver()
     ) {
         self.config = config
-        self.sessionManager = sessionManager
+        self.controlService = HTTPControlService(runtimeCoordinator: sessionManager)
         self.postService = HTTPPostService(
             config: config,
             sessionManager: sessionManager,
@@ -96,8 +96,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package func channelInactive(context: ChannelHandlerContext) {
         let sessionID = state.withLockedValue { $0.sseSessionID }
         if let sessionID {
-            let session = sessionManager.session(id: sessionID)
-            session.notificationHub.removeSse(context.channel)
+            controlService.closeSSE(sessionID: sessionID, channel: context.channel)
         }
         if let remote = remoteAddressString(for: context.channel) {
             if let sessionID {
@@ -142,18 +141,18 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        switch (head.method, path) {
-        case (.GET, "/health"):
+        switch HTTPRoute.resolve(method: head.method, path: path) {
+        case .health:
             sendPlain(on: context.channel, status: .ok, body: "ok", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
-        case (.GET, "/debug/upstreams"):
+        case .debugSnapshot:
             handleDebugSnapshot(context: context, head: head, requestLog: requestLog)
-        case (.GET, "/mcp"), (.GET, "/"), (.GET, "/mcp/events"), (.GET, "/events"):
+        case .sse:
             handleSSE(context: context, head: head, requestLog: requestLog)
-        case (.DELETE, "/mcp"), (.DELETE, "/"):
+        case .deleteSession:
             handleDelete(context: context, head: head, requestLog: requestLog)
-        case (.POST, "/mcp"), (.POST, "/"):
+        case .post:
             handlePost(context: context, head: head, requestLog: requestLog)
-        default:
+        case .notFound:
             sendPlain(on: context.channel, status: .notFound, body: "not found", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
         }
     }
@@ -171,11 +170,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-
-        guard let data = try? encoder.encode(sessionManager.debugSnapshot()) else {
+        guard let data = controlService.debugSnapshotData() else {
             sendPlain(
                 on: context.channel,
                 status: .internalServerError,
@@ -226,14 +221,11 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let session = sessionManager.session(id: sessionID)
-        let hadClients = session.notificationHub.hasSseClients
-
         state.withLockedValue { state in
             state.isSSE = true
             state.sseSessionID = sessionID
         }
-        session.notificationHub.addSse(context.channel)
+        let openResult = controlService.openSSE(sessionID: sessionID, channel: context.channel)
 
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
@@ -249,11 +241,8 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         buffer.writeString(": ok\n\n")
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
 
-        if !hadClients {
-            let buffered = session.router.drainBufferedNotifications()
-            for data in buffered {
-                sendSSE(to: context.channel, data: data)
-            }
+        for data in openResult.bufferedNotifications {
+            sendSSE(to: context.channel, data: data)
         }
 
         if let remote = requestLog.remoteAddress {
@@ -275,9 +264,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         }
-        if sessionManager.hasSession(id: sessionID) {
-            sessionManager.removeSession(id: sessionID)
-        }
+        controlService.deleteSession(id: sessionID)
         sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
     }
 
@@ -333,7 +320,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         let headerSessionID = HTTPRequestValidator.sessionID(from: head.headers)
-        let headerSessionExists = headerSessionID.map { sessionManager.hasSession(id: $0) } ?? false
+        let headerSessionExists = headerSessionID.map { controlService.hasSession(id: $0) } ?? false
         let keepAlive = head.isKeepAlive
         let channel = context.channel
         postService.handle(

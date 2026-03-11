@@ -141,7 +141,7 @@ public actor StdioAdapter {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         applyTimeout(to: &request)
         request.httpBody = data
 
@@ -185,7 +185,7 @@ public actor StdioAdapter {
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         applyTimeout(to: &request, allowLongRunning: true)
 
         let (bytes, response) = try await session.bytes(for: request)

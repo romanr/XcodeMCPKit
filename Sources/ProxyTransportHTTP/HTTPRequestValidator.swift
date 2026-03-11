@@ -8,7 +8,7 @@ enum HTTPRequestValidationFailure: Error {
 
 enum HTTPRequestValidator {
     static func sessionID(from headers: HTTPHeaders) -> String? {
-        headers.first(name: "Mcp-Session-ID")
+        headers.first(name: "Mcp-Session-Id")
     }
 
     static func acceptsEventStream(_ headers: HTTPHeaders) -> Bool {

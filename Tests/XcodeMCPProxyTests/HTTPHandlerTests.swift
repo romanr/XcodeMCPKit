@@ -179,7 +179,7 @@ struct HTTPHandlerTests {
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .ok)
-        #expect(response.head.headers.first(name: "Mcp-Session-ID")?.isEmpty == false)
+        #expect(response.head.headers.first(name: "Mcp-Session-Id")?.isEmpty == false)
 
         let responseObject =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
@@ -328,7 +328,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         let initResponse = try collectResponse(from: channel)
-        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-ID"))
+        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -339,7 +339,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -386,7 +386,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         let initResponse = try collectResponse(from: channel)
-        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-ID"))
+        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -397,7 +397,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -438,7 +438,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         let initResponse = try collectResponse(from: channel)
-        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-ID"))
+        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [[String: Any]] = [
             [
@@ -461,7 +461,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -511,7 +511,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         let initResponse = try collectResponse(from: channel)
-        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-ID"))
+        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         sessionManager.setAvailableUpstreamIndex(nil)
 
@@ -524,7 +524,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -566,7 +566,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         let initResponse = try collectResponse(from: channel)
-        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-ID"))
+        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         sessionManager.setAvailableUpstreamIndex(nil)
         let chooseCountBeforeMalformedRequest = sessionManager.chooseUpstreamIndexCallCount()
@@ -574,7 +574,7 @@ struct HTTPHandlerTests {
         var malformedHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         malformedHead.headers.add(name: "Accept", value: "application/json")
         malformedHead.headers.add(name: "Content-Type", value: "application/json")
-        malformedHead.headers.add(name: "Mcp-Session-ID", value: sessionID)
+        malformedHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
         var malformedBody = channel.allocator.buffer(capacity: 20)
         malformedBody.writeString("{\"jsonrpc\":\"2.0\",")
         try channel.writeInbound(HTTPServerRequestPart.head(malformedHead))
@@ -628,7 +628,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         let initResponse = try collectResponse(from: channel)
-        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-ID"))
+        let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -639,7 +639,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -676,7 +676,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: "missing-session")
+        head.headers.add(name: "Mcp-Session-Id", value: "missing-session")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -685,7 +685,7 @@ struct HTTPHandlerTests {
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .ok)
-        #expect(response.head.headers.first(name: "Mcp-Session-ID") == "missing-session")
+        #expect(response.head.headers.first(name: "Mcp-Session-Id") == "missing-session")
         #expect(response.body.contains("\"result\""))
     }
 
@@ -699,7 +699,7 @@ struct HTTPHandlerTests {
 
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
-        head.headers.add(name: "Mcp-Session-ID", value: "session-1")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-1")
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -740,7 +740,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         // tools/list should be served from cache and not forwarded upstream.
@@ -754,7 +754,7 @@ struct HTTPHandlerTests {
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         toolsHead.headers.add(name: "Accept", value: "application/json")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
-        toolsHead.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -812,7 +812,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         // tools/list with params should still be served from cache (Codex startup stability).
@@ -829,7 +829,7 @@ struct HTTPHandlerTests {
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         toolsHead.headers.add(name: "Accept", value: "application/json")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
-        toolsHead.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -894,7 +894,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         // tools/list should be forwarded on the first miss, then cached even with params.
@@ -911,7 +911,7 @@ struct HTTPHandlerTests {
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         toolsHead.headers.add(name: "Accept", value: "application/json")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
-        toolsHead.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -936,7 +936,7 @@ struct HTTPHandlerTests {
         var toolsHead2 = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         toolsHead2.headers.add(name: "Accept", value: "application/json")
         toolsHead2.headers.add(name: "Content-Type", value: "application/json")
-        toolsHead2.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        toolsHead2.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var toolsBody2 = channel.allocator.buffer(capacity: toolsData2.count)
         toolsBody2.writeBytes(toolsData2)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead2))
@@ -979,7 +979,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         let toolsPayload: [String: Any] = [
@@ -992,7 +992,7 @@ struct HTTPHandlerTests {
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
-        toolsHead.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1022,7 +1022,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: "session-1")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-1")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1061,7 +1061,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: "session-1")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-1")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1121,7 +1121,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         let payload: [String: Any] = [
@@ -1135,7 +1135,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1198,7 +1198,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         let payload: [String: Any] = [
@@ -1212,7 +1212,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1270,7 +1270,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         let payload: [String: Any] = [
@@ -1284,7 +1284,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1344,7 +1344,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         let payload: [String: Any] = [
@@ -1358,7 +1358,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1422,7 +1422,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let initResponse = try collectResponse(from: channel)
-        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-ID")
+        let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
         let payload: [String: Any] = [
@@ -1436,7 +1436,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
         head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-ID", value: sessionID!)
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2557,7 +2557,7 @@ private func postJSON(
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
     head.headers.add(name: "Accept", value: "application/json")
     head.headers.add(name: "Content-Type", value: "application/json")
-    head.headers.add(name: "Mcp-Session-ID", value: sessionID)
+    head.headers.add(name: "Mcp-Session-Id", value: sessionID)
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
     try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2628,7 +2628,7 @@ private func postHTTPJSON(
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
+    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
 
     let (responseData, response) = try await URLSession.shared.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse else {

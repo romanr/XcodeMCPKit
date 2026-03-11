@@ -54,7 +54,7 @@ struct HTTPConcurrencyTests {
                 sessionID: nil,
                 payload: initializePayload(id: 1)
             )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-ID")
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
@@ -107,7 +107,7 @@ struct HTTPConcurrencyTests {
                 sessionID: nil,
                 payload: initializePayload(id: 1)
             )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-ID")
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
@@ -169,7 +169,7 @@ private func runConcurrentInitialize(
                 let payload = initializePayload(id: index + 1)
                 let (response, body) = try await postJSON(
                     url: url, sessionID: nil, payload: payload)
-                guard let sessionID = response.value(forHTTPHeaderField: "Mcp-Session-ID") else {
+                guard let sessionID = response.value(forHTTPHeaderField: "Mcp-Session-Id") else {
                     throw ConcurrencyTestError.missingSessionID
                 }
                 let responseID = (body["id"] as? NSNumber)?.intValue ?? -1
@@ -491,7 +491,7 @@ private func postJSON(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     if let sessionID {
-        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
     }
 
     let (responseData, response) = try await URLSession.shared.data(for: request)

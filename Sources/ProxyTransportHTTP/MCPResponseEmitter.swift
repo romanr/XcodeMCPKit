@@ -13,7 +13,7 @@ enum MCPResponseEmitter {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         if let sessionID {
-            headers.add(name: "Mcp-Session-ID", value: sessionID)
+            headers.add(name: "Mcp-Session-Id", value: sessionID)
         }
         sendBuffer(on: channel, status: .ok, headers: headers, buffer: buffer, keepAlive: keepAlive)
     }
@@ -31,7 +31,7 @@ enum MCPResponseEmitter {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
         headers.add(name: "Cache-Control", value: "no-cache")
-        headers.add(name: "Mcp-Session-ID", value: sessionID)
+        headers.add(name: "Mcp-Session-Id", value: sessionID)
 
         var head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
@@ -57,7 +57,7 @@ enum MCPResponseEmitter {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
         if let sessionID {
-            headers.add(name: "Mcp-Session-ID", value: sessionID)
+            headers.add(name: "Mcp-Session-Id", value: sessionID)
         }
         var buffer = channel.allocator.buffer(capacity: body.utf8.count)
         buffer.writeString(body)
@@ -71,7 +71,7 @@ enum MCPResponseEmitter {
         sessionID: String
     ) {
         var headers = HTTPHeaders()
-        headers.add(name: "Mcp-Session-ID", value: sessionID)
+        headers.add(name: "Mcp-Session-Id", value: sessionID)
         sendBuffer(on: channel, status: status, headers: headers, buffer: nil, keepAlive: keepAlive)
     }
 

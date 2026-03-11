@@ -256,7 +256,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         headers.add(name: "Content-Type", value: "text/event-stream")
         headers.add(name: "Cache-Control", value: "no-cache")
         headers.add(name: "Connection", value: "keep-alive")
-        headers.add(name: "Mcp-Session-ID", value: sessionID)
+        headers.add(name: "Mcp-Session-Id", value: sessionID)
 
         let responseHead = HTTPResponseHead(version: head.version, status: .ok, headers: headers)
         logResponse(requestLog, status: .ok, sessionID: sessionID)

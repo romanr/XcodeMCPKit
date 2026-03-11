@@ -1,5 +1,3 @@
-import Foundation
-
 public enum Version {
     public static let current = "0.4.1"
 }

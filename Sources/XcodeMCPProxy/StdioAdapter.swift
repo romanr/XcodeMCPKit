@@ -1,5 +1,7 @@
 import Foundation
 import Logging
+import XcodeMCPProxyCore
+import XcodeMCPProxyUpstream
 
 public actor StdioAdapter {
     private struct RequestEnvelope {
@@ -221,13 +223,6 @@ public actor StdioAdapter {
         } else {
             request.timeoutInterval = .infinity
         }
-    }
-
-    private func isValidJSONPayload(_ data: Data) -> Bool {
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return false
-        }
-        return json is [String: Any] || json is [Any]
     }
 
     private func backoffDelay(for attempt: Int) -> UInt64 {

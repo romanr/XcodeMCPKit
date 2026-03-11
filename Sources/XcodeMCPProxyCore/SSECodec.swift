@@ -1,11 +1,11 @@
 import Foundation
 
-enum SSECodec {
+package enum SSECodec {
     /// Encodes a single SSE event containing one logical `data` payload.
     ///
     /// If the payload contains newlines, they are emitted as multiple `data:` lines per the SSE spec.
     /// Returns `nil` if the payload is not valid UTF-8.
-    static func encodeDataEvent(_ data: Data) -> String? {
+    package static func encodeDataEvent(_ data: Data) -> String? {
         guard let text = String(data: data, encoding: .utf8) else {
             return nil
         }
@@ -25,10 +25,12 @@ enum SSECodec {
     }
 }
 
-struct SSEDecoder {
+package struct SSEDecoder {
     private var dataLines: [String] = []
 
-    mutating func feed(line: String) -> Data? {
+    package init() {}
+
+    package mutating func feed(line: String) -> Data? {
         let normalized: Substring
         if line.last == "\r" {
             normalized = line.dropLast()
@@ -58,11 +60,10 @@ struct SSEDecoder {
         return nil
     }
 
-    mutating func flushIfNeeded() -> Data? {
+    package mutating func flushIfNeeded() -> Data? {
         guard !dataLines.isEmpty else { return nil }
         let payload = dataLines.joined(separator: "\n")
         dataLines.removeAll(keepingCapacity: true)
         return Data(payload.utf8)
     }
 }
-

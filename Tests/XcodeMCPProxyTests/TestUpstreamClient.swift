@@ -1,7 +1,7 @@
 import Foundation
 import XcodeMCPTestSupport
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyUpstream
 
 actor TestUpstreamClient: UpstreamClient {
     nonisolated let events: AsyncStream<UpstreamEvent>

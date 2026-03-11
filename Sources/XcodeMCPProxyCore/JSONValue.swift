@@ -1,10 +1,10 @@
 import Foundation
 
-enum JSONNumber: Sendable {
+package enum JSONNumber: Sendable {
     case int(Int64)
     case double(Double)
 
-    init(_ number: NSNumber) {
+    package init(_ number: NSNumber) {
         if CFNumberIsFloatType(number) {
             self = .double(number.doubleValue)
         } else {
@@ -12,7 +12,7 @@ enum JSONNumber: Sendable {
         }
     }
 
-    var stringValue: String {
+    package var stringValue: String {
         switch self {
         case .int(let value):
             return String(value)
@@ -21,7 +21,7 @@ enum JSONNumber: Sendable {
         }
     }
 
-    var foundationObject: NSNumber {
+    package var foundationObject: NSNumber {
         switch self {
         case .int(let value):
             return NSNumber(value: value)
@@ -31,7 +31,7 @@ enum JSONNumber: Sendable {
     }
 }
 
-enum JSONValue: Sendable {
+package enum JSONValue: Sendable {
     case object([String: JSONValue])
     case array([JSONValue])
     case string(String)
@@ -39,7 +39,7 @@ enum JSONValue: Sendable {
     case bool(Bool)
     case null
 
-    init?(any: Any) {
+    package init?(any: Any) {
         switch any {
         case is NSNull:
             self = .null
@@ -72,7 +72,7 @@ enum JSONValue: Sendable {
         }
     }
 
-    var foundationObject: Any {
+    package var foundationObject: Any {
         switch self {
         case .object(let values):
             return values.mapValues { $0.foundationObject }
@@ -90,11 +90,11 @@ enum JSONValue: Sendable {
     }
 }
 
-struct RPCId: Sendable {
-    let key: String
-    let value: JSONValue
+package struct RPCId: Sendable {
+    package let key: String
+    package let value: JSONValue
 
-    init?(any: Any) {
+    package init?(any: Any) {
         guard !(any is NSNull) else { return nil }
 
         if let string = any as? String {

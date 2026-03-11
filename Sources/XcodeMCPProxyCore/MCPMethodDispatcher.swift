@@ -1,18 +1,18 @@
 import Foundation
 import NIO
 
-enum MCPMethodDispatcher {
+package enum MCPMethodDispatcher {
     private static let capped20sMethods: Set<String> = [
         "tools/list",
         "resources/list",
         "resources/templates/list",
     ]
 
-    static func timeoutForInitialize(defaultSeconds: TimeInterval) -> TimeAmount? {
+    package static func timeoutForInitialize(defaultSeconds: TimeInterval) -> TimeAmount? {
         timeout(defaultSeconds: defaultSeconds, capSeconds: 60)
     }
 
-    static func timeoutForMethod(
+    package static func timeoutForMethod(
         _ method: String?,
         defaultSeconds: TimeInterval
     ) -> TimeAmount? {
@@ -28,7 +28,7 @@ enum MCPMethodDispatcher {
         return makeRequestTimeout(defaultSeconds)
     }
 
-    static func shouldPinUpstream(for requestJSON: Any) -> Bool {
+    package static func shouldPinUpstream(for requestJSON: Any) -> Bool {
         if let object = requestJSON as? [String: Any] {
             guard let method = object["method"] as? String, method != "initialize" else {
                 return false

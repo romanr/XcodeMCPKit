@@ -1,37 +1,44 @@
 import Foundation
 import Logging
 import NIO
+import XcodeMCPProxyCore
+import XcodeMCPProxyUpstream
 
-struct XcodeWindowInfo: Sendable, Equatable {
-    let tabIdentifier: String
-    let workspacePath: String
+package struct XcodeWindowInfo: Sendable, Equatable {
+    package let tabIdentifier: String
+    package let workspacePath: String
+
+    package init(tabIdentifier: String, workspacePath: String) {
+        self.tabIdentifier = tabIdentifier
+        self.workspacePath = workspacePath
+    }
 }
 
-struct EditorSnapshot: Sendable, Equatable {
-    let workspacePath: String
-    let workspaceRoot: String
-    let windowTitle: String
-    let candidateSourceDocumentPaths: [String]
-    let visibleSourceBasename: String?
+package struct EditorSnapshot: Sendable, Equatable {
+    package let workspacePath: String
+    package let workspaceRoot: String
+    package let windowTitle: String
+    package let candidateSourceDocumentPaths: [String]
+    package let visibleSourceBasename: String?
 }
 
-struct WarmupContext: Sendable, Equatable {
-    let workspacePath: String
-    let workspaceRoot: String
-    let resolvedFilePath: String
-    let snapshot: EditorSnapshot?
+package struct WarmupContext: Sendable, Equatable {
+    package let workspacePath: String
+    package let workspaceRoot: String
+    package let resolvedFilePath: String
+    package let snapshot: EditorSnapshot?
 }
 
-struct WarmupResult: Sendable, Equatable {
-    let context: WarmupContext?
-    let snapshot: EditorSnapshot?
-    let workspacePath: String?
-    let resolvedFilePath: String?
-    let failureReason: String?
+package struct WarmupResult: Sendable, Equatable {
+    package let context: WarmupContext?
+    package let snapshot: EditorSnapshot?
+    package let workspacePath: String?
+    package let resolvedFilePath: String?
+    package let failureReason: String?
 }
 
-actor XcodeEditorWarmupDriver {
-    typealias WindowsProvider = @Sendable (_ sessionId: String, _ eventLoop: EventLoop) async -> [XcodeWindowInfo]?
+package actor XcodeEditorWarmupDriver {
+    package typealias WindowsProvider = @Sendable (_ sessionId: String, _ eventLoop: EventLoop) async -> [XcodeWindowInfo]?
 
     private struct FileResolutionKey: Hashable {
         let workspacePath: String
@@ -51,7 +58,7 @@ actor XcodeEditorWarmupDriver {
     private var workspacePathCache: [WorkspaceCacheKey: String] = [:]
     private var resolvedFilePathCache: [FileResolutionKey: String] = [:]
 
-    init(
+    package init(
         processRunner: any ProcessRunning = ProcessRunner(),
         logger: Logger = ProxyLogging.make("warmup"),
         isEnabled: Bool = true
@@ -61,11 +68,11 @@ actor XcodeEditorWarmupDriver {
         self.isEnabled = isEnabled
     }
 
-    static func disabled() -> XcodeEditorWarmupDriver {
+    package static func disabled() -> XcodeEditorWarmupDriver {
         XcodeEditorWarmupDriver(isEnabled: false)
     }
 
-    func warmUp(
+    package func warmUp(
         tabIdentifier: String?,
         filePath: String?,
         sessionId: String,
@@ -180,7 +187,7 @@ actor XcodeEditorWarmupDriver {
         )
     }
 
-    func touchResolvedTarget(_ context: WarmupContext) async -> Bool {
+    package func touchResolvedTarget(_ context: WarmupContext) async -> Bool {
         guard isEnabled else { return false }
         return await ensureSourceDocumentVisible(
             at: context.resolvedFilePath,
@@ -189,7 +196,7 @@ actor XcodeEditorWarmupDriver {
     }
 
     @discardableResult
-    func restore(_ context: WarmupContext?) async -> String {
+    package func restore(_ context: WarmupContext?) async -> String {
         guard isEnabled else { return "disabled" }
         guard let context else { return "no_context" }
         let snapshot = context.snapshot
@@ -225,7 +232,7 @@ actor XcodeEditorWarmupDriver {
         return touched ? "restored" : "restore_touch_failed"
     }
 
-    func resolveAbsoluteFilePath(
+    package func resolveAbsoluteFilePath(
         workspacePath: String,
         workspaceRoot: String,
         requestedFilePath: String
@@ -296,7 +303,7 @@ actor XcodeEditorWarmupDriver {
         return bestPath
     }
 
-    func workspaceRoot(for workspacePath: String) -> String {
+    package func workspaceRoot(for workspacePath: String) -> String {
         let url = URL(fileURLWithPath: workspacePath)
         if ["xcworkspace", "xcodeproj"].contains(url.pathExtension.lowercased()) {
             return url.deletingLastPathComponent().path
@@ -304,7 +311,7 @@ actor XcodeEditorWarmupDriver {
         return workspacePath
     }
 
-    func visibleSourceBasename(from windowTitle: String) -> String? {
+    package func visibleSourceBasename(from windowTitle: String) -> String? {
         let separators = [" — ", " - "]
         for separator in separators {
             let parts = windowTitle.components(separatedBy: separator)
@@ -461,7 +468,9 @@ actor XcodeEditorWarmupDriver {
                     metadata: [
                         "label": .string(label),
                         "status": .string("\(output.terminationStatus)"),
-                        "stderr": .string(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines)),
+                        "stderr": .string(
+                            output.stderr.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                        ),
                     ]
                 )
             }

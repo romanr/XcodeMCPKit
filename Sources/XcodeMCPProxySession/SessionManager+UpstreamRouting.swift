@@ -1,0 +1,636 @@
+import Foundation
+import NIO
+import XcodeMCPProxyCore
+import XcodeMCPProxyUpstream
+
+extension SessionManager {
+    func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+            return
+        }
+
+        if var object = json as? [String: Any],
+            let upstreamId = upstreamId(from: object["id"]),
+            let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+        {
+            if mapping.isInitialize {
+                handleInitializeResponse(object, upstreamIndex: upstreamIndex)
+                return
+            }
+            if let sessionId = mapping.sessionId, let originalId = mapping.originalId {
+                object["id"] = originalId.value.foundationObject
+                if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: [])
+                {
+                    recordTraffic(
+                        upstreamIndex: upstreamIndex,
+                        direction: "inbound",
+                        data: rewritten
+                    )
+                    let target = session(id: sessionId)
+                    target.router.handleIncoming(rewritten)
+                    return
+                }
+            }
+        }
+
+        if let array = json as? [Any] {
+            var sessionId: String?
+            var rewrittenAny = false
+            var transformed: [Any] = []
+            for item in array {
+                guard var object = item as? [String: Any],
+                    let upstreamId = upstreamId(from: object["id"]),
+                    let mapping = idMapper.consume(
+                        upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                else {
+                    transformed.append(item)
+                    continue
+                }
+                if mapping.isInitialize {
+                    handleInitializeResponse(object, upstreamIndex: upstreamIndex)
+                    continue
+                }
+                guard let originalId = mapping.originalId else {
+                    transformed.append(item)
+                    continue
+                }
+                object["id"] = originalId.value.foundationObject
+                sessionId = sessionId ?? mapping.sessionId
+                rewrittenAny = true
+                transformed.append(object)
+            }
+            if rewrittenAny, let sessionId,
+                let rewritten = try? JSONSerialization.data(
+                    withJSONObject: transformed, options: [])
+            {
+                recordTraffic(
+                    upstreamIndex: upstreamIndex,
+                    direction: "inbound",
+                    data: rewritten
+                )
+                let target = session(id: sessionId)
+                target.router.handleIncoming(rewritten)
+                return
+            }
+        }
+
+        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+    }
+
+    func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
+        let globalInit = initState.withLockedValue {
+            state -> (
+                pending: [InitPending], timeout: Scheduled<Void>?, hadGlobalInit: Bool,
+                wasInFlight: Bool,
+                primaryInitUpstreamId: Int64?
+            )? in
+            if state.isShuttingDown {
+                return nil
+            }
+            let wasInFlight = state.initInFlight
+            let hadGlobalInit = state.initResult != nil
+            let pending = state.initPending
+            let timeout = state.initTimeout
+            let primaryId = state.primaryInitUpstreamId
+
+            if upstreamIndex == 0 && wasInFlight {
+                state.initInFlight = false
+                state.initTimeout = nil
+                state.initPending.removeAll()
+                state.primaryInitUpstreamId = nil
+            }
+
+            return (pending, timeout, hadGlobalInit, wasInFlight, primaryId)
+        }
+        guard let globalInit else { return }
+
+        if upstreamIndex == 0 && globalInit.wasInFlight {
+            globalInit.timeout?.cancel()
+            if let upstreamId = globalInit.primaryInitUpstreamId {
+                idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
+            }
+            for item in globalInit.pending {
+                clearInitializeUpstreamIndex(
+                    sessionId: item.sessionId,
+                    onlyIfGeneration: item.sessionGeneration
+                )
+                item.eventLoop.execute {
+                    item.promise.fail(TimeoutError())
+                }
+            }
+        }
+
+        clearUpstreamState(upstreamIndex: upstreamIndex)
+        idMapper.reset(upstreamIndex: upstreamIndex)
+
+        let clearedPins = sessionsState.withLockedValue { state -> Int in
+            let keys = Array(state.sessions.keys)
+            var cleared = 0
+            for key in keys {
+                if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
+                    state.sessions[key]?.pinnedUpstreamIndex = nil
+                    state.sessions[key]?.initializeUpstreamIndex = nil
+                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
+                    cleared += 1
+                } else if state.sessions[key]?.initializeUpstreamIndex == upstreamIndex {
+                    state.sessions[key]?.initializeUpstreamIndex = nil
+                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
+                }
+            }
+            return cleared
+        }
+        if clearedPins > 0 {
+            logger.debug(
+                "Cleared pinned sessions for exited upstream",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"), "cleared": .string("\(clearedPins)"),
+                ])
+        }
+
+        let shouldResetGlobalInit: Bool
+        if globalInit.hadGlobalInit {
+            let anyInitialized = upstreamState.withLockedValue { state in
+                state.upstreamStates.contains { $0.isInitialized }
+            }
+            shouldResetGlobalInit = !anyInitialized
+        } else {
+            shouldResetGlobalInit = false
+        }
+        if shouldResetGlobalInit {
+            initState.withLockedValue { state in
+                state.initResult = nil
+                state.didWarmSecondary = false
+            }
+        }
+
+        if config.eagerInitialize {
+            if upstreamIndex == 0 {
+                if shouldResetGlobalInit || !globalInit.hadGlobalInit {
+                    startEagerInitializePrimary()
+                } else {
+                    startUpstreamWarmInitialize(upstreamIndex: 0)
+                }
+            } else if globalInit.hadGlobalInit {
+                if shouldResetGlobalInit {
+                    let primaryInitInFlight = upstreamState.withLockedValue { state in
+                        guard !state.upstreamStates.isEmpty else { return false }
+                        return state.upstreamStates[0].initInFlight
+                    }
+                    if primaryInitInFlight {
+                        initState.withLockedValue { state in
+                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = true
+                        }
+                    } else {
+                        initState.withLockedValue { state in
+                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+                        }
+                        startEagerInitializePrimary()
+                    }
+                }
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            }
+        }
+    }
+
+    package func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64 {
+        idMapper.assign(
+            upstreamIndex: upstreamIndex, sessionId: sessionId, originalId: originalId,
+            isInitialize: false)
+    }
+
+    package func removeUpstreamIdMapping(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
+        _ = idMapper.remove(
+            upstreamIndex: upstreamIndex,
+            sessionId: sessionId,
+            requestIdKey: requestIdKey
+        )
+    }
+
+    package func onRequestTimeout(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
+        removeUpstreamIdMapping(
+            sessionId: sessionId, requestIdKey: requestIdKey, upstreamIndex: upstreamIndex)
+        markRequestTimedOut(upstreamIndex: upstreamIndex)
+    }
+
+    package func onRequestSucceeded(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
+        _ = sessionId
+        _ = requestIdKey
+        markRequestSucceeded(upstreamIndex: upstreamIndex)
+    }
+
+    package func sendUpstream(_ data: Data, upstreamIndex: Int) {
+        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+            return
+        }
+        Task {
+            let result = await upstreams[upstreamIndex].send(data)
+            if result == .accepted {
+                self.recordTraffic(
+                    upstreamIndex: upstreamIndex,
+                    direction: "outbound",
+                    data: data
+                )
+                return
+            }
+            self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+            self.handleOverloadedUpstreamSend(
+                originalRequestData: data,
+                upstreamIndex: upstreamIndex
+            )
+        }
+    }
+
+    package func debugSnapshot() -> ProxyDebugSnapshot {
+        let initSnapshot = initState.withLockedValue { state in
+            (
+                proxyInitialized: state.initResult != nil,
+                isShuttingDown: state.isShuttingDown
+            )
+        }
+        let toolsSnapshot = toolsListState.withLockedValue { state in
+            (
+                cachedToolsListAvailable: state.cachedResult != nil,
+                warmupInFlight: state.warmupInFlight
+            )
+        }
+        let upstreamSnapshot = upstreamState.withLockedValue { state in
+            state.upstreamStates.enumerated().map { index, upstream in
+                ProxyUpstreamDebugSnapshot(
+                    upstreamIndex: index,
+                    isInitialized: upstream.isInitialized,
+                    initInFlight: upstream.initInFlight,
+                    didSendInitialized: upstream.didSendInitialized,
+                    healthState: debugHealthStateString(upstream.healthState),
+                    consecutiveRequestTimeouts: upstream.consecutiveRequestTimeouts,
+                    consecutiveToolsListFailures: upstream.consecutiveToolsListFailures,
+                    lastToolsListSuccessUptimeNs: upstream.lastToolsListSuccessUptimeNs,
+                    recentStderr: [],
+                    lastDecodeError: nil,
+                    lastBridgeError: nil,
+                    resyncCount: 0,
+                    lastResyncAt: nil,
+                    lastResyncDroppedBytes: nil,
+                    lastResyncPreview: nil,
+                    bufferedStdoutBytes: 0
+                )
+            }
+        }
+        let debugSnapshot = debugState.withLockedValue { state in
+            (
+                upstreams: state.upstreams,
+                recentTraffic: state.recentTraffic
+            )
+        }
+
+        let upstreams = upstreamSnapshot.map { base in
+            guard base.upstreamIndex < debugSnapshot.upstreams.count else { return base }
+            let debug = debugSnapshot.upstreams[base.upstreamIndex]
+            return ProxyUpstreamDebugSnapshot(
+                upstreamIndex: base.upstreamIndex,
+                isInitialized: base.isInitialized,
+                initInFlight: base.initInFlight,
+                didSendInitialized: base.didSendInitialized,
+                healthState: base.healthState,
+                consecutiveRequestTimeouts: base.consecutiveRequestTimeouts,
+                consecutiveToolsListFailures: base.consecutiveToolsListFailures,
+                lastToolsListSuccessUptimeNs: base.lastToolsListSuccessUptimeNs,
+                recentStderr: debug.recentStderr.map(redactedDebugEvent),
+                lastDecodeError: redactedDebugEvent(debug.lastDecodeError),
+                lastBridgeError: redactedDebugEvent(debug.lastBridgeError),
+                resyncCount: debug.resyncCount,
+                lastResyncAt: debug.lastResyncAt,
+                lastResyncDroppedBytes: debug.lastResyncDroppedBytes,
+                lastResyncPreview: debug.lastResyncPreview.map { _ in Self.redactedDebugText },
+                bufferedStdoutBytes: debug.bufferedStdoutBytes
+            )
+        }
+
+        return ProxyDebugSnapshot(
+            generatedAt: Date(),
+            proxyInitialized: initSnapshot.proxyInitialized && !initSnapshot.isShuttingDown,
+            cachedToolsListAvailable: toolsSnapshot.cachedToolsListAvailable,
+            warmupInFlight: toolsSnapshot.warmupInFlight,
+            upstreams: upstreams,
+            recentTraffic: debugSnapshot.recentTraffic.map(redactedTrafficEvent)
+        )
+    }
+
+    func testStateSnapshot() -> TestSnapshot {
+        let initSnapshot = initState.withLockedValue { state in
+            (
+                hasInitResult: state.initResult != nil,
+                initInFlight: state.initInFlight,
+                didWarmSecondary: state.didWarmSecondary,
+                shouldRetryEagerInitializePrimaryAfterWarmInitFailure: state
+                    .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+            )
+        }
+        let upstreams = upstreamState.withLockedValue { state in
+            state.upstreamStates.map { upstream in
+                TestSnapshot.Upstream(
+                    isInitialized: upstream.isInitialized,
+                    initInFlight: upstream.initInFlight,
+                    healthState: upstream.healthState
+                )
+            }
+        }
+        return TestSnapshot(
+            hasInitResult: initSnapshot.hasInitResult,
+            initInFlight: initSnapshot.initInFlight,
+            didWarmSecondary: initSnapshot.didWarmSecondary,
+            shouldRetryEagerInitializePrimaryAfterWarmInitFailure: initSnapshot
+                .shouldRetryEagerInitializePrimaryAfterWarmInitFailure,
+            upstreams: upstreams
+        )
+    }
+
+    func testSessionSnapshot(id: String) -> TestSnapshot.Session? {
+        sessionsState.withLockedValue { state in
+            guard let record = state.sessions[id] else { return nil }
+            return TestSnapshot.Session(
+                generation: record.generation,
+                pinnedUpstreamIndex: record.pinnedUpstreamIndex,
+                initializeUpstreamIndex: record.initializeUpstreamIndex,
+                preferInitializeUpstreamOnNextPin: record.preferInitializeUpstreamOnNextPin,
+                didReceiveInitializeUpstreamMessage: record.didReceiveInitializeUpstreamMessage
+            )
+        }
+    }
+
+    func testSetInitializeRoutingState(
+        sessionId: String,
+        upstreamIndex: Int,
+        preferOnNextPin: Bool,
+        didReceiveInitializeUpstreamMessage: Bool = false
+    ) {
+        setInitializeUpstreamIndexIfNeeded(
+            sessionId: sessionId,
+            upstreamIndex: upstreamIndex,
+            preferOnNextPin: preferOnNextPin
+        )
+        guard didReceiveInitializeUpstreamMessage else { return }
+        sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = true
+        }
+    }
+
+    func redactedDebugEvent(_ event: ProxyDebugEvent?) -> ProxyDebugEvent? {
+        event.map(redactedDebugEvent)
+    }
+
+    func redactedDebugEvent(_ event: ProxyDebugEvent) -> ProxyDebugEvent {
+        ProxyDebugEvent(
+            timestamp: event.timestamp,
+            message: Self.redactedDebugText
+        )
+    }
+
+    func redactedTrafficEvent(_ event: ProxyDebugTrafficEvent) -> ProxyDebugTrafficEvent {
+        ProxyDebugTrafficEvent(
+            timestamp: event.timestamp,
+            upstreamIndex: event.upstreamIndex,
+            direction: event.direction,
+            bytes: event.bytes,
+            preview: Self.redactedDebugText
+        )
+    }
+
+    func handleOverloadedUpstreamSend(
+        originalRequestData: Data,
+        upstreamIndex: Int
+    ) {
+        guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: [])
+        else {
+            return
+        }
+
+        let overloadError: [String: Any] = [
+            "code": -32002,
+            "message": "upstream overloaded",
+        ]
+
+        let responseAny: Any? = {
+            if let object = any as? [String: Any] {
+                guard let id = object["id"], !(id is NSNull) else { return nil }
+                return [
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": overloadError,
+                ]
+            }
+            if let array = any as? [Any] {
+                let objects = array.compactMap { item -> [String: Any]? in
+                    guard let object = item as? [String: Any],
+                        let id = object["id"],
+                        !(id is NSNull)
+                    else {
+                        return nil
+                    }
+                    return [
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": overloadError,
+                    ]
+                }
+                if objects.isEmpty {
+                    return nil
+                }
+                return objects
+            }
+            return nil
+        }()
+
+        guard let responseAny,
+            JSONSerialization.isValidJSONObject(responseAny),
+            let data = try? JSONSerialization.data(withJSONObject: responseAny, options: [])
+        else {
+            return
+        }
+
+        routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+    }
+
+    func upstreamId(from value: Any?) -> Int64? {
+        if let number = value as? NSNumber {
+            return number.int64Value
+        }
+        if let string = value as? String, let number = Int64(string) {
+            return number
+        }
+        return nil
+    }
+
+    func isServerInitiatedMessage(_ value: Any) -> Bool {
+        if let object = value as? [String: Any] {
+            return object["method"] is String
+        }
+        if let array = value as? [Any] {
+            return array.contains { item in
+                guard let object = item as? [String: Any] else { return false }
+                return object["method"] is String
+            }
+        }
+        return false
+    }
+
+    func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+        recordTraffic(
+            upstreamIndex: upstreamIndex,
+            direction: "inbound_unmapped",
+            data: data
+        )
+        guard let any = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            logger.debug(
+                "Dropping unmapped upstream message (invalid JSON)",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                ]
+            )
+            return
+        }
+
+        let serverInitiatedPayloads: [Data] = {
+            if let object = any as? [String: Any] {
+                guard object["method"] is String else { return [] }
+                return [data]
+            }
+            if let array = any as? [Any] {
+                var payloads: [Data] = []
+                payloads.reserveCapacity(array.count)
+                for item in array {
+                    guard let object = item as? [String: Any],
+                        object["method"] is String,
+                        JSONSerialization.isValidJSONObject(object),
+                        let encoded = try? JSONSerialization.data(
+                            withJSONObject: object, options: [])
+                    else {
+                        continue
+                    }
+                    payloads.append(encoded)
+                }
+                return payloads
+            }
+            return []
+        }()
+
+        guard !serverInitiatedPayloads.isEmpty else {
+            logger.debug(
+                "Dropping unmapped upstream response",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(data.count)"),
+                ]
+            )
+            return
+        }
+
+        let routedTargets = sessionsState.withLockedValue {
+            state -> [SessionContext] in
+            var targets: [SessionContext] = []
+            targets.reserveCapacity(state.sessions.count)
+            let keys = Array(state.sessions.keys)
+            for key in keys {
+                guard let record = state.sessions[key] else { continue }
+                if record.pinnedUpstreamIndex == upstreamIndex {
+                    targets.append(record.context)
+                } else if record.pinnedUpstreamIndex == nil
+                    && record.initializeUpstreamIndex == upstreamIndex
+                {
+                    state.sessions[key]?.didReceiveInitializeUpstreamMessage = true
+                    targets.append(record.context)
+                }
+            }
+            return targets
+        }
+
+        if !routedTargets.isEmpty {
+            for payload in serverInitiatedPayloads {
+                for session in routedTargets {
+                    session.router.handleIncoming(payload)
+                }
+            }
+            return
+        }
+
+        logger.debug(
+            "Dropping unmapped upstream message (no routed target sessions)",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "bytes": .string("\(data.count)"),
+            ]
+        )
+    }
+
+    func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
+        let event = ProxyDebugEvent(timestamp: Date(), message: message)
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].recentStderr.append(event)
+            if state.upstreams[upstreamIndex].recentStderr.count > debugStderrLimit {
+                state.upstreams[upstreamIndex].recentStderr.removeFirst(
+                    state.upstreams[upstreamIndex].recentStderr.count - debugStderrLimit
+                )
+            }
+            if message.contains("Could not decode agent message") {
+                state.upstreams[upstreamIndex].lastDecodeError = event
+            }
+            if message.contains("BridgeError") {
+                state.upstreams[upstreamIndex].lastBridgeError = event
+            }
+        }
+    }
+
+    func handleUpstreamRecovery(_ recovery: StdioFramerRecovery, upstreamIndex: Int) {
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].resyncCount += 1
+            state.upstreams[upstreamIndex].lastResyncAt = Date()
+            state.upstreams[upstreamIndex].lastResyncDroppedBytes = recovery.droppedPrefixBytes
+            if let recovered = recovery.previewRecoveredMessage, !recovered.isEmpty {
+                state.upstreams[upstreamIndex].lastResyncPreview = recovered
+            } else {
+                state.upstreams[upstreamIndex].lastResyncPreview = recovery.previewBeforeDrop
+            }
+        }
+    }
+
+    func handleBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {
+        debugState.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].bufferedStdoutBytes = size
+        }
+    }
+
+    func recordTraffic(
+        upstreamIndex: Int,
+        direction: String,
+        data: Data
+    ) {
+        let event = ProxyDebugTrafficEvent(
+            timestamp: Date(),
+            upstreamIndex: upstreamIndex,
+            direction: direction,
+            bytes: data.count,
+            preview: Self.redactedDebugText
+        )
+        debugState.withLockedValue { state in
+            state.recentTraffic.append(event)
+            if state.recentTraffic.count > debugTrafficLimit {
+                state.recentTraffic.removeFirst(state.recentTraffic.count - debugTrafficLimit)
+            }
+        }
+    }
+
+    func debugHealthStateString(_ state: UpstreamHealthState) -> String {
+        switch state {
+        case .healthy:
+            return "healthy"
+        case .degraded:
+            return "degraded"
+        case .quarantined(let untilUptimeNs):
+            return "quarantined(untilUptimeNs:\(untilUptimeNs))"
+        }
+    }
+}

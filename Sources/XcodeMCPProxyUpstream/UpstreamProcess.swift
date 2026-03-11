@@ -1,20 +1,37 @@
 import Foundation
 import Darwin
 import Logging
+import XcodeMCPProxyCore
 
-actor UpstreamProcess: UpstreamClient {
-    struct Config {
-        var command: String
-        var args: [String]
-        var environment: [String: String]
-        var restartInitialDelay: TimeInterval
-        var restartMaxDelay: TimeInterval
-        var maxQueuedWriteBytes: Int
+package actor UpstreamProcess: UpstreamClient {
+    package struct Config {
+        package var command: String
+        package var args: [String]
+        package var environment: [String: String]
+        package var restartInitialDelay: TimeInterval
+        package var restartMaxDelay: TimeInterval
+        package var maxQueuedWriteBytes: Int
+
+        package init(
+            command: String,
+            args: [String],
+            environment: [String: String],
+            restartInitialDelay: TimeInterval,
+            restartMaxDelay: TimeInterval,
+            maxQueuedWriteBytes: Int
+        ) {
+            self.command = command
+            self.args = args
+            self.environment = environment
+            self.restartInitialDelay = restartInitialDelay
+            self.restartMaxDelay = restartMaxDelay
+            self.maxQueuedWriteBytes = maxQueuedWriteBytes
+        }
     }
 
     typealias Event = UpstreamEvent
 
-    nonisolated let events: AsyncStream<UpstreamEvent>
+    package nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
 
     private let config: Config
@@ -35,7 +52,7 @@ actor UpstreamProcess: UpstreamClient {
     private let logger: Logger = ProxyLogging.make("upstream")
     private let maxBufferedStderrBytes = 16 * 1024
 
-    init(config: Config) {
+    package init(config: Config) {
         self.config = config
         self.restartDelay = config.restartInitialDelay
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
@@ -45,12 +62,12 @@ actor UpstreamProcess: UpstreamClient {
         self.continuation = streamContinuation
     }
 
-    func start() async {
+    package func start() async {
         isStopping = false
         startLocked()
     }
 
-    func stop() async {
+    package func stop() async {
         isStopping = true
         restartTask?.cancel()
         restartTask = nil
@@ -59,7 +76,7 @@ actor UpstreamProcess: UpstreamClient {
         continuation.finish()
     }
 
-    func requestRestart() async {
+    package func requestRestart() async {
         guard !isStopping else { return }
         restartTask?.cancel()
         restartTask = nil
@@ -76,7 +93,7 @@ actor UpstreamProcess: UpstreamClient {
         // The termination handler will emit an .exit event and schedule a restart.
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    package func send(_ data: Data) async -> UpstreamSendResult {
         if process == nil {
             startLocked()
         }
@@ -231,13 +248,6 @@ actor UpstreamProcess: UpstreamClient {
             }
             continuation.yield(.message(message))
         }
-    }
-
-    private func isValidJSONPayload(_ data: Data) -> Bool {
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return false
-        }
-        return json is [String: Any] || json is [Any]
     }
 
     private func resetBufferedStdoutBytesIfNeeded() {

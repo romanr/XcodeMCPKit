@@ -57,25 +57,40 @@ private final class PipeCollector: @unchecked Sendable {
     }
 }
 
-struct ProcessRequest: Sendable {
-    let label: String
-    let executablePath: String
-    let arguments: [String]
-    let input: String?
+package struct ProcessRequest: Sendable {
+    package let label: String
+    package let executablePath: String
+    package let arguments: [String]
+    package let input: String?
+
+    package init(label: String, executablePath: String, arguments: [String], input: String?) {
+        self.label = label
+        self.executablePath = executablePath
+        self.arguments = arguments
+        self.input = input
+    }
 }
 
-struct ProcessOutput: Sendable {
-    let terminationStatus: Int32
-    let stdout: String
-    let stderr: String
+package struct ProcessOutput: Sendable {
+    package let terminationStatus: Int32
+    package let stdout: String
+    package let stderr: String
+
+    package init(terminationStatus: Int32, stdout: String, stderr: String) {
+        self.terminationStatus = terminationStatus
+        self.stdout = stdout
+        self.stderr = stderr
+    }
 }
 
-protocol ProcessRunning: Sendable {
+package protocol ProcessRunning: Sendable {
     func run(_ request: ProcessRequest) async throws -> ProcessOutput
 }
 
-struct ProcessRunner: ProcessRunning {
-    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+package struct ProcessRunner: ProcessRunning {
+    package init() {}
+
+    package func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()

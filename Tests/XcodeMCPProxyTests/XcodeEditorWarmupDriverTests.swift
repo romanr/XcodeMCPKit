@@ -1,8 +1,9 @@
 import Foundation
 import NIOEmbedded
 import Testing
+import XcodeMCPProxyUpstream
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyXcodeSupport
 
 @Suite
 struct XcodeEditorWarmupDriverTests {

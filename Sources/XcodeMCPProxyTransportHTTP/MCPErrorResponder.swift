@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPProxyCore
 
 enum MCPErrorResponder {
     static func errorResponseData(

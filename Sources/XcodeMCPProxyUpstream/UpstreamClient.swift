@@ -1,6 +1,6 @@
 import Foundation
 
-enum UpstreamEvent: Sendable {
+package enum UpstreamEvent: Sendable {
     case message(Data)
     case stderr(String)
     case stdoutRecovery(StdioFramerRecovery)
@@ -8,12 +8,12 @@ enum UpstreamEvent: Sendable {
     case exit(Int32)
 }
 
-enum UpstreamSendResult: Sendable {
+package enum UpstreamSendResult: Sendable {
     case accepted
     case overloaded
 }
 
-protocol UpstreamClient: Sendable {
+package protocol UpstreamClient: Sendable {
     var events: AsyncStream<UpstreamEvent> { get }
     func start() async
     func stop() async

@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyCore
 
 @Suite
 struct SSECodecTests {

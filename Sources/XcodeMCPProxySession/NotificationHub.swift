@@ -2,30 +2,30 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-final class NotificationHub: Sendable {
+package final class NotificationHub: Sendable {
     private let sseHub = SSEHub()
 
-    var hasClients: Bool {
+    package var hasClients: Bool {
         hasSseClients
     }
 
-    var hasSseClients: Bool {
+    package var hasSseClients: Bool {
         sseHub.hasClients
     }
 
-    func addSse(_ channel: Channel) {
+    package func addSse(_ channel: Channel) {
         sseHub.add(channel)
     }
 
-    func removeSse(_ channel: Channel) {
+    package func removeSse(_ channel: Channel) {
         sseHub.remove(channel)
     }
 
-    func broadcast(_ data: Data) {
+    package func broadcast(_ data: Data) {
         sseHub.broadcast(data)
     }
 
-    func closeAll() {
+    package func closeAll() {
         sseHub.closeAll()
     }
 }

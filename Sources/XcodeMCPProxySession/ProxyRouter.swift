@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-final class ProxyRouter: Sendable {
+package final class ProxyRouter: Sendable {
     private struct Pending: Sendable {
         var promise: EventLoopPromise<ByteBuffer>
         var timeout: Scheduled<Void>?
@@ -20,7 +20,7 @@ final class ProxyRouter: Sendable {
     private let hasActiveClients: @Sendable () -> Bool
     private let sendNotification: @Sendable (Data) -> Void
 
-    init(
+    package init(
         requestTimeout: TimeAmount?,
         notificationBufferLimit: Int = 50,
         hasActiveClients: @escaping @Sendable () -> Bool,
@@ -32,7 +32,7 @@ final class ProxyRouter: Sendable {
         self.sendNotification = sendNotification
     }
 
-    func registerRequest(
+    package func registerRequest(
         idKey: String,
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil
@@ -51,7 +51,7 @@ final class ProxyRouter: Sendable {
         return promise.futureResult
     }
 
-    func registerBatch(
+    package func registerBatch(
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil
     ) -> EventLoopFuture<ByteBuffer> {
@@ -69,7 +69,7 @@ final class ProxyRouter: Sendable {
         return promise.futureResult
     }
 
-    func handleIncoming(_ data: Data) {
+    package func handleIncoming(_ data: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             notify(data)
             return
@@ -96,7 +96,7 @@ final class ProxyRouter: Sendable {
         notify(data)
     }
 
-    func drainBufferedNotifications() -> [Data] {
+    package func drainBufferedNotifications() -> [Data] {
         state.withLockedValue { state in
             let drained = state.notificationBuffer
             state.notificationBuffer.removeAll()

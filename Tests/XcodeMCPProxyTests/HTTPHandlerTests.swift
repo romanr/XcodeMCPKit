@@ -4,8 +4,12 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
 import Testing
+import XcodeMCPProxyCore
+import XcodeMCPProxySession
+import XcodeMCPProxyUpstream
+import XcodeMCPProxyXcodeSupport
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyTransportHTTP
 
 @Suite
 struct HTTPHandlerTests {

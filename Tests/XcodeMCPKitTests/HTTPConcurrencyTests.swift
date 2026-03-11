@@ -2,8 +2,11 @@ import Foundation
 import NIO
 import NIOHTTP1
 import Testing
-
-@testable import XcodeMCPProxy
+import XcodeMCPProxyCore
+import XcodeMCPProxySession
+@testable import XcodeMCPProxyTransportHTTP
+import XcodeMCPProxyUpstream
+import XcodeMCPProxyXcodeSupport
 
 @Suite(.serialized)
 struct HTTPConcurrencyTests {

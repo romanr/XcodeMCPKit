@@ -1,13 +1,13 @@
 import Foundation
 
-actor RefreshCodeIssuesCoordinator {
-    struct Permit: Sendable {
-        let queuePosition: Int
-        let pendingForKey: Int
-        let pendingTotal: Int
+package actor RefreshCodeIssuesCoordinator {
+    package struct Permit: Sendable {
+        package let queuePosition: Int
+        package let pendingForKey: Int
+        package let pendingTotal: Int
     }
 
-    enum AcquireError: Error {
+    package enum AcquireError: Error {
         case queueLimitExceeded
         case queueWaitTimedOut
     }
@@ -26,17 +26,17 @@ actor RefreshCodeIssuesCoordinator {
     private var pendingWaiterCount = 0
     private var waitersByKey: [String: [Waiter]] = [:]
 
-    static func defaultQueueWaitTimeout(for requestTimeout: TimeInterval) -> TimeInterval {
+    package static func defaultQueueWaitTimeout(for requestTimeout: TimeInterval) -> TimeInterval {
         requestTimeout > 0 ? min(requestTimeout, 30) : 30
     }
 
-    static func makeDefault(requestTimeout: TimeInterval) -> RefreshCodeIssuesCoordinator {
+    package static func makeDefault(requestTimeout: TimeInterval) -> RefreshCodeIssuesCoordinator {
         RefreshCodeIssuesCoordinator(
             queueWaitTimeout: defaultQueueWaitTimeout(for: requestTimeout)
         )
     }
 
-    init(
+    package init(
         maxPendingPerKey: Int = 4,
         maxPendingTotal: Int = 32,
         queueWaitTimeout: TimeInterval = 30
@@ -46,7 +46,7 @@ actor RefreshCodeIssuesCoordinator {
         self.queueWaitTimeoutNanoseconds = Self.nanoseconds(from: queueWaitTimeout)
     }
 
-    func withPermit<T: Sendable>(
+    package func withPermit<T: Sendable>(
         key: String,
         body: @Sendable (_ permit: Permit) async throws -> T
     ) async throws -> T {

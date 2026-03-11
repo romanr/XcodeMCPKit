@@ -1,6 +1,6 @@
 import Foundation
 
-enum UpstreamHealthState: Sendable {
+package enum UpstreamHealthState: Sendable {
     case healthy
     case degraded
     case quarantined(untilUptimeNs: UInt64)

@@ -2,6 +2,10 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
+import XcodeMCPProxyCore
+import XcodeMCPProxySession
+import XcodeMCPProxyTransportHTTP
+import XcodeMCPProxyXcodeSupport
 
 public final class ProxyServer {
     private let config: ProxyConfig

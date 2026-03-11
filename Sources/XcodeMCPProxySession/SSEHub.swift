@@ -3,6 +3,7 @@ import Logging
 import NIO
 import NIOHTTP1
 import NIOConcurrencyHelpers
+import XcodeMCPProxyCore
 
 final class SSEHub: Sendable {
     private struct State: Sendable {

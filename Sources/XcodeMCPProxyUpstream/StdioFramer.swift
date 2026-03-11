@@ -1,25 +1,45 @@
 import Foundation
 
-struct StdioFramerRecovery: Sendable {
-    enum Kind: String, Codable, Sendable {
+package struct StdioFramerRecovery: Sendable {
+    package enum Kind: String, Codable, Sendable {
         case resync
         case fatalClear
     }
 
-    let kind: Kind
-    let droppedPrefixBytes: Int
-    let candidateOffset: Int?
-    let previewBeforeDrop: String
-    let previewRecoveredMessage: String?
+    package let kind: Kind
+    package let droppedPrefixBytes: Int
+    package let candidateOffset: Int?
+    package let previewBeforeDrop: String
+    package let previewRecoveredMessage: String?
+
+    package init(
+        kind: Kind,
+        droppedPrefixBytes: Int,
+        candidateOffset: Int?,
+        previewBeforeDrop: String,
+        previewRecoveredMessage: String?
+    ) {
+        self.kind = kind
+        self.droppedPrefixBytes = droppedPrefixBytes
+        self.candidateOffset = candidateOffset
+        self.previewBeforeDrop = previewBeforeDrop
+        self.previewRecoveredMessage = previewRecoveredMessage
+    }
 }
 
-struct StdioFramerAppendResult: Sendable {
-    let messages: [Data]
-    let recoveries: [StdioFramerRecovery]
-    let bufferedByteCount: Int
+package struct StdioFramerAppendResult: Sendable {
+    package let messages: [Data]
+    package let recoveries: [StdioFramerRecovery]
+    package let bufferedByteCount: Int
+
+    package init(messages: [Data], recoveries: [StdioFramerRecovery], bufferedByteCount: Int) {
+        self.messages = messages
+        self.recoveries = recoveries
+        self.bufferedByteCount = bufferedByteCount
+    }
 }
 
-final class StdioFramer {
+package final class StdioFramer {
     private enum JSONPrefixParseResult {
         case complete(Data.Index)
         case incomplete
@@ -32,7 +52,9 @@ final class StdioFramer {
 
     private var buffer = Data()
 
-    func append(_ data: Data) -> StdioFramerAppendResult {
+    package init() {}
+
+    package func append(_ data: Data) -> StdioFramerAppendResult {
         guard !data.isEmpty else {
             return StdioFramerAppendResult(messages: [], recoveries: [], bufferedByteCount: buffer.count)
         }

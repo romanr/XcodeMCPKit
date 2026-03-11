@@ -1,9 +1,11 @@
 import Foundation
 import NIO
 import Testing
+import XcodeMCPProxyCore
 import XcodeMCPTestSupport
+import XcodeMCPProxyUpstream
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxySession
 
 @Suite(.serialized)
 struct SessionManagerTests {

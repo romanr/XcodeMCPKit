@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOHTTP1
+import XcodeMCPProxyCore
 
 enum MCPResponseEmitter {
     static func sendJSON(

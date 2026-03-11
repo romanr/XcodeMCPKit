@@ -319,10 +319,7 @@ extension SessionManager {
             return timeout
         }
         timeout?.cancel()
-        debugState.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
-            state.upstreams[upstreamIndex] = DebugUpstreamState()
-        }
+        debugRecorder.resetUpstream(upstreamIndex)
     }
 
     func markUpstreamInitialized(upstreamIndex: Int) {

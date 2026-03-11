@@ -75,22 +75,6 @@ package final class SessionManager: Sendable, SessionManaging {
         let upstreams: [Upstream]
     }
 
-    package struct DebugUpstreamState: Sendable {
-        package var recentStderr: [ProxyDebugEvent] = []
-        package var lastDecodeError: ProxyDebugEvent?
-        package var lastBridgeError: ProxyDebugEvent?
-        package var resyncCount = 0
-        package var lastResyncAt: Date?
-        package var lastResyncDroppedBytes: Int?
-        package var lastResyncPreview: String?
-        package var bufferedStdoutBytes = 0
-    }
-
-    package struct DebugState: Sendable {
-        package var upstreams: [DebugUpstreamState] = []
-        package var recentTraffic: [ProxyDebugTrafficEvent] = []
-    }
-
     package struct InitPending: Sendable {
         package let eventLoop: EventLoop
         package let promise: EventLoopPromise<ByteBuffer>
@@ -115,15 +99,13 @@ package final class SessionManager: Sendable, SessionManaging {
     package let sessionRegistry: SessionRegistry
     package let initState = NIOLockedValueBox(InitState())
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
-    package let debugState = NIOLockedValueBox(DebugState())
+    package let debugRecorder: ProxyDebugRecorder
     package let eventLoop: EventLoop
     package let idMapper: UpstreamIdMapper
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamClient]
     package let toolsListCache = ToolsListCache()
-    package let debugTrafficLimit = 50
-    package let debugStderrLimit = 20
 
     package struct UpstreamState: Sendable {
         package var isInitialized = false
@@ -160,14 +142,11 @@ package final class SessionManager: Sendable, SessionManaging {
         self.eventLoop = eventLoop
         self.upstreams = upstreams
         self.sessionRegistry = SessionRegistry(config: config)
+        self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.idMapper = UpstreamIdMapper(upstreamCount: upstreams.count)
         upstreamState.withLockedValue { state in
             state.upstreamStates = Array(repeating: UpstreamState(), count: upstreams.count)
             state.nextPick = 0
-        }
-        debugState.withLockedValue { state in
-            state.upstreams = Array(repeating: DebugUpstreamState(), count: upstreams.count)
-            state.recentTraffic = []
         }
 
         var tasks: [Task<Void, Never>] = []

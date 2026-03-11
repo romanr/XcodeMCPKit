@@ -93,19 +93,19 @@ extension XcodeMCPProxyServerCommand {
 
         var lines: [String] = []
         lines.reserveCapacity(8)
-        lines.append("error: listen \(displayHost):\(port) は既に使用中です（Address already in use）。")
+        lines.append("error: listen \(displayHost):\(port) is already in use (Address already in use).")
         if pids.count == 1 {
-            lines.append("起動中の xcode-mcp-proxy-server を検出しました (pid: \(pids[0])).")
+            lines.append("Detected a running xcode-mcp-proxy-server (pid: \(pids[0])).")
         } else if pids.count > 1 {
             let formatted = pids.map(String.init).joined(separator: ", ")
-            lines.append("起動中の xcode-mcp-proxy-server を検出しました (pids: \(formatted)).")
+            lines.append("Detected running xcode-mcp-proxy-server processes (pids: \(formatted)).")
         }
-        lines.append("既存プロセスを終了してから再実行してください。")
+        lines.append("Terminate the existing process and try again.")
         lines.append(
-            "強制再開始する場合は `--force-restart` を付けて再実行すると、既存の xcode-mcp-proxy-server を終了して起動し直します。"
+            "To force a restart, rerun with `--force-restart`; this will terminate the existing xcode-mcp-proxy-server and start a new one."
         )
         lines.append("")
-        lines.append("例:")
+        lines.append("Examples:")
         lines.append("  pkill -x xcode-mcp-proxy-server")
         lines.append("  xcode-mcp-proxy-server --force-restart")
         return lines.joined(separator: "\n")

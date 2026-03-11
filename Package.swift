@@ -80,6 +80,7 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyCore",
                 "XcodeMCPProxyUpstream",
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
             ],
             swiftSettings: strictSwiftSettings

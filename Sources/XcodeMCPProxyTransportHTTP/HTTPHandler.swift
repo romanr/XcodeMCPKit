@@ -7,9 +7,6 @@ import NIOConcurrencyHelpers
 import XcodeMCPProxyCore
 import XcodeMCPProxySession
 import XcodeMCPProxyXcodeSupport
-import XcodeMCPProxyCore
-import XcodeMCPProxySession
-import XcodeMCPProxyXcodeSupport
 
 package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package typealias InboundIn = HTTPServerRequestPart
@@ -30,21 +27,6 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         package var bodyTooLarge = false
     }
 
-    package struct RefreshCodeIssuesRequest: Sendable {
-        package static let toolName = "XcodeRefreshCodeIssuesInFile"
-        package static let globalQueueKey = "__global__"
-
-        package let tabIdentifier: String?
-        package let filePath: String?
-
-        package var queueKey: String {
-            guard let tabIdentifier, tabIdentifier.isEmpty == false else {
-                return Self.globalQueueKey
-            }
-            return tabIdentifier
-        }
-    }
-
     package struct PreparedForwardRequest {
         package let transform: RequestTransform
         package let upstreamIndex: Int
@@ -62,25 +44,12 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         case invalidUpstreamResponse
     }
 
-    package enum RefreshForwardAttemptResult {
-        case success(Data)
-        case timeout(responseIds: [RPCId], isBatch: Bool)
-        case upstreamUnavailable(responseIds: [RPCId], isBatch: Bool)
-        case overloaded(responseIds: [RPCId], isBatch: Bool)
-        case invalidRequest
-        case invalidUpstreamResponse
-    }
-
-    static let refreshRetryDelaysNanos: [UInt64] = [
-        200_000_000,
-        500_000_000,
-    ]
-
     package let state = NIOLockedValueBox(State())
     package let config: ProxyConfig
     package let sessionManager: any SessionManaging
-    package let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
     package let warmupDriver: XcodeEditorWarmupDriver
+    package let windowQueryService: XcodeWindowQueryService
+    package let refreshWorkflow: RefreshCodeIssuesWorkflow
     package let logger: Logger = ProxyLogging.make("http")
 
     package init(
@@ -91,12 +60,18 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     ) {
         self.config = config
         self.sessionManager = sessionManager
-        self.refreshCodeIssuesCoordinator =
+        let refreshCoordinator =
             refreshCodeIssuesCoordinator
             ?? RefreshCodeIssuesCoordinator.makeDefault(
                 requestTimeout: config.requestTimeout
             )
         self.warmupDriver = warmupDriver
+        self.windowQueryService = XcodeWindowQueryService()
+        self.refreshWorkflow = RefreshCodeIssuesWorkflow(
+            coordinator: refreshCoordinator,
+            warmupDriver: warmupDriver,
+            logger: ProxyLogging.make("http.refresh")
+        )
     }
 
     package func channelRead(context: ChannelHandlerContext, data: NIOAny) {

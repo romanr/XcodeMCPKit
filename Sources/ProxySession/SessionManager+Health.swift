@@ -6,22 +6,7 @@ import ProxyUpstream
 
 extension SessionManager {
     func clearPinnedSessions(forUpstreamIndex upstreamIndex: Int) -> Int {
-        sessionsState.withLockedValue { state -> Int in
-            let keys = Array(state.sessions.keys)
-            var cleared = 0
-            for key in keys {
-                if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
-                    state.sessions[key]?.pinnedUpstreamIndex = nil
-                    state.sessions[key]?.initializeUpstreamIndex = nil
-                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
-                    cleared += 1
-                } else if state.sessions[key]?.initializeUpstreamIndex == upstreamIndex {
-                    state.sessions[key]?.initializeUpstreamIndex = nil
-                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
-                }
-            }
-            return cleared
-        }
+        sessionRegistry.clearPinnedSessions(forUpstreamIndex: upstreamIndex)
     }
 
     func markRequestSucceeded(upstreamIndex: Int) {

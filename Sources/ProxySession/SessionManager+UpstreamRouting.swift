@@ -124,22 +124,7 @@ extension SessionManager {
         clearUpstreamState(upstreamIndex: upstreamIndex)
         idMapper.reset(upstreamIndex: upstreamIndex)
 
-        let clearedPins = sessionsState.withLockedValue { state -> Int in
-            let keys = Array(state.sessions.keys)
-            var cleared = 0
-            for key in keys {
-                if state.sessions[key]?.pinnedUpstreamIndex == upstreamIndex {
-                    state.sessions[key]?.pinnedUpstreamIndex = nil
-                    state.sessions[key]?.initializeUpstreamIndex = nil
-                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
-                    cleared += 1
-                } else if state.sessions[key]?.initializeUpstreamIndex == upstreamIndex {
-                    state.sessions[key]?.initializeUpstreamIndex = nil
-                    state.sessions[key]?.preferInitializeUpstreamOnNextPin = false
-                }
-            }
-            return cleared
-        }
+        let clearedPins = sessionRegistry.clearPinnedSessions(forUpstreamIndex: upstreamIndex)
         if clearedPins > 0 {
             logger.debug(
                 "Cleared pinned sessions for exited upstream",
@@ -346,16 +331,7 @@ extension SessionManager {
     }
 
     func testSessionSnapshot(id: String) -> TestSnapshot.Session? {
-        sessionsState.withLockedValue { state in
-            guard let record = state.sessions[id] else { return nil }
-            return TestSnapshot.Session(
-                generation: record.generation,
-                pinnedUpstreamIndex: record.pinnedUpstreamIndex,
-                initializeUpstreamIndex: record.initializeUpstreamIndex,
-                preferInitializeUpstreamOnNextPin: record.preferInitializeUpstreamOnNextPin,
-                didReceiveInitializeUpstreamMessage: record.didReceiveInitializeUpstreamMessage
-            )
-        }
+        sessionRegistry.testSnapshot(id: id)
     }
 
     func testSetInitializeRoutingState(
@@ -370,9 +346,7 @@ extension SessionManager {
             preferOnNextPin: preferOnNextPin
         )
         guard didReceiveInitializeUpstreamMessage else { return }
-        sessionsState.withLockedValue { state in
-            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = true
-        }
+        sessionRegistry.markDidReceiveInitializeUpstreamMessage(for: sessionId)
     }
 
     func redactedDebugEvent(_ event: ProxyDebugEvent?) -> ProxyDebugEvent? {
@@ -526,24 +500,7 @@ extension SessionManager {
             return
         }
 
-        let routedTargets = sessionsState.withLockedValue {
-            state -> [SessionContext] in
-            var targets: [SessionContext] = []
-            targets.reserveCapacity(state.sessions.count)
-            let keys = Array(state.sessions.keys)
-            for key in keys {
-                guard let record = state.sessions[key] else { continue }
-                if record.pinnedUpstreamIndex == upstreamIndex {
-                    targets.append(record.context)
-                } else if record.pinnedUpstreamIndex == nil
-                    && record.initializeUpstreamIndex == upstreamIndex
-                {
-                    state.sessions[key]?.didReceiveInitializeUpstreamMessage = true
-                    targets.append(record.context)
-                }
-            }
-            return targets
-        }
+        let routedTargets = sessionRegistry.routedTargets(forUpstreamIndex: upstreamIndex)
 
         if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {

@@ -233,12 +233,7 @@ extension SessionManager {
                 isShuttingDown: state.isShuttingDown
             )
         }
-        let toolsSnapshot = toolsListState.withLockedValue { state in
-            (
-                cachedToolsListAvailable: state.cachedResult != nil,
-                warmupInFlight: state.warmupInFlight
-            )
-        }
+        let toolsSnapshot = toolsListCache.snapshot()
         let upstreamSnapshot = upstreamState.withLockedValue { state in
             state.upstreamStates.enumerated().map { index, upstream in
                 ProxyUpstreamDebugSnapshot(
@@ -294,7 +289,7 @@ extension SessionManager {
         return ProxyDebugSnapshot(
             generatedAt: Date(),
             proxyInitialized: initSnapshot.proxyInitialized && !initSnapshot.isShuttingDown,
-            cachedToolsListAvailable: toolsSnapshot.cachedToolsListAvailable,
+            cachedToolsListAvailable: toolsSnapshot.cachedResult != nil,
             warmupInFlight: toolsSnapshot.warmupInFlight,
             upstreams: upstreams,
             recentTraffic: debugSnapshot.recentTraffic.map(redactedTrafficEvent)

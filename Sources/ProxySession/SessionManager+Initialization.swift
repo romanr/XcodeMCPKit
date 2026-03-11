@@ -349,21 +349,6 @@ extension SessionManager {
     }
 
     func toolsListInternalSessionId() -> String {
-        if let existing = toolsListState.withLockedValue({ $0.internalSessionId }) {
-            return existing
-        }
-
-        var candidate: String
-        repeat {
-            candidate = "__tools_list_warmup__:" + UUID().uuidString
-        } while hasSession(id: candidate)
-
-        return toolsListState.withLockedValue { state in
-            if let existing = state.internalSessionId {
-                return existing
-            }
-            state.internalSessionId = candidate
-            return candidate
-        }
+        toolsListCache.internalSessionId { hasSession(id: $0) }
     }
 }

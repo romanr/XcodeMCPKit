@@ -99,13 +99,6 @@ package final class SessionManager: Sendable, SessionManaging {
         package let originalId: RPCId
     }
 
-    package struct ToolsListState: Sendable {
-        package var cachedResult: JSONValue?
-        // Tracks a best-effort warmup to populate the in-memory tools/list cache once.
-        package var warmupInFlight = false
-        package var internalSessionId: String?
-    }
-
     package struct InitState: Sendable {
         package var initResult: JSONValue?
         package var initPending: [InitPending] = []
@@ -128,7 +121,7 @@ package final class SessionManager: Sendable, SessionManaging {
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamClient]
-    package let toolsListState = NIOLockedValueBox(ToolsListState())
+    package let toolsListCache = ToolsListCache()
     package let debugTrafficLimit = 50
     package let debugStderrLimit = 20
 
@@ -280,35 +273,19 @@ package final class SessionManager: Sendable, SessionManaging {
     }
 
     package func cachedToolsListResult() -> JSONValue? {
-        toolsListState.withLockedValue { state in
-            return state.cachedResult
-        }
+        toolsListCache.cachedResult()
     }
 
     package func setCachedToolsListResult(_ result: JSONValue) {
         guard isValidToolsListResult(result) else { return }
-        toolsListState.withLockedValue { state in
-            state.cachedResult = result
-        }
+        toolsListCache.setCachedResult(result)
     }
 
     package func refreshToolsListIfNeeded() {
-        guard config.prewarmToolsList else { return }
-        guard isInitialized() else { return }
-
-        let shouldStart = toolsListState.withLockedValue { state -> Bool in
-            // If we already cached a valid tool list, keep it stable for the lifetime of this proxy process.
-            // tools/list is not expected to change during normal operation, and background refreshes can cause
-            // upstream churn (including Xcode permission dialogs) when upstreams are slow or flaky.
-            if state.cachedResult != nil {
-                return false
-            }
-            if state.warmupInFlight {
-                return false
-            }
-            state.warmupInFlight = true
-            return true
-        }
+        let shouldStart = toolsListCache.beginWarmupIfNeeded(
+            isEnabled: config.prewarmToolsList,
+            isInitialized: isInitialized()
+        )
         guard shouldStart else { return }
 
         Task { [weak self] in

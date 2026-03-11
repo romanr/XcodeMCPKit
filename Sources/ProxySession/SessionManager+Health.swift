@@ -233,7 +233,7 @@ extension SessionManager {
 
     func refreshToolsList() async {
         defer {
-            toolsListState.withLockedValue { $0.warmupInFlight = false }
+            toolsListCache.endWarmup()
         }
 
         let refreshTimeout: TimeAmount = .seconds(5)

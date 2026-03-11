@@ -3,14 +3,14 @@ import Logging
 import NIO
 import NIOHTTP1
 import ProxyCore
-import ProxySession
-import ProxyTransportHTTP
-import ProxyXcodeSupport
+import ProxyRuntime
+import ProxyHTTPTransport
+import ProxyFeatureXcode
 
 public final class ProxyServer {
     private let config: ProxyConfig
     private let group: EventLoopGroup
-    private let sessionManager: SessionManager
+    private let sessionManager: RuntimeCoordinator
     private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
     private let warmupDriver: XcodeEditorWarmupDriver
     private var channels: [Channel] = []
@@ -20,7 +20,7 @@ public final class ProxyServer {
         self.config = config
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let eventLoop = group.next()
-        self.sessionManager = SessionManager(config: config, eventLoop: eventLoop)
+        self.sessionManager = RuntimeCoordinator(config: config, eventLoop: eventLoop)
         self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
             requestTimeout: config.requestTimeout
         )

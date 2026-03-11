@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPProxyCommands
+import ProxyCLI
 
 let command = XcodeMCPProxyInstallCommand()
 let exitCode = command.run(

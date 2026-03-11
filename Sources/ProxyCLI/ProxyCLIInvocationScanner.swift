@@ -1,0 +1,199 @@
+import Foundation
+
+package struct ProxyCLIAdapterScan {
+    package var showHelp = false
+    package var usesRemovedURLHelper = false
+    package var hasExplicitURL = false
+    package var hasStdioFlag = false
+    package var serverOnlyFlag: String?
+}
+
+package struct ProxyCLIServerScan {
+    package var forwardedArgs: [String] = []
+    package var showHelp = false
+    package var hasListenFlag = false
+    package var hasHostFlag = false
+    package var hasPortFlag = false
+    package var hasXcodePidFlag = false
+    package var hasLazyInitFlag = false
+    package var forceRestart = false
+    package var dryRun = false
+}
+
+package struct ProxyCLIInstallScan {
+    package var showHelp = false
+}
+
+package enum ProxyCLIInvocationScanner {
+    private static let serverOnlyFlags: Set<String> = [
+        "--listen",
+        "--host",
+        "--port",
+        "--max-body-bytes",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--xcode-pid",
+        "--session-id",
+        "--lazy-init",
+    ]
+
+    private static let serverOnlyValueFlags: Set<String> = [
+        "--listen",
+        "--host",
+        "--port",
+        "--max-body-bytes",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--xcode-pid",
+        "--session-id",
+    ]
+
+    private static let serverForwardedValueFlags: Set<String> = [
+        "--listen",
+        "--host",
+        "--port",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--xcode-pid",
+        "--session-id",
+        "--max-body-bytes",
+        "--request-timeout",
+    ]
+
+    package static func scanAdapter(_ args: [String]) -> ProxyCLIAdapterScan {
+        var scan = ProxyCLIAdapterScan()
+        var cursor = CLIArgumentCursor(args: args)
+
+        while let arg = cursor.current {
+            switch arg {
+            case "-h", "--help":
+                scan.showHelp = true
+                cursor.advance()
+            case "url" where cursor.index == 1:
+                scan.usesRemovedURLHelper = true
+                cursor.advance()
+            case "--print-url":
+                scan.usesRemovedURLHelper = true
+                cursor.advance()
+            case "--url":
+                scan.hasExplicitURL = true
+                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
+            case let value where value.hasPrefix("--url="):
+                scan.hasExplicitURL = true
+                cursor.advance()
+            case "--stdio":
+                scan.hasStdioFlag = true
+                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
+            case "--request-timeout":
+                cursor.advancePastCurrentAndOptionalValue(where: shouldConsumeRequestTimeoutValue)
+            case let flag where serverOnlyFlags.contains(flag):
+                if scan.serverOnlyFlag == nil {
+                    scan.serverOnlyFlag = flag
+                }
+                if serverOnlyValueFlags.contains(flag) {
+                    cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+                } else {
+                    cursor.advance()
+                }
+            default:
+                cursor.advance()
+            }
+        }
+
+        return scan
+    }
+
+    package static func scanServer(_ args: [String]) throws -> ProxyCLIServerScan {
+        var scan = ProxyCLIServerScan()
+        var cursor = CLIArgumentCursor(args: args)
+
+        while let arg = cursor.current {
+            switch arg {
+            case "-h", "--help":
+                scan.showHelp = true
+                return scan
+            case "--dry-run":
+                scan.dryRun = true
+                cursor.advance()
+                continue
+            case "--force-restart":
+                scan.forceRestart = true
+                cursor.advance()
+                continue
+            case "--stdio":
+                throw ProxyServerCommandError.message(
+                    "--stdio is not supported in server mode (use xcode-mcp-proxy)"
+                )
+            case "--url":
+                throw ProxyServerCommandError.message(
+                    "--url is not supported in server mode (use xcode-mcp-proxy)"
+                )
+            case "--lazy-init":
+                scan.hasLazyInitFlag = true
+                scan.forwardedArgs.append(arg)
+                cursor.advance()
+                continue
+            case "--listen":
+                scan.hasListenFlag = true
+            case "--host":
+                scan.hasHostFlag = true
+            case "--port":
+                scan.hasPortFlag = true
+            case "--xcode-pid":
+                scan.hasXcodePidFlag = true
+            default:
+                break
+            }
+
+            scan.forwardedArgs.append(arg)
+            if serverForwardedValueFlags.contains(arg) {
+                let value = try cursor.requiredValue(
+                    for: arg,
+                    error: { ProxyServerCommandError.message("\($0) requires a value") }
+                )
+                scan.forwardedArgs.append(value)
+            } else {
+                cursor.advance()
+            }
+        }
+
+        return scan
+    }
+
+    package static func scanInstall(_ args: [String]) -> ProxyCLIInstallScan {
+        var scan = ProxyCLIInstallScan()
+        var cursor = CLIArgumentCursor(args: args)
+
+        while let arg = cursor.current {
+            switch arg {
+            case "-h", "--help":
+                scan.showHelp = true
+                cursor.advance()
+            case "--prefix", "--bindir":
+                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+            case "--dry-run":
+                cursor.advance()
+            default:
+                cursor.advance()
+            }
+        }
+
+        return scan
+    }
+
+    package static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
+        if token == "-h" || token == "--help" {
+            return true
+        }
+        if Double(token) != nil {
+            return true
+        }
+        return !token.hasPrefix("-")
+    }
+}

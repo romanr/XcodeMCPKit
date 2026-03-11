@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPProxyCommands
+import ProxyCLI
 
 @main
 struct XcodeMCPProxyCLI {

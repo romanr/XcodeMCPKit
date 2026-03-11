@@ -1,8 +1,8 @@
 import Foundation
 import NIO
 import NIOFoundationCompat
-import XcodeMCPProxyCore
-import XcodeMCPProxyUpstream
+import ProxyCore
+import ProxyUpstream
 
 extension SessionManager {
     func clearPinnedSessions(forUpstreamIndex upstreamIndex: Int) -> Int {

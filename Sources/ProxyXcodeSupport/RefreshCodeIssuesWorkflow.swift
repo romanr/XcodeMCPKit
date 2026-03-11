@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPProxyCore
+import ProxyCore
 
 package struct RefreshCodeIssuesRequest: Sendable {
     package static let toolName = "XcodeRefreshCodeIssuesInFile"

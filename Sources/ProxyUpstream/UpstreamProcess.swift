@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 import Logging
-import XcodeMCPProxyCore
+import ProxyCore
 
 package actor UpstreamProcess: UpstreamClient {
     package struct Config {

@@ -1,11 +1,11 @@
 import Foundation
 import NIO
 import Testing
-import XcodeMCPProxyCore
+import ProxyCore
 import XcodeMCPTestSupport
-import XcodeMCPProxyUpstream
+import ProxyUpstream
 
-@testable import XcodeMCPProxySession
+@testable import ProxySession
 
 @Suite(.serialized)
 struct SessionManagerTests {

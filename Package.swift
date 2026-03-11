@@ -45,69 +45,74 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPProxyCore",
+            name: "ProxyCore",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
             ],
+            path: "Sources/ProxyCore",
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPProxyUpstream",
+            name: "ProxyUpstream",
             dependencies: [
-                "XcodeMCPProxyCore",
+                "ProxyCore",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
+            path: "Sources/ProxyUpstream",
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPProxySession",
+            name: "ProxySession",
             dependencies: [
-                "XcodeMCPProxyCore",
-                "XcodeMCPProxyUpstream",
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIO", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
-                .product(name: "NIOFoundationCompat", package: "swift-nio"),
-                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-            ],
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "XcodeMCPProxyXcodeSupport",
-            dependencies: [
-                "XcodeMCPProxyCore",
-                "XcodeMCPProxyUpstream",
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIO", package: "swift-nio"),
-            ],
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "XcodeMCPProxyTransportHTTP",
-            dependencies: [
-                "XcodeMCPProxyCore",
-                "XcodeMCPProxyUpstream",
-                "XcodeMCPProxySession",
-                "XcodeMCPProxyXcodeSupport",
+                "ProxyCore",
+                "ProxyUpstream",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
+            path: "Sources/ProxySession",
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
+            name: "ProxyXcodeSupport",
+            dependencies: [
+                "ProxyCore",
+                "ProxyUpstream",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIO", package: "swift-nio"),
+            ],
+            path: "Sources/ProxyXcodeSupport",
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
+            name: "ProxyTransportHTTP",
+            dependencies: [
+                "ProxyCore",
+                "ProxyUpstream",
+                "ProxySession",
+                "ProxyXcodeSupport",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            ],
+            path: "Sources/ProxyTransportHTTP",
             swiftSettings: strictSwiftSettings
         ),
         .target(
             name: "XcodeMCPProxy",
             dependencies: [
-                "XcodeMCPProxyCore",
-                "XcodeMCPProxyUpstream",
-                "XcodeMCPProxySession",
-                "XcodeMCPProxyXcodeSupport",
-                "XcodeMCPProxyTransportHTTP",
+                "ProxyCore",
+                "ProxyUpstream",
+                "ProxySession",
+                "ProxyXcodeSupport",
+                "ProxyTransportHTTP",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -151,11 +156,11 @@ let package = Package(
             dependencies: [
                 "XcodeMCPKit",
                 "XcodeMCPProxy",
-                "XcodeMCPProxyCore",
-                "XcodeMCPProxyUpstream",
-                "XcodeMCPProxySession",
-                "XcodeMCPProxyTransportHTTP",
-                "XcodeMCPProxyXcodeSupport",
+                "ProxyCore",
+                "ProxyUpstream",
+                "ProxySession",
+                "ProxyTransportHTTP",
+                "ProxyXcodeSupport",
                 "XcodeMCPProxyCommands",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
@@ -167,11 +172,11 @@ let package = Package(
             name: "XcodeMCPProxyTests",
             dependencies: [
                 "XcodeMCPProxy",
-                "XcodeMCPProxyCore",
-                "XcodeMCPProxyUpstream",
-                "XcodeMCPProxySession",
-                "XcodeMCPProxyTransportHTTP",
-                "XcodeMCPProxyXcodeSupport",
+                "ProxyCore",
+                "ProxyUpstream",
+                "ProxySession",
+                "ProxyTransportHTTP",
+                "ProxyXcodeSupport",
                 "XcodeMCPProxyCommands",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),

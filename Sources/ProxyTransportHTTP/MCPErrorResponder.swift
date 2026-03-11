@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPProxyCore
+import ProxyCore
 
 enum MCPErrorResponder {
     static func errorResponseData(

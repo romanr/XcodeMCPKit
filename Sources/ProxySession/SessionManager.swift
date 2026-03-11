@@ -3,8 +3,8 @@ import Logging
 import NIO
 import NIOFoundationCompat
 import NIOConcurrencyHelpers
-import XcodeMCPProxyCore
-import XcodeMCPProxyUpstream
+import ProxyCore
+import ProxyUpstream
 
 package final class SessionContext: Sendable {
     package let id: String

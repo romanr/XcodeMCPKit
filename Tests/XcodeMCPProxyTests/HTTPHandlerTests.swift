@@ -4,12 +4,12 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import XcodeMCPProxyCore
-import XcodeMCPProxySession
-import XcodeMCPProxyUpstream
-import XcodeMCPProxyXcodeSupport
+import ProxyCore
+import ProxySession
+import ProxyUpstream
+import ProxyXcodeSupport
 
-@testable import XcodeMCPProxyTransportHTTP
+@testable import ProxyTransportHTTP
 
 @Suite
 struct HTTPHandlerTests {

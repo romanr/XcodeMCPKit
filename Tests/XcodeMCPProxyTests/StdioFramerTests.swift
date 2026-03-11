@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import XcodeMCPProxyUpstream
+@testable import ProxyUpstream
 
 @Suite
 struct StdioFramerTests {

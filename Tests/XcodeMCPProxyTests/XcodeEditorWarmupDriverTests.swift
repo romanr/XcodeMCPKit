@@ -1,9 +1,9 @@
 import Foundation
 import NIOEmbedded
 import Testing
-import XcodeMCPProxyUpstream
+import ProxyUpstream
 
-@testable import XcodeMCPProxyXcodeSupport
+@testable import ProxyXcodeSupport
 
 @Suite
 struct XcodeEditorWarmupDriverTests {

@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import XcodeMCPProxyCore
+@testable import ProxyCore
 
 private func makeTempDiscoveryURL() -> URL {
     FileManager.default.temporaryDirectory

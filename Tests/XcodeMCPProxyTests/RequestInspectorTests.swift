@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import XcodeMCPProxyCore
+@testable import ProxyCore
 
 @Suite
 struct RequestInspectorTests {

@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import XcodeMCPProxyCore
+import ProxyCore
 
 enum MCPResponseEmitter {
     static func sendJSON(

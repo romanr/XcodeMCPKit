@@ -1,8 +1,8 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPProxyCore
-import XcodeMCPProxyUpstream
+import ProxyCore
+import ProxyUpstream
 
 package struct XcodeWindowInfo: Sendable, Equatable {
     package let tabIdentifier: String

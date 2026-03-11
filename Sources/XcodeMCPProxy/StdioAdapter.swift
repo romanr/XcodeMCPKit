@@ -1,7 +1,7 @@
 import Foundation
 import Logging
-import XcodeMCPProxyCore
-import XcodeMCPProxyUpstream
+import ProxyCore
+import ProxyUpstream
 
 public actor StdioAdapter {
     private struct RequestEnvelope {

@@ -1,7 +1,7 @@
 import Logging
 import Testing
 
-@testable import XcodeMCPProxyCore
+@testable import ProxyCore
 
 @Suite
 struct ProxyLoggingTests {

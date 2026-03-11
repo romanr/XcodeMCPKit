@@ -1,7 +1,7 @@
 import Foundation
 import NIO
-import XcodeMCPProxyCore
-import XcodeMCPProxyUpstream
+import ProxyCore
+import ProxyUpstream
 
 extension SessionManager {
     func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {

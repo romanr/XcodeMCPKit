@@ -1,6 +1,6 @@
 import Foundation
 import NIO
-import XcodeMCPProxyCore
+import ProxyCore
 
 extension SessionManager {
     func startEagerInitializePrimary() {

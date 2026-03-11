@@ -4,9 +4,9 @@ import NIO
 import NIOHTTP1
 import NIOFoundationCompat
 import NIOConcurrencyHelpers
-import XcodeMCPProxyCore
-import XcodeMCPProxySession
-import XcodeMCPProxyXcodeSupport
+import ProxyCore
+import ProxySession
+import ProxyXcodeSupport
 
 package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package typealias InboundIn = HTTPServerRequestPart
@@ -47,6 +47,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package let state = NIOLockedValueBox(State())
     package let config: ProxyConfig
     package let sessionManager: any SessionManaging
+    package let localResponder: LocalMCPResponder
     package let warmupDriver: XcodeEditorWarmupDriver
     package let windowQueryService: XcodeWindowQueryService
     package let refreshWorkflow: RefreshCodeIssuesWorkflow
@@ -60,6 +61,10 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     ) {
         self.config = config
         self.sessionManager = sessionManager
+        self.localResponder = LocalMCPResponder(
+            sessionManager: sessionManager,
+            logger: ProxyLogging.make("http.local")
+        )
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
             ?? RefreshCodeIssuesCoordinator.makeDefault(
@@ -358,162 +363,21 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         let headerSessionExists = headerSessionId.map { sessionManager.hasSession(id: $0) } ?? false
 
         if let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
-           let method = object["method"] as? String {
-            if method == "initialize" {
-                guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
-                    sendMCPError(
-                        on: context.channel,
-                        id: nil,
-                        code: -32600,
-                        message: "missing id",
-                        prefersEventStream: prefersEventStream,
-                        keepAlive: head.isKeepAlive,
-                        sessionId: headerSessionId ?? UUID().uuidString,
-                        requestLog: requestLog
-                    )
-                    return
-                }
-                let sessionId = headerSessionId ?? UUID().uuidString
-                _ = sessionManager.session(id: sessionId)
-                let future = sessionManager.registerInitialize(
-                    sessionId: sessionId,
-                    originalId: originalId,
-                    requestObject: object,
-                    on: context.eventLoop
-                )
-                let keepAlive = head.isKeepAlive
-                let channel = context.channel
-                future.whenComplete { result in
-                    switch result {
-                    case .success(let buffer):
-                        var buffer = buffer
-                        guard let data = buffer.readData(length: buffer.readableBytes) else {
-                            self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
-                            return
-                        }
-                        if prefersEventStream {
-                            self.sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
-                        } else {
-                            var out = channel.allocator.buffer(capacity: data.count)
-                            out.writeBytes(data)
-                            self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
-                        }
-                    case .failure:
-                        self.sendMCPError(
-                            on: channel,
-                            id: originalId,
-                            code: -32000,
-                            message: "upstream timeout",
-                            prefersEventStream: prefersEventStream,
-                            keepAlive: keepAlive,
-                            sessionId: sessionId,
-                            requestLog: requestLog
-                        )
-                    }
-                }
-                return
-            }
-
-            // Xcode MCP (via `xcrun mcpbridge`) currently doesn't implement the MCP Resources APIs.
-            // Some clients still probe `resources/list` and `resources/templates/list` unconditionally.
-            //
-            // If the proxy hasn't been initialized yet, we can't reliably forward these requests. Serve an
-            // empty list response locally so clients don't choke on unsupported-method errors.
-            if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
-                guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
-                    sendMCPError(
-                        on: context.channel,
-                        id: nil,
-                        code: -32600,
-                        message: "missing id",
-                        prefersEventStream: prefersEventStream,
-                        keepAlive: head.isKeepAlive,
-                        sessionId: headerSessionId ?? UUID().uuidString,
-                        requestLog: requestLog
-                    )
-                    return
-                }
-
-                let sessionId = headerSessionId ?? UUID().uuidString
-                if let headerSessionId, headerSessionExists == false {
-                    _ = sessionManager.session(id: headerSessionId)
-                }
-
-                let result: [String: Any]
-                if method == "resources/list" {
-                    result = [
-                        "resources": [Any](),
-                    ]
-                } else {
-                    result = [
-                        "resourceTemplates": [Any](),
-                    ]
-                }
-
-                let response: [String: Any] = [
-                    "jsonrpc": "2.0",
-                    "id": originalId.value.foundationObject,
-                    "result": result,
-                ]
-                if JSONSerialization.isValidJSONObject(response),
-                   let data = try? JSONSerialization.data(withJSONObject: response, options: []) {
-                    if prefersEventStream {
-                        sendSingleSSE(on: context.channel, data: data, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
-                    } else {
-                        var out = context.channel.allocator.buffer(capacity: data.count)
-                        out.writeBytes(data)
-                        sendJSON(on: context.channel, buffer: out, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
-                    }
-                    return
-                }
-            }
-
-            // Serve cached tools/list regardless of params. Some clients attach pagination-like params,
-            // but Codex startup expects a full tool list quickly; stability wins over strict pagination.
-            if method == "tools/list",
-               let headerSessionId,
-               sessionManager.isInitialized(),
-               let cachedResult = sessionManager.cachedToolsListResult(),
-               let originalIdValue = object["id"],
-               let originalId = RPCId(any: originalIdValue) {
-                if headerSessionExists == false {
-                    _ = sessionManager.session(id: headerSessionId)
-                }
-                let hasParams: Bool = {
-                    guard let params = object["params"] else { return false }
-                    return !(params is NSNull)
-                }()
-                // Even when tools/list is served from cache, pin the session so later upstream messages
-                // route consistently instead of fanning out across unpinned sessions.
-                let pinnedUpstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
-                logger.debug(
-                    "tools/list cache hit",
-                    metadata: [
-                        "session": .string(headerSessionId),
-                        "has_params": .string(hasParams ? "true" : "false"),
-                        "pinned_upstream": .string(pinnedUpstreamIndex.map(String.init) ?? "none"),
-                    ]
-                )
-                // Intentionally do not refresh tools/list in the background.
-                // Once we have a valid tool list, keeping it stable for the lifetime of the proxy
-                // avoids upstream churn (and Xcode permission prompts) caused by best-effort refreshes.
-                let response: [String: Any] = [
-                    "jsonrpc": "2.0",
-                    "id": originalId.value.foundationObject,
-                    "result": cachedResult.foundationObject,
-                ]
-                if JSONSerialization.isValidJSONObject(response),
-                   let data = try? JSONSerialization.data(withJSONObject: response, options: []) {
-                    if prefersEventStream {
-                        sendSingleSSE(on: context.channel, data: data, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
-                    } else {
-                        var out = context.channel.allocator.buffer(capacity: data.count)
-                        out.writeBytes(data)
-                        sendJSON(on: context.channel, buffer: out, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
-                    }
-                    return
-                }
-            }
+            let localHandling = localResponder.handle(
+                object: object,
+                headerSessionId: headerSessionId,
+                headerSessionExists: headerSessionExists,
+                eventLoop: context.eventLoop
+            )
+        {
+            handleLocalPostHandling(
+                localHandling,
+                on: context.channel,
+                prefersEventStream: prefersEventStream,
+                keepAlive: head.isKeepAlive,
+                requestLog: requestLog
+            )
+            return
         }
 
         if let headerSessionId, !headerSessionExists {

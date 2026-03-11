@@ -2,9 +2,99 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
-import XcodeMCPProxyCore
+import ProxyCore
 
 extension HTTPHandler {
+    func handleLocalPostHandling(
+        _ handling: LocalPostHandling,
+        on channel: Channel,
+        prefersEventStream: Bool,
+        keepAlive: Bool,
+        requestLog: RequestLogContext
+    ) {
+        switch handling {
+        case .initialize(let future, let sessionId, let originalId):
+            future.whenComplete { result in
+                switch result {
+                case .success(let buffer):
+                    var buffer = buffer
+                    guard let data = buffer.readData(length: buffer.readableBytes) else {
+                        self.sendPlain(
+                            on: channel,
+                            status: .badGateway,
+                            body: "invalid upstream response",
+                            keepAlive: keepAlive,
+                            sessionId: sessionId,
+                            requestLog: requestLog
+                        )
+                        return
+                    }
+                    if prefersEventStream {
+                        self.sendSingleSSE(
+                            on: channel,
+                            data: data,
+                            keepAlive: keepAlive,
+                            sessionId: sessionId,
+                            requestLog: requestLog
+                        )
+                    } else {
+                        var out = channel.allocator.buffer(capacity: data.count)
+                        out.writeBytes(data)
+                        self.sendJSON(
+                            on: channel,
+                            buffer: out,
+                            keepAlive: keepAlive,
+                            sessionId: sessionId,
+                            requestLog: requestLog
+                        )
+                    }
+                case .failure:
+                    self.sendMCPError(
+                        on: channel,
+                        id: originalId,
+                        code: -32000,
+                        message: "upstream timeout",
+                        prefersEventStream: prefersEventStream,
+                        keepAlive: keepAlive,
+                        sessionId: sessionId,
+                        requestLog: requestLog
+                    )
+                }
+            }
+        case .immediateResponse(let data, let sessionId):
+            if prefersEventStream {
+                sendSingleSSE(
+                    on: channel,
+                    data: data,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            } else {
+                var out = channel.allocator.buffer(capacity: data.count)
+                out.writeBytes(data)
+                sendJSON(
+                    on: channel,
+                    buffer: out,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            }
+        case .mcpError(let id, let code, let message, let sessionId):
+            sendMCPError(
+                on: channel,
+                id: id,
+                code: code,
+                message: message,
+                prefersEventStream: prefersEventStream,
+                keepAlive: keepAlive,
+                sessionId: sessionId,
+                requestLog: requestLog
+            )
+        }
+    }
+
     func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
         guard MCPResponseEmitter.sendSingleSSE(
             on: channel,

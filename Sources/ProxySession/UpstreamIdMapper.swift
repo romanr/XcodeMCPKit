@@ -1,7 +1,7 @@
 import Foundation
 import NIOConcurrencyHelpers
-import XcodeMCPProxyCore
-import XcodeMCPProxyUpstream
+import ProxyCore
+import ProxyUpstream
 
 extension SessionManager {
     static func makeDefaultUpstreams(

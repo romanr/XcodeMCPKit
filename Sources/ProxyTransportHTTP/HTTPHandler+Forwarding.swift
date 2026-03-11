@@ -2,9 +2,9 @@ import Foundation
 import NIO
 import NIOFoundationCompat
 import NIOHTTP1
-import XcodeMCPProxyCore
-import XcodeMCPProxySession
-import XcodeMCPProxyXcodeSupport
+import ProxyCore
+import ProxySession
+import ProxyXcodeSupport
 
 extension HTTPHandler {
     func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssuesRequest? {

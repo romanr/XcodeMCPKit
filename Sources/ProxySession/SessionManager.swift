@@ -107,26 +107,7 @@ package final class SessionManager: Sendable, SessionManaging {
     package let upstreams: [any UpstreamClient]
     package let toolsListCache = ToolsListCache()
 
-    package struct UpstreamState: Sendable {
-        package var isInitialized = false
-        package var initInFlight = false
-        package var initTimeout: Scheduled<Void>?
-        package var didSendInitialized = false
-        package var initUpstreamId: Int64?
-        package var healthState: UpstreamHealthState = .healthy
-        package var consecutiveRequestTimeouts = 0
-        package var healthProbeInFlight = false
-        package var healthProbeGeneration: UInt64 = 0
-        package var consecutiveToolsListFailures: Int = 0
-        package var lastToolsListSuccessUptimeNs: UInt64?
-    }
-
-    package struct UpstreamPoolState: Sendable {
-        package var upstreamStates: [UpstreamState] = []
-        package var nextPick: Int = 0
-    }
-
-    package let upstreamState = NIOLockedValueBox(UpstreamPoolState())
+    package let upstreamPool: UpstreamPool
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
@@ -144,10 +125,7 @@ package final class SessionManager: Sendable, SessionManaging {
         self.sessionRegistry = SessionRegistry(config: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.idMapper = UpstreamIdMapper(upstreamCount: upstreams.count)
-        upstreamState.withLockedValue { state in
-            state.upstreamStates = Array(repeating: UpstreamState(), count: upstreams.count)
-            state.nextPick = 0
-        }
+        self.upstreamPool = UpstreamPool(upstreamCount: upstreams.count)
 
         var tasks: [Task<Void, Never>] = []
         tasks.reserveCapacity(upstreams.count)
@@ -217,17 +195,7 @@ package final class SessionManager: Sendable, SessionManaging {
         }
         globalTimeout?.cancel()
 
-        let upstreamTimeouts = upstreamState.withLockedValue { state -> [Scheduled<Void>?] in
-            var timeouts: [Scheduled<Void>?] = []
-            timeouts.reserveCapacity(state.upstreamStates.count)
-            for index in 0..<state.upstreamStates.count {
-                timeouts.append(state.upstreamStates[index].initTimeout)
-                state.upstreamStates[index].initTimeout = nil
-                state.upstreamStates[index].initInFlight = false
-                state.upstreamStates[index].initUpstreamId = nil
-            }
-            return timeouts
-        }
+        let upstreamTimeouts = upstreamPool.clearInitTimeoutsForShutdown()
         for timeout in upstreamTimeouts {
             timeout?.cancel()
         }
@@ -275,30 +243,17 @@ package final class SessionManager: Sendable, SessionManaging {
 
     package func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        var probesToStart: [(upstreamIndex: Int, probeGeneration: UInt64)] = []
+        var probesToStart: [HealthProbeRequest] = []
         probesToStart.reserveCapacity(2)
 
         var pinned = sessionRegistry.pinnedUpstreamIndex(for: sessionId)
         if let pinnedIndex = pinned {
-            let isUsable = upstreamState.withLockedValue { state in
-                guard pinnedIndex >= 0, pinnedIndex < state.upstreamStates.count else {
-                    return false
-                }
-                let health = classifyHealthAndCollectProbeIfNeeded(
-                    upstreamIndex: pinnedIndex,
-                    nowUptimeNs: nowUptimeNs,
-                    state: &state,
-                    probesToStart: &probesToStart
-                )
-                let isHealthyEnough: Bool
-                switch health {
-                case .healthy, .degraded:
-                    isHealthyEnough = true
-                case .quarantined:
-                    isHealthyEnough = false
-                }
-                return isHealthyEnough && state.upstreamStates[pinnedIndex].isInitialized
-            }
+            let result = upstreamPool.evaluateUsableInitialized(
+                index: pinnedIndex,
+                nowUptimeNs: nowUptimeNs
+            )
+            probesToStart.append(contentsOf: result.1)
+            let isUsable = result.0
             if isUsable {
                 return pinnedIndex
             }
@@ -310,28 +265,12 @@ package final class SessionManager: Sendable, SessionManaging {
         let preferredInitializeUpstreamIndex = sessionRegistry.preferredInitializeUpstreamIndex(for: sessionId)
 
         if shouldPin, let preferredInitializeUpstreamIndex {
-            let isUsable = upstreamState.withLockedValue { state in
-                guard preferredInitializeUpstreamIndex >= 0,
-                    preferredInitializeUpstreamIndex < state.upstreamStates.count
-                else {
-                    return false
-                }
-                let health = classifyHealthAndCollectProbeIfNeeded(
-                    upstreamIndex: preferredInitializeUpstreamIndex,
-                    nowUptimeNs: nowUptimeNs,
-                    state: &state,
-                    probesToStart: &probesToStart
-                )
-                let isHealthyEnough: Bool
-                switch health {
-                case .healthy, .degraded:
-                    isHealthyEnough = true
-                case .quarantined:
-                    isHealthyEnough = false
-                }
-                return isHealthyEnough
-                    && state.upstreamStates[preferredInitializeUpstreamIndex].isInitialized
-            }
+            let result = upstreamPool.evaluateUsableInitialized(
+                index: preferredInitializeUpstreamIndex,
+                nowUptimeNs: nowUptimeNs
+            )
+            probesToStart.append(contentsOf: result.1)
+            let isUsable = result.0
             if isUsable {
                 for probe in probesToStart {
                     probeUpstreamHealth(
@@ -346,37 +285,9 @@ package final class SessionManager: Sendable, SessionManaging {
             sessionRegistry.clearInitializeHintIfUnpinned(for: sessionId)
         }
 
-        let chosen = upstreamState.withLockedValue { state -> Int? in
-            let count = state.upstreamStates.count
-            guard count > 0 else { return nil }
-
-            let rawStart = state.nextPick % count
-            let start = rawStart >= 0 ? rawStart : rawStart + count
-            state.nextPick &+= 1
-
-            var degradedCandidate: Int?
-            for offset in 0..<count {
-                let candidate = (start + offset) % count
-                guard state.upstreamStates[candidate].isInitialized else { continue }
-                let health = classifyHealthAndCollectProbeIfNeeded(
-                    upstreamIndex: candidate,
-                    nowUptimeNs: nowUptimeNs,
-                    state: &state,
-                    probesToStart: &probesToStart
-                )
-                switch health {
-                case .healthy:
-                    return candidate
-                case .degraded:
-                    if degradedCandidate == nil {
-                        degradedCandidate = candidate
-                    }
-                case .quarantined:
-                    continue
-                }
-            }
-            return degradedCandidate
-        }
+        let chooseResult = upstreamPool.chooseBestInitializedUpstream(nowUptimeNs: nowUptimeNs)
+        let chosen = chooseResult.0
+        probesToStart.append(contentsOf: chooseResult.1)
 
         for probe in probesToStart {
             probeUpstreamHealth(
@@ -397,31 +308,18 @@ package final class SessionManager: Sendable, SessionManaging {
 
     func chooseInitializeUpstreamIndex(sessionId: String) -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        var probesToStart: [(upstreamIndex: Int, probeGeneration: UInt64)] = []
+        var probesToStart: [HealthProbeRequest] = []
         probesToStart.reserveCapacity(1)
 
         let hintedUpstreamIndex = sessionRegistry.hintedUpstreamIndex(for: sessionId)
 
         if let hintedUpstreamIndex {
-            let isUsable = upstreamState.withLockedValue { state in
-                guard hintedUpstreamIndex >= 0, hintedUpstreamIndex < state.upstreamStates.count else {
-                    return false
-                }
-                let health = classifyHealthAndCollectProbeIfNeeded(
-                    upstreamIndex: hintedUpstreamIndex,
-                    nowUptimeNs: nowUptimeNs,
-                    state: &state,
-                    probesToStart: &probesToStart
-                )
-                let isHealthyEnough: Bool
-                switch health {
-                case .healthy, .degraded:
-                    isHealthyEnough = true
-                case .quarantined:
-                    isHealthyEnough = false
-                }
-                return isHealthyEnough && state.upstreamStates[hintedUpstreamIndex].isInitialized
-            }
+            let result = upstreamPool.evaluateUsableInitialized(
+                index: hintedUpstreamIndex,
+                nowUptimeNs: nowUptimeNs
+            )
+            probesToStart.append(contentsOf: result.1)
+            let isUsable = result.0
 
             for probe in probesToStart {
                 probeUpstreamHealth(
@@ -470,38 +368,6 @@ package final class SessionManager: Sendable, SessionManaging {
             sessionId: sessionId,
             sessionGeneration: sessionGeneration
         )
-    }
-
-    func classifyHealthAndCollectProbeIfNeeded(
-        upstreamIndex: Int,
-        nowUptimeNs: UInt64,
-        state: inout UpstreamPoolState,
-        probesToStart: inout [(upstreamIndex: Int, probeGeneration: UInt64)]
-    ) -> UpstreamHealthState {
-        guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
-            return .quarantined(untilUptimeNs: nowUptimeNs)
-        }
-        let current = state.upstreamStates[upstreamIndex].healthState
-        switch current {
-        case .healthy:
-            return .healthy
-        case .degraded:
-            return .degraded
-        case .quarantined(let untilUptimeNs):
-            if nowUptimeNs < untilUptimeNs {
-                return .quarantined(untilUptimeNs: untilUptimeNs)
-            }
-            if state.upstreamStates[upstreamIndex].healthProbeInFlight == false {
-                state.upstreamStates[upstreamIndex].healthProbeInFlight = true
-                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
-                probesToStart.append(
-                    (
-                        upstreamIndex: upstreamIndex,
-                        probeGeneration: state.upstreamStates[upstreamIndex].healthProbeGeneration
-                    ))
-            }
-            return .quarantined(untilUptimeNs: untilUptimeNs)
-        }
     }
 
     package func registerInitialize(
@@ -554,17 +420,7 @@ package final class SessionManager: Sendable, SessionManaging {
         if let cachedResult {
             _ = session(id: sessionId)
             if let upstreamIndex = chooseInitializeUpstreamIndex(sessionId: sessionId) {
-                let shouldPreferOnNextPin = upstreamState.withLockedValue { state in
-                    state.upstreamStates.reduce(into: 0) { count, upstream in
-                        guard upstream.isInitialized else { return }
-                        switch upstream.healthState {
-                        case .healthy, .degraded:
-                            count += 1
-                        case .quarantined:
-                            break
-                        }
-                    } > 1
-                }
+                let shouldPreferOnNextPin = upstreamPool.initializedHealthyishCount() > 1
                 setInitializeUpstreamIndexIfNeeded(
                     sessionId: sessionId,
                     upstreamIndex: upstreamIndex,

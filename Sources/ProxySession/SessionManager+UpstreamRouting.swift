@@ -135,10 +135,7 @@ extension SessionManager {
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
-            let anyInitialized = upstreamState.withLockedValue { state in
-                state.upstreamStates.contains { $0.isInitialized }
-            }
-            shouldResetGlobalInit = !anyInitialized
+            shouldResetGlobalInit = !upstreamPool.anyInitialized()
         } else {
             shouldResetGlobalInit = false
         }
@@ -158,10 +155,7 @@ extension SessionManager {
                 }
             } else if globalInit.hadGlobalInit {
                 if shouldResetGlobalInit {
-                    let primaryInitInFlight = upstreamState.withLockedValue { state in
-                        guard !state.upstreamStates.isEmpty else { return false }
-                        return state.upstreamStates[0].initInFlight
-                    }
+                    let primaryInitInFlight = upstreamPool.primaryInitInFlight()
                     if primaryInitInFlight {
                         initState.withLockedValue { state in
                             state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = true
@@ -234,9 +228,7 @@ extension SessionManager {
             )
         }
         let toolsSnapshot = toolsListCache.snapshot()
-        let upstreamStates = upstreamState.withLockedValue { state in
-            state.upstreamStates
-        }
+        let upstreamStates = upstreamPool.statesSnapshot()
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.proxyInitialized && !initSnapshot.isShuttingDown,
@@ -244,7 +236,7 @@ extension SessionManager {
             warmupInFlight: toolsSnapshot.warmupInFlight,
             upstreamStates: upstreamStates,
             redactedText: Self.redactedDebugText,
-            healthFormatter: debugHealthStateString
+            healthFormatter: upstreamPool.debugHealthStateString
         )
     }
 
@@ -258,15 +250,13 @@ extension SessionManager {
                     .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
             )
         }
-        let upstreams = upstreamState.withLockedValue { state in
-            state.upstreamStates.map { upstream in
+        let upstreams = upstreamPool.statesSnapshot().map { upstream in
                 TestSnapshot.Upstream(
                     isInitialized: upstream.isInitialized,
                     initInFlight: upstream.initInFlight,
                     healthState: upstream.healthState
                 )
             }
-        }
         return TestSnapshot(
             hasInitResult: initSnapshot.hasInitResult,
             initInFlight: initSnapshot.initInFlight,
@@ -469,16 +459,5 @@ extension SessionManager {
             data: data,
             redactedText: Self.redactedDebugText
         )
-    }
-
-    func debugHealthStateString(_ state: UpstreamHealthState) -> String {
-        switch state {
-        case .healthy:
-            return "healthy"
-        case .degraded:
-            return "degraded"
-        case .quarantined(let untilUptimeNs):
-            return "quarantined(untilUptimeNs:\(untilUptimeNs))"
-        }
     }
 }

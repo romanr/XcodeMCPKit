@@ -103,7 +103,7 @@ package final class ProxyDebugRecorder: Sendable {
         proxyInitialized: Bool,
         cachedToolsListAvailable: Bool,
         warmupInFlight: Bool,
-        upstreamStates: [SessionManager.UpstreamState],
+        upstreamStates: [UpstreamPool.UpstreamState],
         redactedText: String,
         healthFormatter: (UpstreamHealthState) -> String
     ) -> ProxyDebugSnapshot {

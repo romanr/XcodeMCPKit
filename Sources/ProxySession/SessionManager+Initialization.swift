@@ -6,7 +6,7 @@ extension SessionManager {
     func startEagerInitializePrimary() {
         var shouldSend = false
         var shouldScheduleTimeout = false
-        var upstreamId: Int64?
+        let upstreamId: Int64
         initState.withLockedValue { state in
             if state.initResult == nil && !state.initInFlight {
                 state.initInFlight = true
@@ -20,14 +20,12 @@ extension SessionManager {
         guard shouldSend else { return }
 
         upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
-        if let upstreamId {
-            initState.withLockedValue { state in
-                state.primaryInitUpstreamId = upstreamId
-            }
-            markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
+        initState.withLockedValue { state in
+            state.primaryInitUpstreamId = upstreamId
         }
+        markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
 
-        let request = makeInternalInitializeRequest(id: upstreamId ?? 1)
+        let request = makeInternalInitializeRequest(id: upstreamId)
         if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
             sendUpstream(data, upstreamIndex: 0)
         } else {
@@ -198,16 +196,7 @@ extension SessionManager {
     }
 
     func sendInitializedNotificationIfNeeded(upstreamIndex: Int) {
-        let shouldSend = upstreamState.withLockedValue { state -> Bool in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
-                return false
-            }
-            if state.upstreamStates[upstreamIndex].didSendInitialized {
-                return false
-            }
-            state.upstreamStates[upstreamIndex].didSendInitialized = true
-            return true
-        }
+        let shouldSend = upstreamPool.markDidSendInitializedIfNeeded(upstreamIndex: upstreamIndex)
         guard shouldSend else { return }
 
         let notification: [String: Any] = [
@@ -284,57 +273,21 @@ extension SessionManager {
     }
 
     func markUpstreamInitInFlight(upstreamIndex: Int, upstreamId: Int64) {
-        upstreamState.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            state.upstreamStates[upstreamIndex].initInFlight = true
-            state.upstreamStates[upstreamIndex].initUpstreamId = upstreamId
-            state.upstreamStates[upstreamIndex].isInitialized = false
-        }
+        upstreamPool.markInitInFlight(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
     }
 
     func clearUpstreamInitInFlight(upstreamIndex: Int) {
-        upstreamState.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
-            state.upstreamStates[upstreamIndex].initTimeout = nil
-        }
+        upstreamPool.clearInitInFlight(upstreamIndex: upstreamIndex)
     }
 
     func clearUpstreamState(upstreamIndex: Int) {
-        let timeout = upstreamState.withLockedValue { state -> Scheduled<Void>? in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
-            let timeout = state.upstreamStates[upstreamIndex].initTimeout
-            state.upstreamStates[upstreamIndex].initTimeout = nil
-            state.upstreamStates[upstreamIndex].isInitialized = false
-            state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].didSendInitialized = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
-            state.upstreamStates[upstreamIndex].healthState = .healthy
-            state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
-            state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
-            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
-            state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nil
-            return timeout
-        }
+        let timeout = upstreamPool.clearUpstreamState(upstreamIndex: upstreamIndex)
         timeout?.cancel()
         debugRecorder.resetUpstream(upstreamIndex)
     }
 
     func markUpstreamInitialized(upstreamIndex: Int) {
-        let timeout = upstreamState.withLockedValue { state -> Scheduled<Void>? in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
-            state.upstreamStates[upstreamIndex].isInitialized = true
-            state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
-            state.upstreamStates[upstreamIndex].healthState = .healthy
-            state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
-            let timeout = state.upstreamStates[upstreamIndex].initTimeout
-            state.upstreamStates[upstreamIndex].initTimeout = nil
-            return timeout
-        }
+        let timeout = upstreamPool.markInitialized(upstreamIndex: upstreamIndex)
         timeout?.cancel()
     }
 
@@ -347,5 +300,21 @@ extension SessionManager {
 
     func toolsListInternalSessionId() -> String {
         toolsListCache.internalSessionId { hasSession(id: $0) }
+    }
+
+    func makeInternalInitializeRequest(id: Int64) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2025-03-26",
+                "capabilities": [:],
+                "clientInfo": [
+                    "name": "xcode-mcp-proxy",
+                    "version": "0.0",
+                ],
+            ],
+        ]
     }
 }

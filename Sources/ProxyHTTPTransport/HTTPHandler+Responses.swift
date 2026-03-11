@@ -4,20 +4,84 @@ import NIOHTTP1
 import ProxyCore
 
 extension HTTPHandler {
-    func handleLocalPostHandling(
-        _ handling: LocalPostHandling,
+    func sendPostResolution(
+        _ resolution: HTTPPostResolution,
         on channel: Channel,
-        prefersEventStream: Bool,
         keepAlive: Bool,
         requestLog: RequestLogContext
     ) {
-        responseWriter.handleLocalPostHandling(
-            handling,
-            on: channel,
-            prefersEventStream: prefersEventStream,
-            keepAlive: keepAlive,
-            requestLog: requestLog
-        )
+        switch resolution {
+        case .responseData(let data, let sessionID, let prefersEventStream):
+            if prefersEventStream {
+                sendSingleSSE(
+                    on: channel,
+                    data: data,
+                    keepAlive: keepAlive,
+                    sessionID: sessionID,
+                    requestLog: requestLog
+                )
+            } else {
+                var buffer = channel.allocator.buffer(capacity: data.count)
+                buffer.writeBytes(data)
+                sendJSON(
+                    on: channel,
+                    buffer: buffer,
+                    keepAlive: keepAlive,
+                    sessionID: sessionID,
+                    requestLog: requestLog
+                )
+            }
+        case .mcpError(
+            let id,
+            let ids,
+            let code,
+            let message,
+            let forceBatchArray,
+            let sessionID,
+            let prefersEventStream
+        ):
+            if ids.isEmpty {
+                sendMCPError(
+                    on: channel,
+                    id: id,
+                    code: code,
+                    message: message,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: keepAlive,
+                    sessionID: sessionID,
+                    requestLog: requestLog
+                )
+            } else {
+                sendMCPError(
+                    on: channel,
+                    ids: ids,
+                    code: code,
+                    message: message,
+                    forceBatchArray: forceBatchArray,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: keepAlive,
+                    sessionID: sessionID,
+                    requestLog: requestLog
+                )
+            }
+        case .plain(let status, let body, let sessionID):
+            sendPlain(
+                on: channel,
+                status: status,
+                body: body,
+                keepAlive: keepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+        case .empty(let status, let sessionID):
+            sendEmpty(
+                on: channel,
+                status: status,
+                keepAlive: keepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+        }
     }
 
     func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {

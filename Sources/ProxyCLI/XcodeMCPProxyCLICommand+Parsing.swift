@@ -4,50 +4,41 @@ import XcodeMCPProxy
 extension XcodeMCPProxyCLICommand {
     package static func scanInvocation(_ args: [String]) -> CLICommandInvocation {
         var invocation = CLICommandInvocation()
-        var index = 1
+        var cursor = CLIArgumentCursor(args: args)
 
-        while index < args.count {
-            let arg = args[index]
+        while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
                 invocation.showHelp = true
-                index += 1
-            case "url" where index == 1:
+                cursor.advance()
+            case "url" where cursor.index == 1:
                 invocation.usesRemovedURLHelper = true
-                index += 1
+                cursor.advance()
             case "--print-url":
                 invocation.usesRemovedURLHelper = true
-                index += 1
+                cursor.advance()
             case "--url":
                 invocation.hasExplicitURL = true
-                index += min(2, args.count - index)
+                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
             case let value where value.hasPrefix("--url="):
                 invocation.hasExplicitURL = true
-                index += 1
+                cursor.advance()
             case "--stdio":
                 invocation.hasStdioFlag = true
-                if index + 1 < args.count, !args[index + 1].hasPrefix("-") {
-                    index += 2
-                } else {
-                    index += 1
-                }
+                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
             case "--request-timeout":
-                if index + 1 < args.count, shouldConsumeRequestTimeoutValue(args[index + 1]) {
-                    index += 2
-                } else {
-                    index += 1
-                }
+                cursor.advancePastCurrentAndOptionalValue(where: shouldConsumeRequestTimeoutValue)
             case let flag where Self.serverOnlyFlags.contains(flag):
                 if invocation.serverOnlyFlag == nil {
                     invocation.serverOnlyFlag = flag
                 }
                 if Self.serverOnlyValueFlags.contains(flag) {
-                    index += min(2, args.count - index)
+                    cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
                 } else {
-                    index += 1
+                    cursor.advance()
                 }
             default:
-                index += 1
+                cursor.advance()
             }
         }
 

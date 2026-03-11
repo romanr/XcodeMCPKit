@@ -27,9 +27,8 @@ extension XcodeMCPProxyServerCommand {
             "--request-timeout",
         ]
 
-        var index = 1
-        while index < args.count {
-            let arg = args[index]
+        var cursor = CLIArgumentCursor(args: args)
+        while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
                 showHelp = true
@@ -46,11 +45,11 @@ extension XcodeMCPProxyServerCommand {
                 )
             case "--dry-run":
                 dryRun = true
-                index += 1
+                cursor.advance()
                 continue
             case "--force-restart":
                 forceRestart = true
-                index += 1
+                cursor.advance()
                 continue
             case "--stdio":
                 throw ProxyServerCommandError.message(
@@ -63,7 +62,7 @@ extension XcodeMCPProxyServerCommand {
             case "--lazy-init":
                 hasLazyInit = true
                 forwarded.append(arg)
-                index += 1
+                cursor.advance()
                 continue
             case "--listen":
                 hasListen = true
@@ -79,13 +78,13 @@ extension XcodeMCPProxyServerCommand {
 
             forwarded.append(arg)
             if valueFlags.contains(arg) {
-                guard index + 1 < args.count else {
-                    throw ProxyServerCommandError.message("\(arg) requires a value")
-                }
-                forwarded.append(args[index + 1])
-                index += 2
+                let value = try cursor.requiredValue(
+                    for: arg,
+                    error: { ProxyServerCommandError.message("\($0) requires a value") }
+                )
+                forwarded.append(value)
             } else {
-                index += 1
+                cursor.advance()
             }
         }
 

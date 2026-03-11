@@ -1,8 +1,8 @@
 import Foundation
 import Logging
 import NIO
-import NIOHTTP1
 import NIOFoundationCompat
+import NIOHTTP1
 import NIOConcurrencyHelpers
 import ProxyCore
 import ProxyRuntime
@@ -30,12 +30,8 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package let state = NIOLockedValueBox(State())
     package let config: ProxyConfig
     package let sessionManager: any RuntimeCoordinating
-    package let localResponder: LocalMCPResponder
-    package let forwardingService: MCPForwardingService
+    package let postService: HTTPPostService
     package let responseWriter: HTTPResponseWriter
-    package let warmupDriver: XcodeEditorWarmupDriver
-    package let windowQueryService: XcodeWindowQueryService
-    package let refreshWorkflow: RefreshCodeIssuesWorkflow
     package let logger: Logger = ProxyLogging.make("http")
 
     package init(
@@ -46,27 +42,14 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     ) {
         self.config = config
         self.sessionManager = sessionManager
-        self.localResponder = LocalMCPResponder(
-            sessionManager: sessionManager,
-            logger: ProxyLogging.make("http.local")
-        )
-        self.forwardingService = MCPForwardingService(
+        self.postService = HTTPPostService(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+            warmupDriver: warmupDriver,
+            logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))
-        let refreshCoordinator =
-            refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault(
-                requestTimeout: config.requestTimeout
-            )
-        self.warmupDriver = warmupDriver
-        self.windowQueryService = XcodeWindowQueryService()
-        self.refreshWorkflow = RefreshCodeIssuesWorkflow(
-            coordinator: refreshCoordinator,
-            warmupDriver: warmupDriver,
-            logger: ProxyLogging.make("http.refresh")
-        )
     }
 
     package func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -351,274 +334,21 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let headerSessionID = HTTPRequestValidator.sessionID(from: head.headers)
         let headerSessionExists = headerSessionID.map { sessionManager.hasSession(id: $0) } ?? false
-
-        if let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
-            let localHandling = localResponder.handle(
-                object: object,
-                headerSessionID: headerSessionID,
-                headerSessionExists: headerSessionExists,
-                eventLoop: context.eventLoop
-            )
-        {
-            handleLocalPostHandling(
-                localHandling,
-                on: context.channel,
-                prefersEventStream: prefersEventStream,
-                keepAlive: head.isKeepAlive,
+        let keepAlive = head.isKeepAlive
+        let channel = context.channel
+        postService.handle(
+            bodyData: bodyData,
+            headerSessionID: headerSessionID,
+            headerSessionExists: headerSessionExists,
+            prefersEventStream: prefersEventStream,
+            eventLoop: context.eventLoop
+        ).whenSuccess { resolution in
+            self.sendPostResolution(
+                resolution,
+                on: channel,
+                keepAlive: keepAlive,
                 requestLog: requestLog
             )
-            return
-        }
-
-        if let headerSessionID, !headerSessionExists {
-            _ = sessionManager.session(id: headerSessionID)
-        }
-
-        let sessionID = headerSessionID ?? UUID().uuidString
-        let requestMetadata = MCPErrorResponder.requestMetadata(from: bodyData)
-        let requestIDs = requestMetadata.ids
-        let requestIsBatch = requestMetadata.isBatch
-        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
-
-        if sessionManager.isInitialized() == false {
-            if requestIDs.isEmpty {
-                sendPlain(
-                    on: context.channel,
-                    status: .unprocessableEntity,
-                    body: "expected initialize request",
-                    keepAlive: head.isKeepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-            } else {
-                sendMCPError(
-                    on: context.channel,
-                    ids: requestIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: requestIsBatch,
-                    prefersEventStream: prefersEventStream,
-                    keepAlive: head.isKeepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-            }
-            return
-        }
-
-        guard let parsedRequestJSON else {
-            sendMCPError(
-                on: context.channel,
-                id: nil,
-                code: -32700,
-                message: "invalid json",
-                prefersEventStream: prefersEventStream,
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-            return
-        }
-
-        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
-        if let refreshRequest, requestIDs.isEmpty == false {
-            if headerSessionID == nil {
-                sendMCPError(
-                    on: context.channel,
-                    ids: requestIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: requestIsBatch,
-                    prefersEventStream: prefersEventStream,
-                    keepAlive: head.isKeepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-                return
-            }
-
-            let keepAlive = head.isKeepAlive
-            let channel = context.channel
-            let eventLoop = context.eventLoop
-            let promise = eventLoop.makePromise(of: RefreshForwardAttemptResult.self)
-            promise.futureResult.whenSuccess { attemptResult in
-                self.respondToRefreshForwardAttempt(
-                    attemptResult,
-                    on: channel,
-                    prefersEventStream: prefersEventStream,
-                    keepAlive: keepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-            }
-            Task { [self] in
-                let attemptResult = await forwardRefreshCodeIssuesRequest(
-                    refreshRequest,
-                    bodyData: bodyData,
-                    sessionID: sessionID,
-                    requestIDs: requestIDs,
-                    requestIsBatch: requestIsBatch,
-                    eventLoop: eventLoop
-                )
-                promise.succeed(attemptResult)
-            }
-            return
-        }
-
-        let prepared: MCPForwardingService.PreparedRequest
-        do {
-            guard let candidate = try forwardingService.prepareRequest(
-                bodyData: bodyData,
-                parsedRequestJSON: parsedRequestJSON,
-                sessionID: sessionID
-            ) else {
-                if requestIDs.isEmpty {
-                    sendPlain(
-                        on: context.channel,
-                        status: .serviceUnavailable,
-                        body: "upstream unavailable",
-                        keepAlive: head.isKeepAlive,
-                        sessionID: sessionID,
-                        requestLog: requestLog
-                    )
-                } else {
-                    sendMCPError(
-                        on: context.channel,
-                        ids: requestIDs,
-                        code: -32001,
-                        message: "upstream unavailable",
-                        forceBatchArray: requestIsBatch,
-                        prefersEventStream: prefersEventStream,
-                        keepAlive: head.isKeepAlive,
-                        sessionID: sessionID,
-                        requestLog: requestLog
-                    )
-                }
-                return
-            }
-            prepared = candidate
-        } catch {
-            sendMCPError(
-                on: context.channel,
-                id: nil,
-                code: -32700,
-                message: "invalid json",
-                prefersEventStream: prefersEventStream,
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-            return
-        }
-
-        if prepared.transform.method == "tools/list" {
-            let hasCache = sessionManager.cachedToolsListResult() != nil
-            let params = (try? JSONSerialization.jsonObject(with: bodyData, options: []))
-                .flatMap { $0 as? [String: Any] }?["params"]
-            let hasParams = params != nil && !(params is NSNull)
-            logger.debug(
-                "tools/list cache miss; forwarding upstream",
-                metadata: [
-                    "session": .string(sessionID),
-                    "has_cache": .string(hasCache ? "true" : "false"),
-                    "has_params": .string(hasParams ? "true" : "false"),
-                    "upstream": .string("\(prepared.upstreamIndex)"),
-                ]
-            )
-        }
-
-        if headerSessionID == nil {
-            if prepared.transform.isBatch || prepared.transform.method != "initialize" || !prepared.transform.expectsResponse {
-                if prepared.transform.responseIDs.isEmpty {
-                    sendPlain(
-                        on: context.channel,
-                        status: .unprocessableEntity,
-                        body: "expected initialize request",
-                        keepAlive: head.isKeepAlive,
-                        sessionID: sessionID,
-                        requestLog: requestLog
-                    )
-                } else {
-                    sendMCPError(
-                        on: context.channel,
-                        ids: prepared.transform.responseIDs,
-                        code: -32000,
-                        message: "expected initialize request",
-                        forceBatchArray: prepared.transform.isBatch,
-                        prefersEventStream: prefersEventStream,
-                        keepAlive: head.isKeepAlive,
-                        sessionID: sessionID,
-                        requestLog: requestLog
-                    )
-                }
-                return
-            }
-        }
-
-        let session = sessionManager.session(id: sessionID)
-
-        if prepared.transform.expectsResponse {
-            let started: MCPForwardingService.StartedRequest
-            do {
-                started = try forwardingService.startRequest(
-                    prepared,
-                    session: session,
-                    on: context.eventLoop
-                )
-            } catch {
-                sendMCPError(
-                    on: context.channel,
-                    id: nil,
-                    code: -32600,
-                    message: "missing id",
-                    prefersEventStream: prefersEventStream,
-                    keepAlive: head.isKeepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-                return
-            }
-
-            let keepAlive = head.isKeepAlive
-            let sessionIDCopy = sessionID
-            let channel = context.channel
-            started.future.whenComplete { result in
-                switch self.forwardingService.resolveResponse(
-                    result,
-                    started: started,
-                    sessionID: sessionIDCopy
-                ) {
-                case .success(let responseData):
-                    if prefersEventStream {
-                        self.sendSingleSSE(on: channel, data: responseData, keepAlive: keepAlive, sessionID: sessionIDCopy, requestLog: requestLog)
-                    } else {
-                        var out = channel.allocator.buffer(capacity: responseData.count)
-                        out.writeBytes(responseData)
-                        self.sendJSON(on: channel, buffer: out, keepAlive: keepAlive, sessionID: sessionIDCopy, requestLog: requestLog)
-                    }
-                case .invalidUpstreamResponse:
-                    self.sendPlain(on: channel, status: .badGateway, body: "invalid upstream response", keepAlive: keepAlive, sessionID: sessionIDCopy, requestLog: requestLog)
-                case .timeout:
-                    self.sendMCPError(
-                        on: channel,
-                        ids: started.transform.responseIDs,
-                        code: -32000,
-                        message: "upstream timeout",
-                        forceBatchArray: started.transform.isBatch,
-                        prefersEventStream: prefersEventStream,
-                        keepAlive: keepAlive,
-                        sessionID: sessionIDCopy,
-                        requestLog: requestLog
-                    )
-                }
-            }
-        } else {
-            if prepared.transform.method == "notifications/initialized" && sessionManager.isInitialized() {
-                sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
-            } else {
-                sessionManager.sendUpstream(prepared.transform.upstreamData, upstreamIndex: prepared.upstreamIndex)
-                sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
-            }
         }
     }
 

@@ -3,20 +3,19 @@ import Foundation
 extension XcodeMCPProxyInstallCommand {
     package static func scanInvocation(_ args: [String]) -> InstallCommandInvocation {
         var invocation = InstallCommandInvocation()
-        var index = 1
+        var cursor = CLIArgumentCursor(args: args)
 
-        while index < args.count {
-            let arg = args[index]
+        while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
                 invocation.showHelp = true
-                index += 1
+                cursor.advance()
             case "--prefix", "--bindir":
-                index += min(2, args.count - index)
+                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
             case "--dry-run":
-                index += 1
+                cursor.advance()
             default:
-                index += 1
+                cursor.advance()
             }
         }
 
@@ -57,28 +56,25 @@ extension XcodeMCPProxyInstallCommand {
             dryRun: false
         )
 
-        var index = 1
-        while index < args.count {
-            let arg = args[index]
+        var cursor = CLIArgumentCursor(args: args)
+        while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
                 options.showHelp = true
-                index += 1
+                cursor.advance()
             case "--prefix":
-                guard index + 1 < args.count else {
-                    throw InstallCommandError.message("--prefix requires a value")
-                }
-                options.prefix = args[index + 1]
-                index += 2
+                options.prefix = try cursor.requiredValue(
+                    for: arg,
+                    error: { InstallCommandError.message("\($0) requires a value") }
+                )
             case "--bindir":
-                guard index + 1 < args.count else {
-                    throw InstallCommandError.message("--bindir requires a value")
-                }
-                options.bindir = args[index + 1]
-                index += 2
+                options.bindir = try cursor.requiredValue(
+                    for: arg,
+                    error: { InstallCommandError.message("\($0) requires a value") }
+                )
             case "--dry-run":
                 options.dryRun = true
-                index += 1
+                cursor.advance()
             default:
                 throw InstallCommandError.message("unknown option: \(arg)")
             }

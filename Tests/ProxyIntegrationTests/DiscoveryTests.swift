@@ -43,7 +43,7 @@ struct DiscoveryTests {
         #expect(Discovery.read(overrideURL: url) == nil)
     }
 
-    @Test func discoveryRejectsDeadPid() async throws {
+    @Test func discoveryRejectsDeadPID() async throws {
         let url = makeTempDiscoveryURL()
         defer { cleanupTempDiscoveryURL(url) }
         let record = DiscoveryRecord(

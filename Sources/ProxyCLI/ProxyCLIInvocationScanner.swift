@@ -14,7 +14,7 @@ package struct ProxyCLIServerScan {
     package var hasListenFlag = false
     package var hasHostFlag = false
     package var hasPortFlag = false
-    package var hasXcodePidFlag = false
+    package var hasXcodePIDFlag = false
     package var hasLazyInitFlag = false
     package var forceRestart = false
     package var dryRun = false
@@ -146,7 +146,7 @@ package enum ProxyCLIInvocationScanner {
             case "--port":
                 scan.hasPortFlag = true
             case "--xcode-pid":
-                scan.hasXcodePidFlag = true
+                scan.hasXcodePIDFlag = true
             default:
                 break
             }

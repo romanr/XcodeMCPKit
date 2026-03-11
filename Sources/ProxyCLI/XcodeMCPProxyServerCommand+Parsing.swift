@@ -10,7 +10,7 @@ extension XcodeMCPProxyServerCommand {
             hasListenFlag: scan.hasListenFlag,
             hasHostFlag: scan.hasHostFlag,
             hasPortFlag: scan.hasPortFlag,
-            hasXcodePidFlag: scan.hasXcodePidFlag,
+            hasXcodePIDFlag: scan.hasXcodePIDFlag,
             hasLazyInitFlag: scan.hasLazyInitFlag,
             forceRestart: scan.forceRestart,
             dryRun: scan.dryRun
@@ -20,7 +20,7 @@ extension XcodeMCPProxyServerCommand {
     package static func applyDefaults(
         from environment: [String: String],
         to options: inout ProxyServerOptions,
-        resolveXcodePid: () -> String?,
+        resolveXcodePID: () -> String?,
         stderr: (String) -> Void
     ) {
         if !options.hasListenFlag && !options.hasHostFlag && !options.hasPortFlag {
@@ -43,10 +43,10 @@ extension XcodeMCPProxyServerCommand {
             options.forwardedArgs += ["--port", "8765"]
         }
 
-        if !options.hasXcodePidFlag {
+        if !options.hasXcodePIDFlag {
             if let explicit = nonEmpty(environment["XCODE_PID"]) ?? nonEmpty(environment["MCP_XCODE_PID"]) {
                 options.forwardedArgs += ["--xcode-pid", explicit]
-            } else if let resolved = resolveXcodePid() {
+            } else if let resolved = resolveXcodePID() {
                 options.forwardedArgs += ["--xcode-pid", resolved]
             } else {
                 stderr("warning: Xcode PID not found; running without --xcode-pid.")

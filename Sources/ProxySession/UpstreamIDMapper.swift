@@ -42,16 +42,16 @@ extension SessionManager {
     }
 }
 
-package final class UpstreamIdMapper: Sendable {
+package final class UpstreamIDMapper: Sendable {
     private struct RequestLookupKey: Hashable, Sendable {
-        let sessionId: String
-        let requestIdKey: String
+        let sessionID: String
+        let requestIDKey: String
     }
 
     private struct State: Sendable {
-        var nextId: Int64 = 1
+        var nextID: Int64 = 1
         var mappingsByUpstream: [[Int64: UpstreamMapping]] = []
-        var upstreamIdByRequestKeyByUpstream: [[RequestLookupKey: Int64]] = []
+        var upstreamIDByRequestKeyByUpstream: [[RequestLookupKey: Int64]] = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -59,28 +59,28 @@ package final class UpstreamIdMapper: Sendable {
     init(upstreamCount: Int) {
         state.withLockedValue { state in
             state.mappingsByUpstream = Array(repeating: [:], count: upstreamCount)
-            state.upstreamIdByRequestKeyByUpstream = Array(repeating: [:], count: upstreamCount)
+            state.upstreamIDByRequestKeyByUpstream = Array(repeating: [:], count: upstreamCount)
         }
     }
 
-    func assign(upstreamIndex: Int, sessionId: String, originalId: RPCId, isInitialize: Bool)
+    func assign(upstreamIndex: Int, sessionID: String, originalID: RPCID, isInitialize: Bool)
         -> Int64
     {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return 0
             }
-            let id = state.nextId
-            state.nextId += 1
+            let id = state.nextID
+            state.nextID += 1
             state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
-                sessionId: sessionId,
-                originalId: originalId,
+                sessionID: sessionID,
+                originalID: originalID,
                 isInitialize: isInitialize
             )
             if isInitialize == false {
                 let requestKey = Self.requestLookupKey(
-                    sessionId: sessionId, requestIdKey: originalId.key)
-                state.upstreamIdByRequestKeyByUpstream[upstreamIndex][requestKey] = id
+                    sessionID: sessionID, requestIDKey: originalID.key)
+                state.upstreamIDByRequestKeyByUpstream[upstreamIndex][requestKey] = id
             }
             return id
         }
@@ -91,47 +91,47 @@ package final class UpstreamIdMapper: Sendable {
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return 0
             }
-            let id = state.nextId
-            state.nextId += 1
+            let id = state.nextID
+            state.nextID += 1
             state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
-                sessionId: nil,
-                originalId: nil,
+                sessionID: nil,
+                originalID: nil,
                 isInitialize: true
             )
             return id
         }
     }
 
-    func consume(upstreamIndex: Int, upstreamId: Int64) -> UpstreamMapping? {
+    func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamMapping? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return nil
             }
-            let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
+            let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamID)
             if let mapping,
-                let sessionId = mapping.sessionId,
-                let originalId = mapping.originalId
+                let sessionID = mapping.sessionID,
+                let originalID = mapping.originalID
             {
                 let requestKey = Self.requestLookupKey(
-                    sessionId: sessionId, requestIdKey: originalId.key)
-                state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(
+                    sessionID: sessionID, requestIDKey: originalID.key)
+                state.upstreamIDByRequestKeyByUpstream[upstreamIndex].removeValue(
                     forKey: requestKey)
             }
             return mapping
         }
     }
 
-    func remove(upstreamIndex: Int, upstreamId: Int64) {
+    func remove(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
-            let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
+            let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamID)
             if let mapping,
-                let sessionId = mapping.sessionId,
-                let originalId = mapping.originalId
+                let sessionID = mapping.sessionID,
+                let originalID = mapping.originalID
             {
                 let requestKey = Self.requestLookupKey(
-                    sessionId: sessionId, requestIdKey: originalId.key)
-                state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(
+                    sessionID: sessionID, requestIDKey: originalID.key)
+                state.upstreamIDByRequestKeyByUpstream[upstreamIndex].removeValue(
                     forKey: requestKey)
             }
         }
@@ -139,22 +139,22 @@ package final class UpstreamIdMapper: Sendable {
 
     func remove(
         upstreamIndex: Int,
-        sessionId: String,
-        requestIdKey: String
+        sessionID: String,
+        requestIDKey: String
     ) -> Int64? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return nil
             }
-            let requestKey = Self.requestLookupKey(sessionId: sessionId, requestIdKey: requestIdKey)
+            let requestKey = Self.requestLookupKey(sessionID: sessionID, requestIDKey: requestIDKey)
             guard
-                let upstreamId = state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeValue(
+                let upstreamID = state.upstreamIDByRequestKeyByUpstream[upstreamIndex].removeValue(
                     forKey: requestKey)
             else {
                 return nil
             }
-            state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamId)
-            return upstreamId
+            state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamID)
+            return upstreamID
         }
     }
 
@@ -162,19 +162,19 @@ package final class UpstreamIdMapper: Sendable {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
             state.mappingsByUpstream[upstreamIndex].removeAll()
-            state.upstreamIdByRequestKeyByUpstream[upstreamIndex].removeAll()
+            state.upstreamIDByRequestKeyByUpstream[upstreamIndex].removeAll()
         }
     }
 
-    private static func requestLookupKey(sessionId: String, requestIdKey: String)
+    private static func requestLookupKey(sessionID: String, requestIDKey: String)
         -> RequestLookupKey
     {
-        RequestLookupKey(sessionId: sessionId, requestIdKey: requestIdKey)
+        RequestLookupKey(sessionID: sessionID, requestIDKey: requestIDKey)
     }
 }
 
 package struct UpstreamMapping: Sendable {
-    package let sessionId: String?
-    package let originalId: RPCId?
+    package let sessionID: String?
+    package let originalID: RPCID?
     package let isInitialize: Bool
 }

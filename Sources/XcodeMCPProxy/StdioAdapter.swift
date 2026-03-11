@@ -23,7 +23,7 @@ public actor StdioAdapter {
     private let outputWriter: StdioWriter
     private let logger: Logger
     private let session: URLSession
-    private let sessionId: String
+    private let sessionID: String
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
     private var readTask: Task<Void, Never>?
@@ -45,7 +45,7 @@ public actor StdioAdapter {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
         self.session = URLSession(configuration: configuration)
-        self.sessionId = "stdio-\(UUID().uuidString)"
+        self.sessionID = "stdio-\(UUID().uuidString)"
     }
 
     public func start() async {
@@ -141,7 +141,7 @@ public actor StdioAdapter {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
         applyTimeout(to: &request)
         request.httpBody = data
 
@@ -185,7 +185,7 @@ public actor StdioAdapter {
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
         applyTimeout(to: &request, allowLongRunning: true)
 
         let (bytes, response) = try await session.bytes(for: request)
@@ -276,8 +276,8 @@ public actor StdioAdapter {
             return RequestEnvelope(ids: [])
         }
         if let object = json as? [String: Any] {
-            if let id = object["id"], !(id is NSNull), let jsonId = JSONValue(any: id) {
-                return RequestEnvelope(ids: [jsonId])
+            if let id = object["id"], !(id is NSNull), let jsonID = JSONValue(any: id) {
+                return RequestEnvelope(ids: [jsonID])
             }
             return RequestEnvelope(ids: [])
         }
@@ -285,8 +285,8 @@ public actor StdioAdapter {
             var ids: [JSONValue] = []
             for item in array {
                 guard let object = item as? [String: Any] else { continue }
-                if let id = object["id"], !(id is NSNull), let jsonId = JSONValue(any: id) {
-                    ids.append(jsonId)
+                if let id = object["id"], !(id is NSNull), let jsonID = JSONValue(any: id) {
+                    ids.append(jsonID)
                 }
             }
             return RequestEnvelope(ids: ids)

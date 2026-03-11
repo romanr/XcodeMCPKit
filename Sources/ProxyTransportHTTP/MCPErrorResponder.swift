@@ -3,7 +3,7 @@ import ProxyCore
 
 enum MCPErrorResponder {
     static func errorResponseData(
-        id: RPCId?,
+        id: RPCID?,
         code: Int,
         message: String,
         data: JSONValue? = nil
@@ -21,7 +21,7 @@ enum MCPErrorResponder {
     }
 
     static func errorResponseData(
-        ids: [RPCId],
+        ids: [RPCID],
         code: Int,
         message: String,
         data: JSONValue? = nil,
@@ -47,30 +47,30 @@ enum MCPErrorResponder {
         return try? JSONSerialization.data(withJSONObject: responses, options: [])
     }
 
-    static func requestMetadata(from data: Data) -> (ids: [RPCId], isBatch: Bool) {
+    static func requestMetadata(from data: Data) -> (ids: [RPCID], isBatch: Bool) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return ([], false)
         }
         if let object = json as? [String: Any] {
-            if let id = object["id"], let rpcId = RPCId(any: id) {
-                return ([rpcId], false)
+            if let id = object["id"], let rpcID = RPCID(any: id) {
+                return ([rpcID], false)
             }
             return ([], false)
         }
         if let array = json as? [Any] {
-            let ids: [RPCId] = array.compactMap { item -> RPCId? in
+            let ids: [RPCID] = array.compactMap { item -> RPCID? in
                 guard let object = item as? [String: Any],
                       let id = object["id"] else {
                     return nil
                 }
-                return RPCId(any: id)
+                return RPCID(any: id)
             }
             return (ids, true)
         }
         return ([], false)
     }
 
-    static func requestIDs(from data: Data) -> [RPCId] {
+    static func requestIDs(from data: Data) -> [RPCID] {
         requestMetadata(from: data).ids
     }
 

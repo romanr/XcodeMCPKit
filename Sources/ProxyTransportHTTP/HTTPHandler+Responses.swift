@@ -13,7 +13,7 @@ extension HTTPHandler {
         requestLog: RequestLogContext
     ) {
         switch handling {
-        case .initialize(let future, let sessionId, let originalId):
+        case .initialize(let future, let sessionID, let originalID):
             future.whenComplete { result in
                 switch result {
                 case .success(let buffer):
@@ -24,7 +24,7 @@ extension HTTPHandler {
                             status: .badGateway,
                             body: "invalid upstream response",
                             keepAlive: keepAlive,
-                            sessionId: sessionId,
+                            sessionID: sessionID,
                             requestLog: requestLog
                         )
                         return
@@ -34,7 +34,7 @@ extension HTTPHandler {
                             on: channel,
                             data: data,
                             keepAlive: keepAlive,
-                            sessionId: sessionId,
+                            sessionID: sessionID,
                             requestLog: requestLog
                         )
                     } else {
@@ -44,30 +44,30 @@ extension HTTPHandler {
                             on: channel,
                             buffer: out,
                             keepAlive: keepAlive,
-                            sessionId: sessionId,
+                            sessionID: sessionID,
                             requestLog: requestLog
                         )
                     }
                 case .failure:
                     self.sendMCPError(
                         on: channel,
-                        id: originalId,
+                        id: originalID,
                         code: -32000,
                         message: "upstream timeout",
                         prefersEventStream: prefersEventStream,
                         keepAlive: keepAlive,
-                        sessionId: sessionId,
+                        sessionID: sessionID,
                         requestLog: requestLog
                     )
                 }
             }
-        case .immediateResponse(let data, let sessionId):
+        case .immediateResponse(let data, let sessionID):
             if prefersEventStream {
                 sendSingleSSE(
                     on: channel,
                     data: data,
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             } else {
@@ -77,11 +77,11 @@ extension HTTPHandler {
                     on: channel,
                     buffer: out,
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             }
-        case .mcpError(let id, let code, let message, let sessionId):
+        case .mcpError(let id, let code, let message, let sessionID):
             sendMCPError(
                 on: channel,
                 id: id,
@@ -89,124 +89,39 @@ extension HTTPHandler {
                 message: message,
                 prefersEventStream: prefersEventStream,
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
         }
     }
 
-    func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
+    func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {
         guard MCPResponseEmitter.sendSingleSSE(
             on: channel,
             data: data,
             keepAlive: keepAlive,
-            sessionId: sessionId
+            sessionID: sessionID
         ) else {
             sendPlain(
                 on: channel,
                 status: .badGateway,
                 body: "invalid upstream response",
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
             return
         }
-        logResponse(requestLog, status: .ok, sessionId: sessionId)
+        logResponse(requestLog, status: .ok, sessionID: sessionID)
     }
 
-    func rewriteUnsupportedResourcesListResponseIfNeeded(
-        method: String?,
-        originalId: RPCId?,
-        upstreamData: Data
-    ) -> Data {
-        guard let method,
-              method == "resources/list" || method == "resources/templates/list" else {
-            return upstreamData
-        }
-        guard let originalId else { return upstreamData }
-
-        let expectedKey = (method == "resources/list") ? "resources" : "resourceTemplates"
-
-        guard let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any] else {
-            return upstreamData
-        }
-
-        let result = object["result"]
-
-        if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
-            return upstreamData
-        }
-
-        if let error = object["error"] as? [String: Any] {
-            let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int)
-            guard code == -32601 else {
-                return upstreamData
-            }
-            if let result,
-               isNonStandardUnsupportedResourcesResult(result, method: method),
-               let empty = emptyResourcesListResponseData(method: method, originalId: originalId) {
-                return empty
-            }
-            return emptyResourcesListResponseData(method: method, originalId: originalId) ?? upstreamData
-        }
-
-        if let result,
-           isNonStandardUnsupportedResourcesResult(result, method: method),
-           let empty = emptyResourcesListResponseData(method: method, originalId: originalId) {
-            return empty
-        }
-
-        return upstreamData
-    }
-
-    func isNonStandardUnsupportedResourcesResult(_ result: Any, method: String) -> Bool {
-        guard let resultObject = result as? [String: Any] else {
-            return false
-        }
-        guard let isError = resultObject["isError"] as? Bool, isError else {
-            return false
-        }
-        guard let content = resultObject["content"] as? [Any], !content.isEmpty else {
-            return false
-        }
-
-        let methodToken = method.lowercased()
-        for item in content {
-            guard let contentObject = item as? [String: Any],
-                  let text = contentObject["text"] as? String else {
-                continue
-            }
-            let normalized = text.lowercased()
-            if normalized.contains("unknown method"), normalized.contains(methodToken) {
-                return true
-            }
-        }
-        return false
-    }
-
-    func emptyResourcesListResponseData(method: String, originalId: RPCId) -> Data? {
-        let result: [String: Any] = (method == "resources/list")
-            ? ["resources": [Any]()]
-            : ["resourceTemplates": [Any]()]
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": originalId.value.foundationObject,
-            "result": result,
-        ]
-        guard JSONSerialization.isValidJSONObject(response) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
-        logResponse(requestLog, status: .ok, sessionId: sessionId)
+    func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {
+        logResponse(requestLog, status: .ok, sessionID: sessionID)
         MCPResponseEmitter.sendJSON(
             on: channel,
             buffer: buffer,
             keepAlive: keepAlive,
-            sessionId: sessionId
+            sessionID: sessionID
         )
     }
 
@@ -214,17 +129,17 @@ extension HTTPHandler {
         on channel: Channel,
         data: Data,
         keepAlive: Bool,
-        sessionId: String?,
+        sessionID: String?,
         requestLog: RequestLogContext
     ) {
-        logResponse(requestLog, status: .ok, sessionId: sessionId)
+        logResponse(requestLog, status: .ok, sessionID: sessionID)
         var buffer = channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
         MCPResponseEmitter.sendJSON(
             on: channel,
             buffer: buffer,
             keepAlive: keepAlive,
-            sessionId: sessionId
+            sessionID: sessionID
         )
     }
 
@@ -233,37 +148,37 @@ extension HTTPHandler {
         status: HTTPResponseStatus,
         body: String,
         keepAlive: Bool,
-        sessionId: String?,
+        sessionID: String?,
         requestLog: RequestLogContext
     ) {
-        logResponse(requestLog, status: status, sessionId: sessionId)
+        logResponse(requestLog, status: status, sessionID: sessionID)
         MCPResponseEmitter.sendPlain(
             on: channel,
             status: status,
             body: body,
             keepAlive: keepAlive,
-            sessionId: sessionId
+            sessionID: sessionID
         )
     }
 
-    func sendEmpty(on channel: Channel, status: HTTPResponseStatus, keepAlive: Bool, sessionId: String, requestLog: RequestLogContext) {
-        logResponse(requestLog, status: status, sessionId: sessionId)
+    func sendEmpty(on channel: Channel, status: HTTPResponseStatus, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {
+        logResponse(requestLog, status: status, sessionID: sessionID)
         MCPResponseEmitter.sendEmpty(
             on: channel,
             status: status,
             keepAlive: keepAlive,
-            sessionId: sessionId
+            sessionID: sessionID
         )
     }
 
     func sendMCPError(
         on channel: Channel,
-        id: RPCId?,
+        id: RPCID?,
         code: Int,
         message: String,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionId: String,
+        sessionID: String,
         requestLog: RequestLogContext
     ) {
         guard let data = MCPErrorResponder.errorResponseData(
@@ -276,95 +191,29 @@ extension HTTPHandler {
                 status: .badGateway,
                 body: "invalid error response",
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
             return
         }
         if prefersEventStream {
-            sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+            sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionID: sessionID, requestLog: requestLog)
         } else {
             var buffer = channel.allocator.buffer(capacity: data.count)
             buffer.writeBytes(data)
-            sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+            sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionID: sessionID, requestLog: requestLog)
         }
-    }
-
-    func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {
-        guard let any = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
-            return true
-        }
-
-        if let object = any as? [String: Any] {
-            return isUpstreamOverloadedErrorResponse(object) == false
-        }
-
-        if let array = any as? [Any] {
-            let objects = array.compactMap { $0 as? [String: Any] }
-            guard objects.isEmpty == false else {
-                return true
-            }
-            return objects.allSatisfy(isUpstreamOverloadedErrorResponse) == false
-        }
-
-        return true
-    }
-
-    func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
-        let retryableErrorText = "SourceEditorCallableDiagnosticError error 5"
-        guard
-            let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
-                as? [String: Any],
-            let result = object["result"] as? [String: Any],
-            let isError = result["isError"] as? Bool,
-            isError,
-            let content = result["content"] as? [Any]
-        else {
-            return false
-        }
-
-        for item in content {
-            guard let contentObject = item as? [String: Any],
-                let text = contentObject["text"] as? String
-            else {
-                continue
-            }
-            if text.contains("Failed to retrieve diagnostics for"),
-                text.contains(retryableErrorText)
-            {
-                return true
-            }
-        }
-        return false
-    }
-
-    func isUpstreamOverloadedErrorResponse(_ object: [String: Any]) -> Bool {
-        guard let error = object["error"] as? [String: Any] else {
-            return false
-        }
-
-        let code: Int?
-        if let number = error["code"] as? NSNumber {
-            code = number.intValue
-        } else {
-            code = error["code"] as? Int
-        }
-        guard code == -32002 else {
-            return false
-        }
-
-        return (error["message"] as? String) == "upstream overloaded"
     }
 
     func sendMCPError(
         on channel: Channel,
-        ids: [RPCId],
+        ids: [RPCID],
         code: Int,
         message: String,
         forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionId: String,
+        sessionID: String,
         requestLog: RequestLogContext
     ) {
         guard let data = MCPErrorResponder.errorResponseData(
@@ -378,17 +227,17 @@ extension HTTPHandler {
                 status: .badGateway,
                 body: "invalid error response",
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
             return
         }
         if prefersEventStream {
-            sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+            sendSingleSSE(on: channel, data: data, keepAlive: keepAlive, sessionID: sessionID, requestLog: requestLog)
         } else {
             var buffer = channel.allocator.buffer(capacity: data.count)
             buffer.writeBytes(data)
-            sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
+            sendJSON(on: channel, buffer: buffer, keepAlive: keepAlive, sessionID: sessionID, requestLog: requestLog)
         }
     }
 
@@ -417,7 +266,7 @@ extension HTTPHandler {
         logger.info("HTTP request", metadata: metadata)
     }
 
-    func logResponse(_ request: RequestLogContext, status: HTTPResponseStatus, sessionId: String?) {
+    func logResponse(_ request: RequestLogContext, status: HTTPResponseStatus, sessionID: String?) {
         var metadata: Logger.Metadata = [
             "id": .string(request.id),
             "method": .string(request.method),
@@ -427,8 +276,8 @@ extension HTTPHandler {
         if let remote = request.remoteAddress {
             metadata["remote"] = .string(remote)
         }
-        if let sessionId {
-            metadata["session"] = .string(sessionId)
+        if let sessionID {
+            metadata["session"] = .string(sessionID)
         }
         logger.info("HTTP response", metadata: metadata)
     }

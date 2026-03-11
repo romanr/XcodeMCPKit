@@ -16,9 +16,9 @@ struct RequestInspectorTests {
         var mapped: [String] = []
         let transform = try RequestInspector.transform(
             data,
-            sessionId: "s1",
-            mapId: { sessionId, originalId in
-                mapped.append("\(sessionId):\(originalId.key)")
+            sessionID: "s1",
+            mapID: { sessionID, originalID in
+                mapped.append("\(sessionID):\(originalID.key)")
                 return 42
             }
         )
@@ -46,8 +46,8 @@ struct RequestInspectorTests {
         var mapped = false
         let transform = try RequestInspector.transform(
             data,
-            sessionId: "s1",
-            mapId: { _, _ in
+            sessionID: "s1",
+            mapID: { _, _ in
                 mapped = true
                 return 1
             }
@@ -70,8 +70,8 @@ struct RequestInspectorTests {
         var mappedCount = 0
         let transform = try RequestInspector.transform(
             data,
-            sessionId: "s1",
-            mapId: { _, _ in
+            sessionID: "s1",
+            mapID: { _, _ in
                 mappedCount += 1
                 return 77
             }
@@ -94,8 +94,8 @@ struct RequestInspectorTests {
         do {
             _ = try RequestInspector.transform(
                 data,
-                sessionId: "s1",
-                mapId: { _, _ in 1 }
+                sessionID: "s1",
+                mapID: { _, _ in 1 }
             )
             #expect(Bool(false))
         } catch {

@@ -12,11 +12,11 @@ extension SessionManager {
         }
         guard shouldSend else { return }
 
-        let upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
-        initializeCoordinator.setPrimaryInitUpstreamId(upstreamId)
-        markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
+        let upstreamID = idMapper.assignInitialize(upstreamIndex: 0)
+        initializeCoordinator.setPrimaryInitUpstreamID(upstreamID)
+        markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
 
-        let request = makeInternalInitializeRequest(id: upstreamId)
+        let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
             sendUpstream(data, upstreamIndex: 0)
         } else {
@@ -51,16 +51,16 @@ extension SessionManager {
 
         for item in update.pending {
             if sessionStillMatchesPendingInitialize(
-                sessionId: item.sessionId,
+                sessionID: item.sessionID,
                 sessionGeneration: item.sessionGeneration
             ) {
                 setInitializeUpstreamIndexIfNeeded(
-                    sessionId: item.sessionId,
+                    sessionID: item.sessionID,
                     upstreamIndex: upstreamIndex,
                     preferOnNextPin: false
                 )
             }
-            if let buffer = encodeInitializeResponse(originalId: item.originalId, result: result) {
+            if let buffer = encodeInitializeResponse(originalID: item.originalID, result: result) {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)
                 }
@@ -78,10 +78,10 @@ extension SessionManager {
         refreshToolsListIfNeeded()
     }
 
-    func encodeInitializeResponse(originalId: RPCId, result: JSONValue) -> ByteBuffer? {
+    func encodeInitializeResponse(originalID: RPCID, result: JSONValue) -> ByteBuffer? {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": originalId.value.foundationObject,
+            "id": originalID.value.foundationObject,
             "result": result.foundationObject,
         ]
         guard JSONSerialization.isValidJSONObject(response),
@@ -94,12 +94,12 @@ extension SessionManager {
         return buffer
     }
 
-    func encodeInitializeErrorResponse(originalId: RPCId, errorObject: [String: Any])
+    func encodeInitializeErrorResponse(originalID: RPCID, errorObject: [String: Any])
         -> ByteBuffer?
     {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": originalId.value.foundationObject,
+            "id": originalID.value.foundationObject,
             "error": errorObject,
         ]
         guard JSONSerialization.isValidJSONObject(response),
@@ -116,17 +116,17 @@ extension SessionManager {
         let result = initializeCoordinator.completePrimaryInitializeFailure()
         guard let result else { return }
         result.timeout?.cancel()
-        if let upstreamId = result.upstreamId {
-            idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
+        if let upstreamID = result.upstreamID {
+            idMapper.remove(upstreamIndex: 0, upstreamID: upstreamID)
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
             clearInitializeUpstreamIndex(
-                sessionId: item.sessionId,
+                sessionID: item.sessionID,
                 onlyIfGeneration: item.sessionGeneration
             )
             if let buffer = encodeInitializeErrorResponse(
-                originalId: item.originalId, errorObject: errorObject)
+                originalID: item.originalID, errorObject: errorObject)
             {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)
@@ -175,13 +175,13 @@ extension SessionManager {
         let result = initializeCoordinator.completePrimaryInitializeFailure()
         guard let result else { return }
         result.timeout?.cancel()
-        if let upstreamId = result.upstreamId {
-            idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
+        if let upstreamID = result.upstreamID {
+            idMapper.remove(upstreamIndex: 0, upstreamID: upstreamID)
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
             clearInitializeUpstreamIndex(
-                sessionId: item.sessionId,
+                sessionID: item.sessionID,
                 onlyIfGeneration: item.sessionGeneration
             )
             item.eventLoop.execute {
@@ -194,8 +194,8 @@ extension SessionManager {
         }
     }
 
-    func markUpstreamInitInFlight(upstreamIndex: Int, upstreamId: Int64) {
-        upstreamPool.markInitInFlight(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+    func markUpstreamInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
+        upstreamPool.markInitInFlight(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
     }
 
     func clearUpstreamInitInFlight(upstreamIndex: Int) {
@@ -220,8 +220,8 @@ extension SessionManager {
         }
     }
 
-    func toolsListInternalSessionId() -> String {
-        toolsListCache.internalSessionId { hasSession(id: $0) }
+    func toolsListInternalSessionID() -> String {
+        toolsListCache.internalSessionID { hasSession(id: $0) }
     }
 
     func makeInternalInitializeRequest(id: Int64) -> [String: Any] {

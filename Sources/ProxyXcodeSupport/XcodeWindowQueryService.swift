@@ -3,16 +3,16 @@ import NIO
 
 package struct XcodeWindowQueryService {
     package typealias ToolCaller =
-        @Sendable (_ name: String, _ arguments: [String: Any], _ sessionId: String, _ eventLoop: EventLoop) async -> [String: Any]?
+        @Sendable (_ name: String, _ arguments: [String: Any], _ sessionID: String, _ eventLoop: EventLoop) async -> [String: Any]?
 
     package init() {}
 
     package func listWindows(
-        sessionId: String,
+        sessionID: String,
         eventLoop: EventLoop,
         toolCaller: ToolCaller
     ) async -> [XcodeWindowInfo]? {
-        guard let result = await toolCaller("XcodeListWindows", [:], sessionId, eventLoop),
+        guard let result = await toolCaller("XcodeListWindows", [:], sessionID, eventLoop),
             let message = extractToolMessage(from: result)
         else {
             return nil

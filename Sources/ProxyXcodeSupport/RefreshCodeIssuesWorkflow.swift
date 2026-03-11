@@ -25,17 +25,17 @@ package struct RefreshCodeIssuesRequest: Sendable {
 
 package enum RefreshForwardAttemptResult: Sendable {
     case success(Data)
-    case timeout(responseIds: [RPCId], isBatch: Bool)
-    case upstreamUnavailable(responseIds: [RPCId], isBatch: Bool)
-    case overloaded(responseIds: [RPCId], isBatch: Bool)
+    case timeout(responseIDs: [RPCID], isBatch: Bool)
+    case upstreamUnavailable(responseIDs: [RPCID], isBatch: Bool)
+    case overloaded(responseIDs: [RPCID], isBatch: Bool)
     case invalidRequest
     case invalidUpstreamResponse
 }
 
 package struct RefreshCodeIssuesWorkflow {
-    package typealias WindowsProvider = @Sendable (_ sessionId: String, _ eventLoop: EventLoop) async -> [XcodeWindowInfo]?
+    package typealias WindowsProvider = @Sendable (_ sessionID: String, _ eventLoop: EventLoop) async -> [XcodeWindowInfo]?
     package typealias Forwarder =
-        @Sendable (_ bodyData: Data, _ sessionId: String, _ requestIDs: [RPCId], _ requestIsBatch: Bool, _ eventLoop: EventLoop) async -> RefreshForwardAttemptResult
+        @Sendable (_ bodyData: Data, _ sessionID: String, _ requestIDs: [RPCID], _ requestIsBatch: Bool, _ eventLoop: EventLoop) async -> RefreshForwardAttemptResult
 
     package static let retryDelaysNanos: [UInt64] = [
         200_000_000,
@@ -59,8 +59,8 @@ package struct RefreshCodeIssuesWorkflow {
     package func run(
         refreshRequest: RefreshCodeIssuesRequest,
         bodyData: Data,
-        sessionId: String,
-        requestIDs: [RPCId],
+        sessionID: String,
+        requestIDs: [RPCID],
         requestIsBatch: Bool,
         eventLoop: EventLoop,
         windowsProvider: WindowsProvider,
@@ -69,7 +69,7 @@ package struct RefreshCodeIssuesWorkflow {
         do {
             return try await coordinator.withPermit(key: refreshRequest.queueKey) { permit in
                 let baseMetadata: Logger.Metadata = [
-                    "session": .string(sessionId),
+                    "session": .string(sessionID),
                     "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
                     "queue_key": .string(refreshRequest.queueKey),
                 ]
@@ -97,7 +97,7 @@ package struct RefreshCodeIssuesWorkflow {
                 let warmupResult = await warmupDriver.warmUp(
                     tabIdentifier: refreshRequest.tabIdentifier,
                     filePath: refreshRequest.filePath,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     eventLoop: eventLoop,
                     windowsProvider: windowsProvider
                 )
@@ -159,7 +159,7 @@ package struct RefreshCodeIssuesWorkflow {
 
                     let result = await forwarder(
                         bodyData,
-                        sessionId,
+                        sessionID,
                         requestIDs,
                         requestIsBatch,
                         eventLoop
@@ -212,32 +212,32 @@ package struct RefreshCodeIssuesWorkflow {
             logger.warning(
                 "Rejected refresh code issues request because queue is full",
                 metadata: [
-                    "session": .string(sessionId),
+                    "session": .string(sessionID),
                     "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
                     "queue_key": .string(refreshRequest.queueKey),
                 ]
             )
-            return .overloaded(responseIds: requestIDs, isBatch: requestIsBatch)
+            return .overloaded(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
             logger.warning(
                 "Rejected refresh code issues request after queue wait timeout",
                 metadata: [
-                    "session": .string(sessionId),
+                    "session": .string(sessionID),
                     "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
                     "queue_key": .string(refreshRequest.queueKey),
                 ]
             )
-            return .overloaded(responseIds: requestIDs, isBatch: requestIsBatch)
+            return .overloaded(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch is CancellationError {
             logger.debug(
                 "Cancelled queued refresh code issues request",
                 metadata: [
-                    "session": .string(sessionId),
+                    "session": .string(sessionID),
                     "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
                     "queue_key": .string(refreshRequest.queueKey),
                 ]
             )
-            return .overloaded(responseIds: requestIDs, isBatch: requestIsBatch)
+            return .overloaded(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch {
             return .invalidRequest
         }

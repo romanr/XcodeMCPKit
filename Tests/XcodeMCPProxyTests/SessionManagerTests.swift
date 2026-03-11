@@ -21,12 +21,12 @@ struct SessionManagerTests {
         let request1 = makeInitializeRequest(id: 1)
         let request2 = makeInitializeRequest(id: 2)
         let future1 = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: request1,
             on: eventLoop
         )
         let future2 = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 2))!,
+            originalID: RPCID(any: NSNumber(value: 2))!,
             requestObject: request2,
             on: eventLoop
         )
@@ -36,8 +36,8 @@ struct SessionManagerTests {
         #expect(sent.count == 1)
         guard sent.count == 1 else { return }
 
-        let upstreamId = try extractUpstreamId(from: sent[0])
-        let response = try makeInitializeResponse(id: upstreamId)
+        let upstreamID = try extractUpstreamID(from: sent[0])
+        let response = try makeInitializeResponse(id: upstreamID)
         await upstream.yield(.message(response))
 
         let response1 = try decodeJSON(from: try await future1.get())
@@ -57,22 +57,22 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-A"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-A"
+        let session = manager.session(id: sessionID)
         _ = session.router.drainBufferedNotifications()
 
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let sent = await upstream.sent()
-        let initId = try extractUpstreamId(from: sent[0])
+        let initID = try extractUpstreamID(from: sent[0])
 
-        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+        await upstream.yield(.message(try makeInitializeResponse(id: initID)))
         let notification = try JSONSerialization.data(
             withJSONObject: [
                 "jsonrpc": "2.0",
@@ -98,13 +98,13 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-handshake"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-handshake"
+        let session = manager.session(id: sessionID)
         _ = session.router.drainBufferedNotifications()
 
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -125,8 +125,8 @@ struct SessionManagerTests {
         #expect(received.first == notification)
 
         let sent = await upstream.sent()
-        let initId = try extractUpstreamId(from: sent[0])
-        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+        let initID = try extractUpstreamID(from: sent[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initID)))
         _ = try await future.get()
     }
 
@@ -140,23 +140,23 @@ struct SessionManagerTests {
         defer { manager.shutdown() }
 
         let firstFuture = manager.registerInitialize(
-            sessionId: "session-A",
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: "session-A",
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let firstSent = await upstream.sent()
-        let firstInitId = try extractUpstreamId(from: firstSent[0])
-        await upstream.yield(.message(try makeInitializeResponse(id: firstInitId)))
+        let firstInitID = try extractUpstreamID(from: firstSent[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: firstInitID)))
         _ = try await firstFuture.get()
 
-        let sessionId = "session-B"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-B"
+        let session = manager.session(id: sessionID)
         _ = session.router.drainBufferedNotifications()
         let cachedFuture = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 2))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -186,24 +186,24 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-removed"
-        _ = manager.session(id: sessionId)
+        let sessionID = "session-removed"
+        _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        manager.removeSession(id: sessionId)
+        manager.removeSession(id: sessionID)
 
         let sent = await upstream.sent()
-        let initId = try extractUpstreamId(from: sent[0])
-        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+        let initID = try extractUpstreamID(from: sent[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initID)))
 
         _ = try await future.get()
-        #expect(manager.hasSession(id: sessionId) == false)
+        #expect(manager.hasSession(id: sessionID) == false)
     }
 
     @Test func sessionManagerDoesNotApplyRemovedInitializeStateToRecreatedSession() async throws {
@@ -215,23 +215,23 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-recreated"
-        _ = manager.session(id: sessionId)
+        let sessionID = "session-recreated"
+        _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        manager.removeSession(id: sessionId)
-        let replacement = manager.session(id: sessionId)
+        manager.removeSession(id: sessionID)
+        let replacement = manager.session(id: sessionID)
         _ = replacement.router.drainBufferedNotifications()
 
         let sent = await upstream.sent()
-        let initId = try extractUpstreamId(from: sent[0])
-        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+        let initID = try extractUpstreamID(from: sent[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initID)))
 
         let notification = try JSONSerialization.data(
             withJSONObject: [
@@ -263,24 +263,24 @@ struct SessionManagerTests {
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        let sessionId = "session-hinted-pin"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-hinted-pin"
+        let session = manager.session(id: sessionID)
         _ = session.router.drainBufferedNotifications()
 
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -309,7 +309,7 @@ struct SessionManagerTests {
         #expect(received.count == 1)
         let routedUpstream = try #require(received.first).elementsEqual(notification0) ? 0 : 1
 
-        let pinned = try #require(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+        let pinned = try #require(manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
         #expect(pinned == routedUpstream)
     }
 
@@ -324,7 +324,7 @@ struct SessionManagerTests {
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: request,
             on: eventLoop
         )
@@ -344,7 +344,7 @@ struct SessionManagerTests {
         }
 
         _ = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 2))!,
+            originalID: RPCID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -362,7 +362,7 @@ struct SessionManagerTests {
         defer { manager.shutdown() }
 
         let future = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -386,32 +386,32 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-timeout-recreated"
-        _ = manager.session(id: sessionId)
+        let sessionID = "session-timeout-recreated"
+        _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
 
-        manager.removeSession(id: sessionId)
-        _ = manager.session(id: sessionId)
+        manager.removeSession(id: sessionID)
+        _ = manager.session(id: sessionID)
         manager.testSetInitializeRoutingState(
-            sessionId: sessionId,
+            sessionID: sessionID,
             upstreamIndex: 0,
             preferOnNextPin: true,
             didReceiveInitializeUpstreamMessage: true
         )
-        let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionId))
+        let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
 
         await #expect(throws: TimeoutError.self) {
             try await future.get()
         }
 
-        let replacementSnapshotAfterTimeout = try #require(manager.testSessionSnapshot(id: sessionId))
+        let replacementSnapshotAfterTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterTimeout.generation == replacementSnapshotBeforeTimeout.generation)
         #expect(replacementSnapshotAfterTimeout.initializeUpstreamIndex == 0)
         #expect(replacementSnapshotAfterTimeout.preferInitializeUpstreamOnNextPin)
@@ -429,35 +429,35 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-error-recreated"
-        _ = manager.session(id: sessionId)
+        let sessionID = "session-error-recreated"
+        _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
-            sessionId: sessionId,
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let sent = await upstream.sent()
-        let initId = try extractUpstreamId(from: sent[0])
+        let initID = try extractUpstreamID(from: sent[0])
 
-        manager.removeSession(id: sessionId)
-        _ = manager.session(id: sessionId)
+        manager.removeSession(id: sessionID)
+        _ = manager.session(id: sessionID)
         manager.testSetInitializeRoutingState(
-            sessionId: sessionId,
+            sessionID: sessionID,
             upstreamIndex: 0,
             preferOnNextPin: true,
             didReceiveInitializeUpstreamMessage: true
         )
-        let replacementSnapshotBeforeError = try #require(manager.testSessionSnapshot(id: sessionId))
+        let replacementSnapshotBeforeError = try #require(manager.testSessionSnapshot(id: sessionID))
 
         await upstream.yield(
             .message(
                 try JSONSerialization.data(
                     withJSONObject: [
                         "jsonrpc": "2.0",
-                        "id": initId,
+                        "id": initID,
                         "error": [
                             "code": -32000,
                             "message": "boom",
@@ -472,7 +472,7 @@ struct SessionManagerTests {
         let errorObject = try #require(response["error"] as? [String: Any])
         #expect(errorObject["message"] as? String == "boom")
 
-        let replacementSnapshotAfterError = try #require(manager.testSessionSnapshot(id: sessionId))
+        let replacementSnapshotAfterError = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterError.generation == replacementSnapshotBeforeError.generation)
         #expect(replacementSnapshotAfterError.initializeUpstreamIndex == 0)
         #expect(replacementSnapshotAfterError.preferInitializeUpstreamOnNextPin)
@@ -507,27 +507,27 @@ struct SessionManagerTests {
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: request,
             on: eventLoop
         )
 
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let upstreamId = try extractUpstreamId(from: sent)
-        let response = try makeInitializeResponse(id: upstreamId)
+        let upstreamID = try extractUpstreamID(from: sent)
+        let response = try makeInitializeResponse(id: upstreamID)
         await upstream.yield(.message(response))
 
         _ = try await future.get()
         _ = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
 
         let cached = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 2))!,
+            originalID: RPCID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
         let cachedResponse = try decodeJSON(from: try await cached.get())
-        let cachedId = (cachedResponse["id"] as? NSNumber)?.intValue
-        #expect(cachedId == 2)
+        let cachedID = (cachedResponse["id"] as? NSNumber)?.intValue
+        #expect(cachedID == 2)
         #expect((await upstream.sent()).count == 2)
     }
 
@@ -542,13 +542,13 @@ struct SessionManagerTests {
 
         // First init establishes the cached init result.
         let init1 = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
         let firstInit = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let upstreamId1 = try extractUpstreamId(from: firstInit)
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamId1)))
+        let upstreamID1 = try extractUpstreamID(from: firstInit)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID1)))
         _ = try await init1.get()
 
         // Wait for notifications/initialized.
@@ -562,13 +562,13 @@ struct SessionManagerTests {
 
         // A new downstream initialize must trigger a new upstream initialize (no cached response).
         let init2 = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 2))!,
+            originalID: RPCID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let upstreamId2 = try extractUpstreamId(from: (await upstream.sent())[2])
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamId2)))
+        let upstreamID2 = try extractUpstreamID(from: (await upstream.sent())[2])
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID2)))
         _ = try await init2.get()
     }
 
@@ -587,20 +587,20 @@ struct SessionManagerTests {
 
         // First init establishes the cached init result (primary only).
         let init1 = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 1))!,
+            originalID: RPCID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
         let firstInit = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
-        let upstreamId0 = try extractUpstreamId(from: firstInit)
-        await upstream0.yield(.message(try makeInitializeResponse(id: upstreamId0)))
+        let upstreamID0 = try extractUpstreamID(from: firstInit)
+        await upstream0.yield(.message(try makeInitializeResponse(id: upstreamID0)))
         _ = try await init1.get()
 
         // Warm init -> upstream1
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1Messages = await upstream1.sent()
-        let upstreamId1 = try extractUpstreamId(from: init1Messages[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: upstreamId1)))
+        let upstreamID1 = try extractUpstreamID(from: init1Messages[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: upstreamID1)))
 
         // Wait for per-upstream notifications/initialized.
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
@@ -631,13 +631,13 @@ struct SessionManagerTests {
 
         // A new downstream initialize must trigger a new upstream initialize (no cached response).
         let init2 = manager.registerInitialize(
-            originalId: RPCId(any: NSNumber(value: 2))!,
+            originalID: RPCID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
         try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
-        let upstreamId2 = try extractUpstreamId(from: (await upstream0.sent())[2])
-        await upstream0.yield(.message(try makeInitializeResponse(id: upstreamId2)))
+        let upstreamID2 = try extractUpstreamID(from: (await upstream0.sent())[2])
+        await upstream0.yield(.message(try makeInitializeResponse(id: upstreamID2)))
         _ = try await init2.get()
     }
 
@@ -656,12 +656,12 @@ struct SessionManagerTests {
 
         // Initialize both upstreams.
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
-        let init0Id = try extractUpstreamId(from: init0)
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0)
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
-        let init1Id = try extractUpstreamId(from: init1)
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1)
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         // Wait for per-upstream notifications/initialized.
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
@@ -672,10 +672,10 @@ struct SessionManagerTests {
 
         // Primary warm init should be attempted, but we simulate it failing.
         let retry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        let retryId = try extractUpstreamId(from: retry)
+        let retryID = try extractUpstreamID(from: retry)
         let errorResponse: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": retryId,
+            "id": retryID,
             "error": [
                 "code": -1,
                 "message": "warm init failed",
@@ -712,12 +712,12 @@ struct SessionManagerTests {
 
         // Initialize both upstreams.
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
-        let init0Id = try extractUpstreamId(from: init0)
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0)
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
-        let init1Id = try extractUpstreamId(from: init1)
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1)
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         // Wait for per-upstream notifications/initialized.
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
@@ -726,7 +726,7 @@ struct SessionManagerTests {
         // Primary exit triggers warm init on primary.
         await upstream0.yield(.exit(1))
         let retry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        let retryId = try extractUpstreamId(from: retry)
+        let retryID = try extractUpstreamID(from: retry)
 
         // While primary warm init is in flight, last initialized upstream exits.
         await upstream1.yield(.exit(1))
@@ -739,7 +739,7 @@ struct SessionManagerTests {
         // Warm init fails with JSON-RPC error.
         let errorResponse: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": retryId,
+            "id": retryID,
             "error": [
                 "code": -1,
                 "message": "warm init failed",
@@ -767,57 +767,57 @@ struct SessionManagerTests {
         // Eager init -> upstream0
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         // Warm init -> upstream1
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         // Wait for per-upstream notifications/initialized.
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        let sessionIdA = "session-A"
-        let sessionIdB = "session-B"
-        let sessionA = manager.session(id: sessionIdA)
-        let sessionB = manager.session(id: sessionIdB)
+        let sessionIDA = "session-A"
+        let sessionIDB = "session-B"
+        let sessionA = manager.session(id: sessionIDA)
+        let sessionB = manager.session(id: sessionIDB)
 
-        let originalA = RPCId(any: NSNumber(value: 100))!
-        let originalB = RPCId(any: NSNumber(value: 101))!
+        let originalA = RPCID(any: NSNumber(value: 100))!
+        let originalB = RPCID(any: NSNumber(value: 101))!
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
         #expect(upstreamIndexA != upstreamIndexB)
 
         let futureA = sessionA.router.registerRequest(idKey: originalA.key, on: eventLoop)
-        let upstreamIdA = manager.assignUpstreamId(
-            sessionId: sessionIdA,
-            originalId: originalA,
+        let upstreamIDA = manager.assignUpstreamID(
+            sessionID: sessionIDA,
+            originalID: originalA,
             upstreamIndex: upstreamIndexA
         )
         manager.sendUpstream(
-            try makeToolListRequest(id: upstreamIdA), upstreamIndex: upstreamIndexA)
+            try makeToolListRequest(id: upstreamIDA), upstreamIndex: upstreamIndexA)
 
         let futureB = sessionB.router.registerRequest(idKey: originalB.key, on: eventLoop)
-        let upstreamIdB = manager.assignUpstreamId(
-            sessionId: sessionIdB,
-            originalId: originalB,
+        let upstreamIDB = manager.assignUpstreamID(
+            sessionID: sessionIDB,
+            originalID: originalB,
             upstreamIndex: upstreamIndexB
         )
         manager.sendUpstream(
-            try makeToolListRequest(id: upstreamIdB), upstreamIndex: upstreamIndexB)
+            try makeToolListRequest(id: upstreamIDB), upstreamIndex: upstreamIndexB)
 
         await yieldMessage(
-            try makeToolListResponse(id: upstreamIdA),
+            try makeToolListResponse(id: upstreamIDA),
             to: upstreamIndexA == 0 ? upstream0 : upstream1
         )
         await yieldMessage(
-            try makeToolListResponse(id: upstreamIdB),
+            try makeToolListResponse(id: upstreamIDB),
             to: upstreamIndexB == 0 ? upstream0 : upstream1
         )
 
@@ -844,27 +844,27 @@ struct SessionManagerTests {
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
         // Create two sessions and pin them to different upstreams.
-        let sessionIdA = "session-A"
-        let sessionIdB = "session-B"
-        let sessionA = manager.session(id: sessionIdA)
-        let sessionB = manager.session(id: sessionIdB)
+        let sessionIDA = "session-A"
+        let sessionIDB = "session-B"
+        let sessionA = manager.session(id: sessionIDA)
+        let sessionB = manager.session(id: sessionIDB)
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
         #expect(upstreamIndexA != upstreamIndexB)
 
         // Ensure we're starting from a clean buffer state.
@@ -908,20 +908,20 @@ struct SessionManagerTests {
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
         // Create a session, but do not pin it yet.
-        let sessionId = "session-A"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-A"
+        let session = manager.session(id: sessionID)
 
         // Ensure we're starting from a clean buffer state.
         _ = session.router.drainBufferedNotifications()
@@ -953,9 +953,9 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-A"
-        let session = manager.session(id: sessionId)
-        _ = manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true)
+        let sessionID = "session-A"
+        let session = manager.session(id: sessionID)
+        _ = manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true)
 
         _ = session.router.drainBufferedNotifications()
 
@@ -980,24 +980,24 @@ struct SessionManagerTests {
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let initMessages = await upstream.sent()
-        let initId = try extractUpstreamId(from: initMessages[0])
-        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+        let initID = try extractUpstreamID(from: initMessages[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initID)))
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        let sessionId = "session-debug"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-debug"
+        let session = manager.session(id: sessionID)
         let upstreamIndex = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
-        let original = RPCId(any: NSNumber(value: 301))!
+            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+        let original = RPCID(any: NSNumber(value: 301))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(1))
-        let upstreamId = manager.assignUpstreamId(
-            sessionId: sessionId,
-            originalId: original,
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: original,
             upstreamIndex: upstreamIndex
         )
-        manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: upstreamIndex)
-        await upstream.yield(.message(try makeToolListResponse(id: upstreamId)))
+        manager.sendUpstream(try makeToolListRequest(id: upstreamID), upstreamIndex: upstreamIndex)
+        await upstream.yield(.message(try makeToolListResponse(id: upstreamID)))
         _ = try await future.get()
 
         await upstream.yield(.message(try makeToolListResponse(id: 9_999_999)))
@@ -1084,14 +1084,14 @@ struct SessionManagerTests {
         // Initialize primary upstream0.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         // Warm init -> upstream1.
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         // Wait for per-upstream notifications/initialized.
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
@@ -1104,7 +1104,7 @@ struct SessionManagerTests {
             matching: { methodName(from: $0) == "tools/list" },
             timeout: .seconds(2)
         )
-        let warmup0ID = try extractUpstreamId(from: warmup0)
+        let warmup0ID = try extractUpstreamID(from: warmup0)
         let warmup0Response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": warmup0ID,
@@ -1130,7 +1130,7 @@ struct SessionManagerTests {
             matching: { methodName(from: $0) == "tools/list" },
             timeout: .seconds(2)
         )
-        let warmup1ID = try extractUpstreamId(from: warmup1)
+        let warmup1ID = try extractUpstreamID(from: warmup1)
         let warmup1Response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": warmup1ID,
@@ -1140,11 +1140,11 @@ struct SessionManagerTests {
             .message(try JSONSerialization.data(withJSONObject: warmup1Response, options: [])))
         #expect(
             await waitUntil(timeout: .seconds(2)) {
-                manager.chooseUpstreamIndex(sessionId: "session-A", shouldPin: true) == nil
+                manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil
             }
         )
 
-        let chosen = manager.chooseUpstreamIndex(sessionId: "session-A", shouldPin: true)
+        let chosen = manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true)
         #expect(chosen == nil)
     }
 
@@ -1162,31 +1162,31 @@ struct SessionManagerTests {
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
         // Pin two sessions to different upstreams.
-        let sessionIdA = "session-A"
-        let sessionIdB = "session-B"
-        _ = manager.session(id: sessionIdA)
-        _ = manager.session(id: sessionIdB)
+        let sessionIDA = "session-A"
+        let sessionIDB = "session-B"
+        _ = manager.session(id: sessionIDA)
+        _ = manager.session(id: sessionIDB)
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionIdA, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionIdB, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
         #expect(upstreamIndexA != upstreamIndexB)
 
-        let pinnedTo1SessionId = upstreamIndexA == 1 ? sessionIdA : sessionIdB
-        #expect(manager.chooseUpstreamIndex(sessionId: pinnedTo1SessionId, shouldPin: true) == 1)
+        let pinnedTo1SessionID = upstreamIndexA == 1 ? sessionIDA : sessionIDB
+        #expect(manager.chooseUpstreamIndex(sessionID: pinnedTo1SessionID, shouldPin: true) == 1)
 
         await upstream1.yield(.exit(1))
         #expect(
@@ -1196,7 +1196,7 @@ struct SessionManagerTests {
         )
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionId: pinnedTo1SessionId, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: pinnedTo1SessionID, shouldPin: true))
         #expect(repinned == 0)
     }
 
@@ -1213,31 +1213,31 @@ struct SessionManagerTests {
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        let sessionId = "session-timeout-repin"
-        _ = manager.session(id: sessionId)
+        let sessionID = "session-timeout-repin"
+        _ = manager.session(id: sessionID)
         let pinned = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
 
         manager.onRequestTimeout(
-            sessionId: sessionId, requestIdKey: "dummy-1", upstreamIndex: pinned)
+            sessionID: sessionID, requestIDKey: "dummy-1", upstreamIndex: pinned)
         manager.onRequestTimeout(
-            sessionId: sessionId, requestIdKey: "dummy-2", upstreamIndex: pinned)
+            sessionID: sessionID, requestIDKey: "dummy-2", upstreamIndex: pinned)
         manager.onRequestTimeout(
-            sessionId: sessionId, requestIdKey: "dummy-3", upstreamIndex: pinned)
+            sessionID: sessionID, requestIDKey: "dummy-3", upstreamIndex: pinned)
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
         #expect(repinned != pinned)
     }
 
@@ -1256,25 +1256,25 @@ struct SessionManagerTests {
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
         await upstream0.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamId(from: init0[0]))))
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init0[0]))))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
         await upstream1.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamId(from: init1[0]))))
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init1[0]))))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        let sessionId = "session-1"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-1"
+        let session = manager.session(id: sessionID)
 
         // Send a request to upstream1, then kill upstream1 before it can respond.
-        let originalA = RPCId(any: NSNumber(value: 200))!
+        let originalA = RPCID(any: NSNumber(value: 200))!
         let futureA = session.router.registerRequest(idKey: originalA.key, on: eventLoop)
-        let upstreamIdA = manager.assignUpstreamId(
-            sessionId: sessionId, originalId: originalA, upstreamIndex: 1)
-        manager.sendUpstream(try makeToolListRequest(id: upstreamIdA), upstreamIndex: 1)
+        let upstreamIDA = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: originalA, upstreamIndex: 1)
+        manager.sendUpstream(try makeToolListRequest(id: upstreamIDA), upstreamIndex: 1)
 
         await upstream1.yield(.exit(1))
         #expect(
@@ -1284,16 +1284,16 @@ struct SessionManagerTests {
         )
 
         // The proxy should continue serving on upstream0.
-        let originalB = RPCId(any: NSNumber(value: 201))!
+        let originalB = RPCID(any: NSNumber(value: 201))!
         let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
         #expect(upstreamIndexB == 0)
-        let upstreamIdB = manager.assignUpstreamId(
-            sessionId: sessionId, originalId: originalB, upstreamIndex: upstreamIndexB)
+        let upstreamIDB = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: originalB, upstreamIndex: upstreamIndexB)
         manager.sendUpstream(
-            try makeToolListRequest(id: upstreamIdB), upstreamIndex: upstreamIndexB)
-        await upstream0.yield(.message(try makeToolListResponse(id: upstreamIdB)))
+            try makeToolListRequest(id: upstreamIDB), upstreamIndex: upstreamIndexB)
+        await upstream0.yield(.message(try makeToolListResponse(id: upstreamIDB)))
         _ = try await futureB.get()
 
         // A should time out (mapping is cleared on exit, and no response arrives).
@@ -1319,14 +1319,14 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let sessionId = "session-overloaded"
-        let session = manager.session(id: sessionId)
-        let original = RPCId(any: NSNumber(value: 910))!
+        let sessionID = "session-overloaded"
+        let session = manager.session(id: sessionID)
+        let original = RPCID(any: NSNumber(value: 910))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(5))
-        let upstreamId = manager.assignUpstreamId(
-            sessionId: sessionId, originalId: original, upstreamIndex: 0)
-        manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: 0)
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: original, upstreamIndex: 0)
+        manager.sendUpstream(try makeToolListRequest(id: upstreamID), upstreamIndex: 0)
 
         let response = try decodeJSON(
             from: try await waitWithTimeout(
@@ -1360,9 +1360,9 @@ struct SessionManagerTests {
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        let original = RPCId(any: NSNumber(value: 1001))!
+        let original = RPCID(any: NSNumber(value: 1001))!
         let future = manager.registerInitialize(
-            originalId: original,
+            originalID: original,
             requestObject: makeInitializeRequest(id: 1001),
             on: eventLoop
         )
@@ -1394,31 +1394,31 @@ struct SessionManagerTests {
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
-        let init0Id = try extractUpstreamId(from: init0[0])
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+        let init0ID = try extractUpstreamID(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
         try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
         let init1 = await upstream1.sent()
-        let init1Id = try extractUpstreamId(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        let sessionId = "session-overload-repin"
-        let session = manager.session(id: sessionId)
+        let sessionID = "session-overload-repin"
+        let session = manager.session(id: sessionID)
         let pinned = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
         #expect(pinned == 0)
 
         await upstream0.setOverloaded(true)
 
-        let original = RPCId(any: NSNumber(value: 920))!
+        let original = RPCID(any: NSNumber(value: 920))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(5))
-        let upstreamId = manager.assignUpstreamId(
-            sessionId: sessionId, originalId: original, upstreamIndex: pinned)
-        manager.sendUpstream(try makeToolListRequest(id: upstreamId), upstreamIndex: pinned)
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: original, upstreamIndex: pinned)
+        manager.sendUpstream(try makeToolListRequest(id: upstreamID), upstreamIndex: pinned)
 
         let response = try decodeJSON(
             from: try await waitWithTimeout(
@@ -1433,16 +1433,16 @@ struct SessionManagerTests {
         #expect((error?["message"] as? String) == "upstream overloaded")
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
         #expect(repinned == 1)
 
-        let original2 = RPCId(any: NSNumber(value: 921))!
+        let original2 = RPCID(any: NSNumber(value: 921))!
         let future2 = session.router.registerRequest(
             idKey: original2.key, on: eventLoop, timeout: .seconds(5))
-        let upstreamId2 = manager.assignUpstreamId(
-            sessionId: sessionId, originalId: original2, upstreamIndex: repinned)
-        manager.sendUpstream(try makeToolListRequest(id: upstreamId2), upstreamIndex: repinned)
-        await upstream1.yield(.message(try makeToolListResponse(id: upstreamId2)))
+        let upstreamID2 = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: original2, upstreamIndex: repinned)
+        manager.sendUpstream(try makeToolListRequest(id: upstreamID2), upstreamIndex: repinned)
+        await upstream1.yield(.message(try makeToolListResponse(id: upstreamID2)))
         _ = try await waitWithTimeout(
             "repinned upstream should return response",
             timeout: .seconds(2)
@@ -1585,7 +1585,7 @@ private func makeInitializeResponse(id: Int64) throws -> Data {
     return try JSONSerialization.data(withJSONObject: response, options: [])
 }
 
-private func extractUpstreamId(from data: Data) throws -> Int64 {
+private func extractUpstreamID(from data: Data) throws -> Int64 {
     let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
     return (object?["id"] as? NSNumber)?.int64Value ?? 0
 }

@@ -11,15 +11,15 @@ extension SessionManager {
         }
 
         if var object = json as? [String: Any],
-            let upstreamId = upstreamId(from: object["id"]),
-            let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+            let upstreamID = upstreamID(from: object["id"]),
+            let mapping = idMapper.consume(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
         {
             if mapping.isInitialize {
                 handleInitializeResponse(object, upstreamIndex: upstreamIndex)
                 return
             }
-            if let sessionId = mapping.sessionId, let originalId = mapping.originalId {
-                object["id"] = originalId.value.foundationObject
+            if let sessionID = mapping.sessionID, let originalID = mapping.originalID {
+                object["id"] = originalID.value.foundationObject
                 if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: [])
                 {
                     recordTraffic(
@@ -27,7 +27,7 @@ extension SessionManager {
                         direction: "inbound",
                         data: rewritten
                     )
-                    let target = session(id: sessionId)
+                    let target = session(id: sessionID)
                     target.router.handleIncoming(rewritten)
                     return
                 }
@@ -35,14 +35,14 @@ extension SessionManager {
         }
 
         if let array = json as? [Any] {
-            var sessionId: String?
+            var sessionID: String?
             var rewrittenAny = false
             var transformed: [Any] = []
             for item in array {
                 guard var object = item as? [String: Any],
-                    let upstreamId = upstreamId(from: object["id"]),
+                    let upstreamID = upstreamID(from: object["id"]),
                     let mapping = idMapper.consume(
-                        upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                        upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                 else {
                     transformed.append(item)
                     continue
@@ -51,16 +51,16 @@ extension SessionManager {
                     handleInitializeResponse(object, upstreamIndex: upstreamIndex)
                     continue
                 }
-                guard let originalId = mapping.originalId else {
+                guard let originalID = mapping.originalID else {
                     transformed.append(item)
                     continue
                 }
-                object["id"] = originalId.value.foundationObject
-                sessionId = sessionId ?? mapping.sessionId
+                object["id"] = originalID.value.foundationObject
+                sessionID = sessionID ?? mapping.sessionID
                 rewrittenAny = true
                 transformed.append(object)
             }
-            if rewrittenAny, let sessionId,
+            if rewrittenAny, let sessionID,
                 let rewritten = try? JSONSerialization.data(
                     withJSONObject: transformed, options: [])
             {
@@ -69,7 +69,7 @@ extension SessionManager {
                     direction: "inbound",
                     data: rewritten
                 )
-                let target = session(id: sessionId)
+                let target = session(id: sessionID)
                 target.router.handleIncoming(rewritten)
                 return
             }
@@ -84,12 +84,12 @@ extension SessionManager {
 
         if upstreamIndex == 0 && globalInit.wasInFlight {
             globalInit.timeout?.cancel()
-            if let upstreamId = globalInit.primaryInitUpstreamId {
-                idMapper.remove(upstreamIndex: 0, upstreamId: upstreamId)
+            if let upstreamID = globalInit.primaryInitUpstreamID {
+                idMapper.remove(upstreamIndex: 0, upstreamID: upstreamID)
             }
             for item in globalInit.pending {
                 clearInitializeUpstreamIndex(
-                    sessionId: item.sessionId,
+                    sessionID: item.sessionID,
                     onlyIfGeneration: item.sessionGeneration
                 )
                 item.eventLoop.execute {
@@ -144,29 +144,29 @@ extension SessionManager {
         }
     }
 
-    package func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64 {
+    package func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64 {
         idMapper.assign(
-            upstreamIndex: upstreamIndex, sessionId: sessionId, originalId: originalId,
+            upstreamIndex: upstreamIndex, sessionID: sessionID, originalID: originalID,
             isInitialize: false)
     }
 
-    package func removeUpstreamIdMapping(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
+    package func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
         _ = idMapper.remove(
             upstreamIndex: upstreamIndex,
-            sessionId: sessionId,
-            requestIdKey: requestIdKey
+            sessionID: sessionID,
+            requestIDKey: requestIDKey
         )
     }
 
-    package func onRequestTimeout(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
-        removeUpstreamIdMapping(
-            sessionId: sessionId, requestIdKey: requestIdKey, upstreamIndex: upstreamIndex)
+    package func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+        removeUpstreamIDMapping(
+            sessionID: sessionID, requestIDKey: requestIDKey, upstreamIndex: upstreamIndex)
         markRequestTimedOut(upstreamIndex: upstreamIndex)
     }
 
-    package func onRequestSucceeded(sessionId: String, requestIdKey: String, upstreamIndex: Int) {
-        _ = sessionId
-        _ = requestIdKey
+    package func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+        _ = sessionID
+        _ = requestIDKey
         markRequestSucceeded(upstreamIndex: upstreamIndex)
     }
 
@@ -231,18 +231,18 @@ extension SessionManager {
     }
 
     func testSetInitializeRoutingState(
-        sessionId: String,
+        sessionID: String,
         upstreamIndex: Int,
         preferOnNextPin: Bool,
         didReceiveInitializeUpstreamMessage: Bool = false
     ) {
         setInitializeUpstreamIndexIfNeeded(
-            sessionId: sessionId,
+            sessionID: sessionID,
             upstreamIndex: upstreamIndex,
             preferOnNextPin: preferOnNextPin
         )
         guard didReceiveInitializeUpstreamMessage else { return }
-        sessionRegistry.markDidReceiveInitializeUpstreamMessage(for: sessionId)
+        sessionRegistry.markDidReceiveInitializeUpstreamMessage(for: sessionID)
     }
 
     func handleOverloadedUpstreamSend(
@@ -300,7 +300,7 @@ extension SessionManager {
         routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
     }
 
-    func upstreamId(from value: Any?) -> Int64? {
+    func upstreamID(from value: Any?) -> Int64? {
         if let number = value as? NSNumber {
             return number.int64Value
         }

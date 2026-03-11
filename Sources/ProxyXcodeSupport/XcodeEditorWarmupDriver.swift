@@ -38,7 +38,7 @@ package struct WarmupResult: Sendable, Equatable {
 }
 
 package actor XcodeEditorWarmupDriver {
-    package typealias WindowsProvider = @Sendable (_ sessionId: String, _ eventLoop: EventLoop) async -> [XcodeWindowInfo]?
+    package typealias WindowsProvider = @Sendable (_ sessionID: String, _ eventLoop: EventLoop) async -> [XcodeWindowInfo]?
 
     private struct FileResolutionKey: Hashable {
         let workspacePath: String
@@ -46,7 +46,7 @@ package actor XcodeEditorWarmupDriver {
     }
 
     private struct WorkspaceCacheKey: Hashable {
-        let sessionId: String
+        let sessionID: String
         let tabIdentifier: String
     }
 
@@ -75,7 +75,7 @@ package actor XcodeEditorWarmupDriver {
     package func warmUp(
         tabIdentifier: String?,
         filePath: String?,
-        sessionId: String,
+        sessionID: String,
         eventLoop: EventLoop,
         windowsProvider: WindowsProvider
     ) async -> WarmupResult {
@@ -109,7 +109,7 @@ package actor XcodeEditorWarmupDriver {
 
         let workspacePath = await resolveWorkspacePath(
             tabIdentifier: tabIdentifier,
-            sessionId: sessionId,
+            sessionID: sessionID,
             eventLoop: eventLoop,
             windowsProvider: windowsProvider
         )
@@ -324,16 +324,16 @@ package actor XcodeEditorWarmupDriver {
 
     private func resolveWorkspacePath(
         tabIdentifier: String,
-        sessionId: String,
+        sessionID: String,
         eventLoop: EventLoop,
         windowsProvider: WindowsProvider
     ) async -> String? {
         let cacheKey = WorkspaceCacheKey(
-            sessionId: sessionId,
+            sessionID: sessionID,
             tabIdentifier: tabIdentifier
         )
         let cached = workspacePathCache[cacheKey]
-        guard let windows = await windowsProvider(sessionId, eventLoop) else {
+        guard let windows = await windowsProvider(sessionID, eventLoop) else {
             return cached
         }
         guard let workspacePath = windows.first(where: { $0.tabIdentifier == tabIdentifier })?.workspacePath else {

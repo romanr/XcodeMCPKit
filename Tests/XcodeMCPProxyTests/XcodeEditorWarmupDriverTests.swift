@@ -218,7 +218,7 @@ struct XcodeEditorWarmupDriverTests {
         let result = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-1",
+            sessionID: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
@@ -300,7 +300,7 @@ struct XcodeEditorWarmupDriverTests {
         let result = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-1",
+            sessionID: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
@@ -372,7 +372,7 @@ struct XcodeEditorWarmupDriverTests {
         let result = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-1",
+            sessionID: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
@@ -428,7 +428,7 @@ struct XcodeEditorWarmupDriverTests {
         let first = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-1",
+            sessionID: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspaceA)]
@@ -437,7 +437,7 @@ struct XcodeEditorWarmupDriverTests {
         let second = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-1",
+            sessionID: "session-1",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspaceB)]
@@ -477,7 +477,7 @@ struct XcodeEditorWarmupDriverTests {
         let first = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-A",
+            sessionID: "session-A",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
@@ -486,7 +486,7 @@ struct XcodeEditorWarmupDriverTests {
         let second = await driver.warmUp(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
-            sessionId: "session-B",
+            sessionID: "session-B",
             eventLoop: eventLoop,
             windowsProvider: { _, _ in
                 nil

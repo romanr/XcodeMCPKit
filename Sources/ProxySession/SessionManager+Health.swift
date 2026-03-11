@@ -52,25 +52,25 @@ extension SessionManager {
     }
 
     func probeUpstreamHealth(upstreamIndex: Int, probeGeneration: UInt64) {
-        let internalSessionId = toolsListInternalSessionId()
-        _ = session(id: internalSessionId)
-        let probeSession = session(id: internalSessionId)
+        let internalSessionID = toolsListInternalSessionID()
+        _ = session(id: internalSessionID)
+        let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
-        let originalId = RPCId(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
+        let originalID = RPCID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
         let future = probeSession.router.registerRequest(
-            idKey: originalId.key,
+            idKey: originalID.key,
             on: eventLoop,
             timeout: probeTimeout
         )
-        let upstreamId = assignUpstreamId(
-            sessionId: internalSessionId,
-            originalId: originalId,
+        let upstreamID = assignUpstreamID(
+            sessionID: internalSessionID,
+            originalID: originalID,
             upstreamIndex: upstreamIndex
         )
 
         let request: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": upstreamId,
+            "id": upstreamID,
             "method": "tools/list",
         ]
         guard JSONSerialization.isValidJSONObject(request),
@@ -97,7 +97,7 @@ extension SessionManager {
                     object["error"] == nil,
                     object["result"] != nil
                 else {
-                    self.idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                    self.idMapper.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                     self.finishHealthProbe(
                         upstreamIndex: upstreamIndex,
                         probeGeneration: probeGeneration,
@@ -113,7 +113,7 @@ extension SessionManager {
                     reason: "ok"
                 )
             } catch {
-                self.idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                self.idMapper.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                 self.finishHealthProbe(
                     upstreamIndex: upstreamIndex,
                     probeGeneration: probeGeneration,
@@ -179,11 +179,11 @@ extension SessionManager {
 
         let refreshTimeout: TimeAmount = .seconds(5)
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        let internalSessionId = toolsListInternalSessionId()
-        _ = session(id: internalSessionId)
+        let internalSessionID = toolsListInternalSessionID()
+        _ = session(id: internalSessionID)
 
         guard
-            let upstreamIndex = chooseUpstreamIndex(sessionId: internalSessionId, shouldPin: false),
+            let upstreamIndex = chooseUpstreamIndex(sessionID: internalSessionID, shouldPin: false),
             upstreamIndex >= 0,
             upstreamIndex < upstreams.count
         else {
@@ -191,28 +191,28 @@ extension SessionManager {
             return
         }
 
-        let originalId = RPCId(any: NSNumber(value: 1))!
-        let refreshSession = session(id: internalSessionId)
+        let originalID = RPCID(any: NSNumber(value: 1))!
+        let refreshSession = session(id: internalSessionID)
         let future = refreshSession.router.registerRequest(
-            idKey: originalId.key,
+            idKey: originalID.key,
             on: eventLoop,
             timeout: refreshTimeout
         )
-        let upstreamId = assignUpstreamId(
-            sessionId: internalSessionId,
-            originalId: originalId,
+        let upstreamID = assignUpstreamID(
+            sessionID: internalSessionID,
+            originalID: originalID,
             upstreamIndex: upstreamIndex
         )
 
         let request: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": upstreamId,
+            "id": upstreamID,
             "method": "tools/list",
         ]
         guard JSONSerialization.isValidJSONObject(request),
             let requestData = try? JSONSerialization.data(withJSONObject: request, options: [])
         else {
-            idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+            idMapper.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
             markToolsListRefreshFailed(
                 upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs,
                 reason: "encode_request_failed")
@@ -237,7 +237,7 @@ extension SessionManager {
                 let result = JSONValue(any: resultAny),
                 isValidToolsListResult(result)
             else {
-                idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+                idMapper.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                 markToolsListRefreshFailed(
                     upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs,
                     reason: "invalid_response")
@@ -254,7 +254,7 @@ extension SessionManager {
                 ]
             )
         } catch {
-            idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+            idMapper.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
             markToolsListRefreshFailed(
                 upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "timeout")
         }
@@ -272,11 +272,11 @@ extension SessionManager {
     func startUpstreamWarmInitialize(upstreamIndex: Int) {
         guard upstreamPool.beginWarmInitialize(upstreamIndex: upstreamIndex) else { return }
 
-        let upstreamId = idMapper.assignInitialize(upstreamIndex: upstreamIndex)
-        upstreamPool.setWarmInitializeUpstreamId(upstreamId, for: upstreamIndex)
-        scheduleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+        let upstreamID = idMapper.assignInitialize(upstreamIndex: upstreamIndex)
+        upstreamPool.setWarmInitializeUpstreamID(upstreamID, for: upstreamIndex)
+        scheduleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
-        let request = makeInternalInitializeRequest(id: upstreamId)
+        let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
             sendUpstream(data, upstreamIndex: upstreamIndex)
         } else {
@@ -284,7 +284,7 @@ extension SessionManager {
         }
     }
 
-    func scheduleUpstreamInitTimeout(upstreamIndex: Int, upstreamId: Int64) {
+    func scheduleUpstreamInitTimeout(upstreamIndex: Int, upstreamID: Int64) {
         guard
             let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(
                 defaultSeconds: config.requestTimeout)
@@ -293,19 +293,19 @@ extension SessionManager {
         }
         let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
             guard let self else { return }
-            self.handleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+            self.handleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
         }
         let previous = upstreamPool.replaceInitTimeout(timeout, upstreamIndex: upstreamIndex)
         previous?.cancel()
     }
 
-    func handleUpstreamInitTimeout(upstreamIndex: Int, upstreamId: Int64) {
+    func handleUpstreamInitTimeout(upstreamIndex: Int, upstreamID: Int64) {
         let shouldClear = upstreamPool.clearWarmInitializeIfMatching(
             upstreamIndex: upstreamIndex,
-            upstreamId: upstreamId
+            upstreamID: upstreamID
         )
         guard shouldClear else { return }
-        idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
+        idMapper.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
         guard upstreamIndex == 0, config.eagerInitialize else { return }
         let shouldRetryEagerInit = initializeCoordinator.consumeRetryAfterWarmInitFailureIfNeeded()

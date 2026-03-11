@@ -90,7 +90,7 @@ package enum JSONValue: Sendable {
     }
 }
 
-package struct RPCId: Sendable {
+package struct RPCID: Sendable {
     package let key: String
     package let value: JSONValue
 

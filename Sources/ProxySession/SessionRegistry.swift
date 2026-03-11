@@ -51,17 +51,17 @@ package final class SessionRegistry: Sendable {
         state.withLockedValue { $0.sessions.removeValue(forKey: id)?.context }
     }
 
-    package func generation(of sessionId: String) -> UInt64? {
-        state.withLockedValue { $0.sessions[sessionId]?.generation }
+    package func generation(of sessionID: String) -> UInt64? {
+        state.withLockedValue { $0.sessions[sessionID]?.generation }
     }
 
-    package func pinnedUpstreamIndex(for sessionId: String) -> Int? {
-        state.withLockedValue { $0.sessions[sessionId]?.pinnedUpstreamIndex }
+    package func pinnedUpstreamIndex(for sessionID: String) -> Int? {
+        state.withLockedValue { $0.sessions[sessionID]?.pinnedUpstreamIndex }
     }
 
-    package func preferredInitializeUpstreamIndex(for sessionId: String) -> Int? {
+    package func preferredInitializeUpstreamIndex(for sessionID: String) -> Int? {
         state.withLockedValue { state in
-            guard let record = state.sessions[sessionId],
+            guard let record = state.sessions[sessionID],
                 record.pinnedUpstreamIndex == nil,
                 (record.preferInitializeUpstreamOnNextPin || record.didReceiveInitializeUpstreamMessage),
                 let upstreamIndex = record.initializeUpstreamIndex
@@ -72,82 +72,82 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func hintedUpstreamIndex(for sessionId: String) -> Int? {
+    package func hintedUpstreamIndex(for sessionID: String) -> Int? {
         state.withLockedValue { state in
-            if let pinned = state.sessions[sessionId]?.pinnedUpstreamIndex {
+            if let pinned = state.sessions[sessionID]?.pinnedUpstreamIndex {
                 return pinned
             }
-            return state.sessions[sessionId]?.initializeUpstreamIndex
+            return state.sessions[sessionID]?.initializeUpstreamIndex
         }
     }
 
-    package func clearRoutingState(for sessionId: String) {
+    package func clearRoutingState(for sessionID: String) {
         state.withLockedValue { state in
-            state.sessions[sessionId]?.pinnedUpstreamIndex = nil
-            state.sessions[sessionId]?.initializeUpstreamIndex = nil
-            state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
-            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            state.sessions[sessionID]?.pinnedUpstreamIndex = nil
+            state.sessions[sessionID]?.initializeUpstreamIndex = nil
+            state.sessions[sessionID]?.preferInitializeUpstreamOnNextPin = false
+            state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = false
         }
     }
 
-    package func pinSession(_ sessionId: String, to upstreamIndex: Int) {
+    package func pinSession(_ sessionID: String, to upstreamIndex: Int) {
         state.withLockedValue { state in
-            state.sessions[sessionId]?.pinnedUpstreamIndex = upstreamIndex
-            state.sessions[sessionId]?.initializeUpstreamIndex = nil
-            state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
-            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            state.sessions[sessionID]?.pinnedUpstreamIndex = upstreamIndex
+            state.sessions[sessionID]?.initializeUpstreamIndex = nil
+            state.sessions[sessionID]?.preferInitializeUpstreamOnNextPin = false
+            state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = false
         }
     }
 
-    package func clearInitializeHintIfUnpinned(for sessionId: String) {
+    package func clearInitializeHintIfUnpinned(for sessionID: String) {
         state.withLockedValue { state in
-            guard state.sessions[sessionId]?.pinnedUpstreamIndex == nil else { return }
-            state.sessions[sessionId]?.initializeUpstreamIndex = nil
-            state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
-            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            guard state.sessions[sessionID]?.pinnedUpstreamIndex == nil else { return }
+            state.sessions[sessionID]?.initializeUpstreamIndex = nil
+            state.sessions[sessionID]?.preferInitializeUpstreamOnNextPin = false
+            state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = false
         }
     }
 
     package func setInitializeUpstreamIfNeeded(
-        sessionId: String,
+        sessionID: String,
         upstreamIndex: Int,
         preferOnNextPin: Bool
     ) {
         state.withLockedValue { state in
-            guard let record = state.sessions[sessionId] else { return }
+            guard let record = state.sessions[sessionID] else { return }
             if record.pinnedUpstreamIndex == nil {
-                state.sessions[sessionId]?.initializeUpstreamIndex = upstreamIndex
-                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = preferOnNextPin
-                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+                state.sessions[sessionID]?.initializeUpstreamIndex = upstreamIndex
+                state.sessions[sessionID]?.preferInitializeUpstreamOnNextPin = preferOnNextPin
+                state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = false
             } else {
-                state.sessions[sessionId]?.initializeUpstreamIndex = nil
-                state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
-                state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+                state.sessions[sessionID]?.initializeUpstreamIndex = nil
+                state.sessions[sessionID]?.preferInitializeUpstreamOnNextPin = false
+                state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = false
             }
         }
     }
 
     package func clearInitializeUpstreamIndex(
-        sessionId: String,
+        sessionID: String,
         onlyIfGeneration sessionGeneration: UInt64? = nil
     ) {
         state.withLockedValue { state in
-            guard let record = state.sessions[sessionId] else { return }
+            guard let record = state.sessions[sessionID] else { return }
             if let sessionGeneration, record.generation != sessionGeneration {
                 return
             }
-            state.sessions[sessionId]?.initializeUpstreamIndex = nil
-            state.sessions[sessionId]?.preferInitializeUpstreamOnNextPin = false
-            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = false
+            state.sessions[sessionID]?.initializeUpstreamIndex = nil
+            state.sessions[sessionID]?.preferInitializeUpstreamOnNextPin = false
+            state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = false
         }
     }
 
     package func sessionStillMatchesPendingInitialize(
-        sessionId: String,
+        sessionID: String,
         sessionGeneration: UInt64
     ) -> Bool {
         state.withLockedValue { state in
-            guard let record = state.sessions[sessionId] else { return false }
+            guard let record = state.sessions[sessionID] else { return false }
             return record.generation == sessionGeneration
         }
     }
@@ -191,9 +191,9 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func markDidReceiveInitializeUpstreamMessage(for sessionId: String) {
+    package func markDidReceiveInitializeUpstreamMessage(for sessionID: String) {
         state.withLockedValue { state in
-            state.sessions[sessionId]?.didReceiveInitializeUpstreamMessage = true
+            state.sessions[sessionID]?.didReceiveInitializeUpstreamMessage = true
         }
     }
 

@@ -8,7 +8,7 @@ import Testing
 
 @Suite
 struct ProxyRouterTests {
-    @Test func proxyRouterMatchesId() async throws {
+    @Test func proxyRouterMatchesID() async throws {
         let eventLoop = EmbeddedEventLoop()
 
         let router = ProxyRouter(

@@ -14,7 +14,7 @@ package final class UpstreamPool: Sendable {
         package var initInFlight = false
         package var initTimeout: Scheduled<Void>?
         package var didSendInitialized = false
-        package var initUpstreamId: Int64?
+        package var initUpstreamID: Int64?
         package var healthState: UpstreamHealthState = .healthy
         package var consecutiveRequestTimeouts = 0
         package var healthProbeInFlight = false
@@ -53,7 +53,7 @@ package final class UpstreamPool: Sendable {
                 timeouts.append(state.upstreamStates[index].initTimeout)
                 state.upstreamStates[index].initTimeout = nil
                 state.upstreamStates[index].initInFlight = false
-                state.upstreamStates[index].initUpstreamId = nil
+                state.upstreamStates[index].initUpstreamID = nil
             }
             return timeouts
         }
@@ -261,10 +261,10 @@ package final class UpstreamPool: Sendable {
         }
     }
 
-    package func setWarmInitializeUpstreamId(_ upstreamId: Int64, for upstreamIndex: Int) {
+    package func setWarmInitializeUpstreamID(_ upstreamID: Int64, for upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
-            state.upstreamStates[upstreamIndex].initUpstreamId = upstreamId
+            state.upstreamStates[upstreamIndex].initUpstreamID = upstreamID
         }
     }
 
@@ -277,23 +277,23 @@ package final class UpstreamPool: Sendable {
         }
     }
 
-    package func clearWarmInitializeIfMatching(upstreamIndex: Int, upstreamId: Int64) -> Bool {
+    package func clearWarmInitializeIfMatching(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
-            guard state.upstreamStates[upstreamIndex].initUpstreamId == upstreamId else { return false }
+            guard state.upstreamStates[upstreamIndex].initUpstreamID == upstreamID else { return false }
             state.upstreamStates[upstreamIndex].initTimeout = nil
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].isInitialized = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            state.upstreamStates[upstreamIndex].initUpstreamID = nil
             return true
         }
     }
 
-    package func markInitInFlight(upstreamIndex: Int, upstreamId: Int64) {
+    package func markInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].initInFlight = true
-            state.upstreamStates[upstreamIndex].initUpstreamId = upstreamId
+            state.upstreamStates[upstreamIndex].initUpstreamID = upstreamID
             state.upstreamStates[upstreamIndex].isInitialized = false
         }
     }
@@ -302,7 +302,7 @@ package final class UpstreamPool: Sendable {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            state.upstreamStates[upstreamIndex].initUpstreamID = nil
             state.upstreamStates[upstreamIndex].initTimeout = nil
         }
     }
@@ -315,7 +315,7 @@ package final class UpstreamPool: Sendable {
             state.upstreamStates[upstreamIndex].isInitialized = false
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].didSendInitialized = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            state.upstreamStates[upstreamIndex].initUpstreamID = nil
             state.upstreamStates[upstreamIndex].healthState = .healthy
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
@@ -331,7 +331,7 @@ package final class UpstreamPool: Sendable {
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             state.upstreamStates[upstreamIndex].isInitialized = true
             state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].initUpstreamId = nil
+            state.upstreamStates[upstreamIndex].initUpstreamID = nil
             state.upstreamStates[upstreamIndex].healthState = .healthy
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false

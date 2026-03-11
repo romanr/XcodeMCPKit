@@ -36,16 +36,16 @@ package protocol SessionManaging: Sendable {
     func setCachedToolsListResult(_ result: JSONValue)
     func refreshToolsListIfNeeded()
     func registerInitialize(
-        sessionId: String,
-        originalId: RPCId,
+        sessionID: String,
+        originalID: RPCID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
-    func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int?
-    func assignUpstreamId(sessionId: String, originalId: RPCId, upstreamIndex: Int) -> Int64
-    func removeUpstreamIdMapping(sessionId: String, requestIdKey: String, upstreamIndex: Int)
-    func onRequestTimeout(sessionId: String, requestIdKey: String, upstreamIndex: Int)
-    func onRequestSucceeded(sessionId: String, requestIdKey: String, upstreamIndex: Int)
+    func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int?
+    func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64
+    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
+    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
+    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func sendUpstream(_ data: Data, upstreamIndex: Int)
     func debugSnapshot() -> ProxyDebugSnapshot
 }
@@ -80,7 +80,7 @@ package final class SessionManager: Sendable, SessionManaging {
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
     package let debugRecorder: ProxyDebugRecorder
     package let eventLoop: EventLoop
-    package let idMapper: UpstreamIdMapper
+    package let idMapper: UpstreamIDMapper
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamClient]
@@ -103,7 +103,7 @@ package final class SessionManager: Sendable, SessionManaging {
         self.upstreams = upstreams
         self.sessionRegistry = SessionRegistry(config: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
-        self.idMapper = UpstreamIdMapper(upstreamCount: upstreams.count)
+        self.idMapper = UpstreamIDMapper(upstreamCount: upstreams.count)
         self.upstreamPool = UpstreamPool(upstreamCount: upstreams.count)
 
         var tasks: [Task<Void, Never>] = []
@@ -209,12 +209,12 @@ package final class SessionManager: Sendable, SessionManaging {
         }
     }
 
-    package func chooseUpstreamIndex(sessionId: String, shouldPin: Bool) -> Int? {
+    package func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         var probesToStart: [HealthProbeRequest] = []
         probesToStart.reserveCapacity(2)
 
-        var pinned = sessionRegistry.pinnedUpstreamIndex(for: sessionId)
+        var pinned = sessionRegistry.pinnedUpstreamIndex(for: sessionID)
         if let pinnedIndex = pinned {
             let result = upstreamPool.evaluateUsableInitialized(
                 index: pinnedIndex,
@@ -226,11 +226,11 @@ package final class SessionManager: Sendable, SessionManaging {
                 return pinnedIndex
             }
 
-            sessionRegistry.clearRoutingState(for: sessionId)
+            sessionRegistry.clearRoutingState(for: sessionID)
             pinned = nil
         }
 
-        let preferredInitializeUpstreamIndex = sessionRegistry.preferredInitializeUpstreamIndex(for: sessionId)
+        let preferredInitializeUpstreamIndex = sessionRegistry.preferredInitializeUpstreamIndex(for: sessionID)
 
         if shouldPin, let preferredInitializeUpstreamIndex {
             let result = upstreamPool.evaluateUsableInitialized(
@@ -246,11 +246,11 @@ package final class SessionManager: Sendable, SessionManaging {
                         probeGeneration: probe.probeGeneration
                     )
                 }
-                sessionRegistry.pinSession(sessionId, to: preferredInitializeUpstreamIndex)
+                sessionRegistry.pinSession(sessionID, to: preferredInitializeUpstreamIndex)
                 return preferredInitializeUpstreamIndex
             }
 
-            sessionRegistry.clearInitializeHintIfUnpinned(for: sessionId)
+            sessionRegistry.clearInitializeHintIfUnpinned(for: sessionID)
         }
 
         let chooseResult = upstreamPool.chooseBestInitializedUpstream(nowUptimeNs: nowUptimeNs)
@@ -269,17 +269,17 @@ package final class SessionManager: Sendable, SessionManaging {
         }
 
         if pinned == nil, shouldPin {
-            sessionRegistry.pinSession(sessionId, to: chosen)
+            sessionRegistry.pinSession(sessionID, to: chosen)
         }
         return chosen
     }
 
-    func chooseInitializeUpstreamIndex(sessionId: String) -> Int? {
+    func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         var probesToStart: [HealthProbeRequest] = []
         probesToStart.reserveCapacity(1)
 
-        let hintedUpstreamIndex = sessionRegistry.hintedUpstreamIndex(for: sessionId)
+        let hintedUpstreamIndex = sessionRegistry.hintedUpstreamIndex(for: sessionID)
 
         if let hintedUpstreamIndex {
             let result = upstreamPool.evaluateUsableInitialized(
@@ -300,56 +300,56 @@ package final class SessionManager: Sendable, SessionManaging {
                 return hintedUpstreamIndex
             }
 
-            sessionRegistry.clearInitializeHintIfUnpinned(for: sessionId)
+            sessionRegistry.clearInitializeHintIfUnpinned(for: sessionID)
         }
 
-        return chooseUpstreamIndex(sessionId: sessionId, shouldPin: false)
+        return chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
     }
 
     func setInitializeUpstreamIndexIfNeeded(
-        sessionId: String,
+        sessionID: String,
         upstreamIndex: Int,
         preferOnNextPin: Bool
     ) {
         sessionRegistry.setInitializeUpstreamIfNeeded(
-            sessionId: sessionId,
+            sessionID: sessionID,
             upstreamIndex: upstreamIndex,
             preferOnNextPin: preferOnNextPin
         )
     }
 
     func clearInitializeUpstreamIndex(
-        sessionId: String,
+        sessionID: String,
         onlyIfGeneration sessionGeneration: UInt64? = nil
     ) {
         sessionRegistry.clearInitializeUpstreamIndex(
-            sessionId: sessionId,
+            sessionID: sessionID,
             onlyIfGeneration: sessionGeneration
         )
     }
 
     func sessionStillMatchesPendingInitialize(
-        sessionId: String,
+        sessionID: String,
         sessionGeneration: UInt64
     ) -> Bool {
         sessionRegistry.sessionStillMatchesPendingInitialize(
-            sessionId: sessionId,
+            sessionID: sessionID,
             sessionGeneration: sessionGeneration
         )
     }
 
     package func registerInitialize(
-        sessionId: String,
-        originalId: RPCId,
+        sessionID: String,
+        originalID: RPCID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
-        _ = session(id: sessionId)
-        let sessionGeneration = sessionRegistry.generation(of: sessionId) ?? 0
+        _ = session(id: sessionID)
+        let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
         let decision = initializeCoordinator.registerInitialize(
-            sessionId: sessionId,
+            sessionID: sessionID,
             sessionGeneration: sessionGeneration,
-            originalId: originalId,
+            originalID: originalID,
             on: eventLoop
         )
         let cachedResult = decision.cachedResult
@@ -363,16 +363,16 @@ package final class SessionManager: Sendable, SessionManaging {
         }
 
         if let cachedResult {
-            _ = session(id: sessionId)
-            if let upstreamIndex = chooseInitializeUpstreamIndex(sessionId: sessionId) {
+            _ = session(id: sessionID)
+            if let upstreamIndex = chooseInitializeUpstreamIndex(sessionID: sessionID) {
                 let shouldPreferOnNextPin = upstreamPool.initializedHealthyishCount() > 1
                 setInitializeUpstreamIndexIfNeeded(
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     upstreamIndex: upstreamIndex,
                     preferOnNextPin: shouldPreferOnNextPin
                 )
             }
-            if let buffer = encodeInitializeResponse(originalId: originalId, result: cachedResult) {
+            if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
             return eventLoop.makeFailedFuture(TimeoutError())
@@ -383,9 +383,9 @@ package final class SessionManager: Sendable, SessionManaging {
         }
 
         if pendingPromise != nil {
-            _ = session(id: sessionId)
+            _ = session(id: sessionID)
             setInitializeUpstreamIndexIfNeeded(
-                sessionId: sessionId,
+                sessionID: sessionID,
                 upstreamIndex: 0,
                 preferOnNextPin: false
             )
@@ -393,10 +393,10 @@ package final class SessionManager: Sendable, SessionManaging {
 
         if shouldSend {
             var initRequest = requestObject
-            let upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
-            initializeCoordinator.setPrimaryInitUpstreamId(upstreamId)
-            markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
-            initRequest["id"] = upstreamId
+            let upstreamID = idMapper.assignInitialize(upstreamIndex: 0)
+            initializeCoordinator.setPrimaryInitUpstreamID(upstreamID)
+            markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
+            initRequest["id"] = upstreamID
             if let data = try? JSONSerialization.data(withJSONObject: initRequest, options: []) {
                 sendUpstream(data, upstreamIndex: 0)
             } else {
@@ -411,13 +411,13 @@ package final class SessionManager: Sendable, SessionManaging {
     }
 
     package func registerInitialize(
-        originalId: RPCId,
+        originalID: RPCID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
         registerInitialize(
-            sessionId: "__initialize_pending__:\(originalId.key)",
-            originalId: originalId,
+            sessionID: "__initialize_pending__:\(originalID.key)",
+            originalID: originalID,
             requestObject: requestObject,
             on: eventLoop
         )

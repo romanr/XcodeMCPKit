@@ -9,7 +9,7 @@ package final class ProxyRouter: Sendable {
     }
 
     private struct State: Sendable {
-        var pendingById: [String: Pending] = [:]
+        var pendingByID: [String: Pending] = [:]
         var pendingBatches: [Pending] = []
         var notificationBuffer: [Data] = []
     }
@@ -46,7 +46,7 @@ package final class ProxyRouter: Sendable {
             }
         }
         state.withLockedValue { state in
-            state.pendingById[idKey] = Pending(promise: promise, timeout: timeout)
+            state.pendingByID[idKey] = Pending(promise: promise, timeout: timeout)
         }
         return promise.futureResult
     }
@@ -106,7 +106,7 @@ package final class ProxyRouter: Sendable {
 
     private func failTimeout(idKey: String) {
         let pending = state.withLockedValue { state in
-            state.pendingById.removeValue(forKey: idKey)
+            state.pendingByID.removeValue(forKey: idKey)
         }
         pending?.promise.fail(TimeoutError())
     }
@@ -120,7 +120,7 @@ package final class ProxyRouter: Sendable {
 
     private func pop(idKey: String) -> Pending? {
         state.withLockedValue { state in
-            state.pendingById.removeValue(forKey: idKey)
+            state.pendingByID.removeValue(forKey: idKey)
         }
     }
 
@@ -156,11 +156,11 @@ package final class ProxyRouter: Sendable {
 
     private static func idKey(from object: [String: Any]) -> String? {
         guard let id = object["id"], !(id is NSNull) else { return nil }
-        if let stringId = id as? String {
-            return stringId
+        if let stringID = id as? String {
+            return stringID
         }
-        if let numberId = id as? NSNumber {
-            return numberId.stringValue
+        if let numberID = id as? NSNumber {
+            return numberID.stringValue
         }
         return String(describing: id)
     }

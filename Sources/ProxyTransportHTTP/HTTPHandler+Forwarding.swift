@@ -24,232 +24,32 @@ extension HTTPHandler {
         return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier, filePath: filePath)
     }
 
-    func prepareForwardRequest(
-        bodyData: Data,
-        parsedRequestJSON: Any,
-        sessionId: String,
-        shouldPinUpstreamOverride: Bool? = nil
-    ) throws -> PreparedForwardRequest? {
-        let shouldPinUpstream =
-            shouldPinUpstreamOverride ?? MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
-        guard let upstreamIndex = sessionManager.chooseUpstreamIndex(
-            sessionId: sessionId,
-            shouldPin: shouldPinUpstream
-        ) else {
-            return nil
-        }
-
-        let transform = try RequestInspector.transform(
-            bodyData,
-            sessionId: sessionId,
-            mapId: { sessionId, originalId in
-                sessionManager.assignUpstreamId(
-                    sessionId: sessionId,
-                    originalId: originalId,
-                    upstreamIndex: upstreamIndex
-                )
-            }
-        )
-        return PreparedForwardRequest(
-            transform: transform,
-            upstreamIndex: upstreamIndex
-        )
-    }
-
-    func startPreparedForwardRequest(
-        _ prepared: PreparedForwardRequest,
-        session: SessionContext,
-        on eventLoop: EventLoop
-    ) throws -> StartedForwardRequest {
-        let requestTimeout = MCPMethodDispatcher.timeoutForMethod(
-            prepared.transform.method,
-            defaultSeconds: config.requestTimeout
-        )
-        let future: EventLoopFuture<ByteBuffer>
-        if prepared.transform.isBatch {
-            future = session.router.registerBatch(
-                on: eventLoop,
-                timeout: requestTimeout
-            )
-        } else if let idKey = prepared.transform.idKey {
-            future = session.router.registerRequest(
-                idKey: idKey,
-                on: eventLoop,
-                timeout: requestTimeout
-            )
-        } else {
-            struct MissingRequestIDError: Error {}
-            throw MissingRequestIDError()
-        }
-
-        sessionManager.sendUpstream(
-            prepared.transform.upstreamData,
-            upstreamIndex: prepared.upstreamIndex
-        )
-        return StartedForwardRequest(
-            transform: prepared.transform,
-            upstreamIndex: prepared.upstreamIndex,
-            future: future
-        )
-    }
-
-    func resolveForwardResponse(
-        _ result: Result<ByteBuffer, Error>,
-        started: StartedForwardRequest,
-        sessionId: String,
-        accountSuccess: Bool = true,
-        accountTimeout: Bool = true
-    ) -> ForwardResponseResolution {
-        switch result {
-        case .success(let buffer):
-            var buffer = buffer
-            guard let data = buffer.readData(length: buffer.readableBytes) else {
-                return .invalidUpstreamResponse
-            }
-            let responseData = rewriteUnsupportedResourcesListResponseIfNeeded(
-                method: started.transform.method,
-                originalId: started.transform.originalId,
-                upstreamData: data
-            )
-            if started.transform.isCacheableToolsListRequest,
-                let object = try? JSONSerialization.jsonObject(
-                    with: responseData,
-                    options: []
-                ) as? [String: Any],
-                let resultAny = object["result"],
-                let result = JSONValue(any: resultAny)
-            {
-                sessionManager.setCachedToolsListResult(result)
-            }
-            if accountSuccess, shouldNotifyUpstreamSuccess(for: responseData) {
-                for responseId in started.transform.responseIds {
-                    sessionManager.onRequestSucceeded(
-                        sessionId: sessionId,
-                        requestIdKey: responseId.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                }
-            }
-            return .success(responseData)
-        case .failure:
-            if let firstResponseId = started.transform.responseIds.first {
-                if accountTimeout {
-                    sessionManager.onRequestTimeout(
-                        sessionId: sessionId,
-                        requestIdKey: firstResponseId.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                } else {
-                    sessionManager.removeUpstreamIdMapping(
-                        sessionId: sessionId,
-                        requestIdKey: firstResponseId.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                }
-                for responseId in started.transform.responseIds.dropFirst() {
-                    sessionManager.removeUpstreamIdMapping(
-                        sessionId: sessionId,
-                        requestIdKey: responseId.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                }
-            }
-            return .timeout
-        }
-    }
-
     func callInternalTool(
         name: String,
         arguments: [String: Any],
-        sessionId: String,
+        sessionID: String,
         eventLoop: EventLoop
     ) async -> [String: Any]? {
-        let requestObject: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": "__internal-\(UUID().uuidString)",
-            "method": "tools/call",
-            "params": [
-                "name": name,
-                "arguments": arguments,
-            ],
-        ]
-
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
-        else {
-            return nil
-        }
-
-        let prepared: PreparedForwardRequest
-        do {
-            guard let candidate = try prepareForwardRequest(
-                bodyData: bodyData,
-                parsedRequestJSON: requestObject,
-                sessionId: sessionId,
-                shouldPinUpstreamOverride: false
-            ) else {
-                return nil
-            }
-            prepared = candidate
-        } catch {
-            return nil
-        }
-
-        let session = sessionManager.session(id: sessionId)
-        let started: StartedForwardRequest
-        do {
-            started = try startPreparedForwardRequest(
-                prepared,
-                session: session,
-                on: eventLoop
-            )
-        } catch {
-            return nil
-        }
-
-        let resolution: ForwardResponseResolution
-        do {
-            let buffer = try await started.future.get()
-            resolution = resolveForwardResponse(
-                .success(buffer),
-                started: started,
-                sessionId: sessionId,
-                accountSuccess: false,
-                accountTimeout: false
-            )
-        } catch {
-            resolution = resolveForwardResponse(
-                .failure(error),
-                started: started,
-                sessionId: sessionId,
-                accountSuccess: false,
-                accountTimeout: false
-            )
-        }
-
-        guard case .success(let responseData) = resolution,
-            let object = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
-            let result = object["result"] as? [String: Any]
-        else {
-            return nil
-        }
-        if let isError = result["isError"] as? Bool, isError {
-            return nil
-        }
-        return result
+        await forwardingService.callInternalTool(
+            name: name,
+            arguments: arguments,
+            sessionID: sessionID,
+            eventLoop: eventLoop
+        )
     }
 
     func listXcodeWindows(
-        sessionId: String,
+        sessionID: String,
         eventLoop: EventLoop
     ) async -> [XcodeWindowInfo]? {
         await windowQueryService.listWindows(
-            sessionId: sessionId,
+            sessionID: sessionID,
             eventLoop: eventLoop,
-            toolCaller: { name, arguments, sessionId, eventLoop in
+            toolCaller: { name, arguments, sessionID, eventLoop in
                 await self.callInternalTool(
                     name: name,
                     arguments: arguments,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     eventLoop: eventLoop
                 )
             }
@@ -258,8 +58,8 @@ extension HTTPHandler {
 
     func forwardOnce(
         bodyData: Data,
-        sessionId: String,
-        requestIDs: [RPCId],
+        sessionID: String,
+        requestIDs: [RPCID],
         requestIsBatch: Bool,
         eventLoop: EventLoop
     ) async -> RefreshForwardAttemptResult {
@@ -270,15 +70,15 @@ extension HTTPHandler {
             return .invalidRequest
         }
 
-        let prepared: PreparedForwardRequest
+        let prepared: MCPForwardingService.PreparedRequest
         do {
-            guard let candidate = try prepareForwardRequest(
+            guard let candidate = try forwardingService.prepareRequest(
                 bodyData: bodyData,
                 parsedRequestJSON: parsedRequestJSON,
-                sessionId: sessionId
+                sessionID: sessionID
             ) else {
                 return .upstreamUnavailable(
-                    responseIds: requestIDs,
+                    responseIDs: requestIDs,
                     isBatch: requestIsBatch
                 )
             }
@@ -287,10 +87,10 @@ extension HTTPHandler {
             return .invalidRequest
         }
 
-        let session = sessionManager.session(id: sessionId)
-        let started: StartedForwardRequest
+        let session = sessionManager.session(id: sessionID)
+        let started: MCPForwardingService.StartedRequest
         do {
-            started = try startPreparedForwardRequest(
+            started = try forwardingService.startRequest(
                 prepared,
                 session: session,
                 on: eventLoop
@@ -299,19 +99,19 @@ extension HTTPHandler {
             return .invalidRequest
         }
 
-        let resolution: ForwardResponseResolution
+        let resolution: MCPForwardingService.ResponseResolution
         do {
             let buffer = try await started.future.get()
-            resolution = resolveForwardResponse(
+            resolution = forwardingService.resolveResponse(
                 .success(buffer),
                 started: started,
-                sessionId: sessionId
+                sessionID: sessionID
             )
         } catch {
-            resolution = resolveForwardResponse(
+            resolution = forwardingService.resolveResponse(
                 .failure(error),
                 started: started,
-                sessionId: sessionId
+                sessionID: sessionID
             )
         }
 
@@ -320,7 +120,7 @@ extension HTTPHandler {
             return .success(responseData)
         case .timeout:
             return .timeout(
-                responseIds: started.transform.responseIds,
+                responseIDs: started.transform.responseIDs,
                 isBatch: started.transform.isBatch
             )
         case .invalidUpstreamResponse:
@@ -331,25 +131,25 @@ extension HTTPHandler {
     func forwardRefreshCodeIssuesRequest(
         _ refreshRequest: RefreshCodeIssuesRequest,
         bodyData: Data,
-        sessionId: String,
-        requestIDs: [RPCId],
+        sessionID: String,
+        requestIDs: [RPCID],
         requestIsBatch: Bool,
         eventLoop: EventLoop
     ) async -> RefreshForwardAttemptResult {
         await refreshWorkflow.run(
             refreshRequest: refreshRequest,
             bodyData: bodyData,
-            sessionId: sessionId,
+            sessionID: sessionID,
             requestIDs: requestIDs,
             requestIsBatch: requestIsBatch,
             eventLoop: eventLoop,
-            windowsProvider: { sessionId, eventLoop in
-                await self.listXcodeWindows(sessionId: sessionId, eventLoop: eventLoop)
+            windowsProvider: { sessionID, eventLoop in
+                await self.listXcodeWindows(sessionID: sessionID, eventLoop: eventLoop)
             },
-            forwarder: { bodyData, sessionId, requestIDs, requestIsBatch, eventLoop in
+            forwarder: { bodyData, sessionID, requestIDs, requestIsBatch, eventLoop in
                 await self.forwardOnce(
                     bodyData: bodyData,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestIDs: requestIDs,
                     requestIsBatch: requestIsBatch,
                     eventLoop: eventLoop
@@ -363,7 +163,7 @@ extension HTTPHandler {
         on channel: Channel,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionId: String,
+        sessionID: String,
         requestLog: RequestLogContext
     ) {
         switch result {
@@ -373,7 +173,7 @@ extension HTTPHandler {
                     on: channel,
                     data: responseData,
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             } else {
@@ -383,65 +183,65 @@ extension HTTPHandler {
                     on: channel,
                     buffer: out,
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             }
-        case .timeout(let responseIds, let isBatch):
+        case .timeout(let responseIDs, let isBatch):
             sendMCPError(
                 on: channel,
-                ids: responseIds,
+                ids: responseIDs,
                 code: -32000,
                 message: "upstream timeout",
                 forceBatchArray: isBatch,
                 prefersEventStream: prefersEventStream,
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
-        case .upstreamUnavailable(let responseIds, let isBatch):
-            if responseIds.isEmpty {
+        case .upstreamUnavailable(let responseIDs, let isBatch):
+            if responseIDs.isEmpty {
                 sendPlain(
                     on: channel,
                     status: .serviceUnavailable,
                     body: "upstream unavailable",
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             } else {
                 sendMCPError(
                     on: channel,
-                    ids: responseIds,
+                    ids: responseIDs,
                     code: -32001,
                     message: "upstream unavailable",
                     forceBatchArray: isBatch,
                     prefersEventStream: prefersEventStream,
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             }
-        case .overloaded(let responseIds, let isBatch):
-            if responseIds.isEmpty {
+        case .overloaded(let responseIDs, let isBatch):
+            if responseIDs.isEmpty {
                 sendPlain(
                     on: channel,
                     status: .tooManyRequests,
                     body: "refresh queue overloaded",
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             } else {
                 sendMCPError(
                     on: channel,
-                    ids: responseIds,
+                    ids: responseIDs,
                     code: -32003,
                     message: "refresh queue overloaded",
                     forceBatchArray: isBatch,
                     prefersEventStream: prefersEventStream,
                     keepAlive: keepAlive,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     requestLog: requestLog
                 )
             }
@@ -453,7 +253,7 @@ extension HTTPHandler {
                 message: "invalid json",
                 prefersEventStream: prefersEventStream,
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
         case .invalidUpstreamResponse:
@@ -462,7 +262,7 @@ extension HTTPHandler {
                 status: .badGateway,
                 body: "invalid upstream response",
                 keepAlive: keepAlive,
-                sessionId: sessionId,
+                sessionID: sessionID,
                 requestLog: requestLog
             )
         }

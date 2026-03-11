@@ -51,18 +51,18 @@ struct HTTPConcurrencyTests {
         do {
             let (initializeResponse, initializeBody) = try await postJSON(
                 url: url,
-                sessionId: nil,
+                sessionID: nil,
                 payload: initializePayload(id: 1)
             )
-            guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-ID")
             else {
-                throw ConcurrencyTestError.missingSessionId
+                throw ConcurrencyTestError.missingSessionID
             }
-            let initId = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
-            #expect(initId == 1)
+            let initID = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
+            #expect(initID == 1)
 
             let count = 20
-            let responseIds = try await withThrowingTaskGroup(of: Int.self) { group in
+            let responseIDs = try await withThrowingTaskGroup(of: Int.self) { group in
                 for index in 0..<count {
                     group.addTask {
                         let payload: [String: Any] = [
@@ -72,7 +72,7 @@ struct HTTPConcurrencyTests {
                         ]
                         let (response, body) = try await postJSON(
                             url: url,
-                            sessionId: sessionId,
+                            sessionID: sessionID,
                             payload: payload
                         )
                         guard response.statusCode == 200 else {
@@ -83,13 +83,13 @@ struct HTTPConcurrencyTests {
                 }
 
                 var ids: [Int] = []
-                for try await responseId in group {
-                    ids.append(responseId)
+                for try await responseID in group {
+                    ids.append(responseID)
                 }
                 return ids
             }
 
-            #expect(Set(responseIds).count == count)
+            #expect(Set(responseIDs).count == count)
         } catch {
             await server.shutdown()
             throw error
@@ -104,12 +104,12 @@ struct HTTPConcurrencyTests {
         do {
             let (initializeResponse, _) = try await postJSON(
                 url: url,
-                sessionId: nil,
+                sessionID: nil,
                 payload: initializePayload(id: 1)
             )
-            guard let sessionId = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-ID")
             else {
-                throw ConcurrencyTestError.missingSessionId
+                throw ConcurrencyTestError.missingSessionID
             }
 
             let responses = try await withThrowingTaskGroup(
@@ -119,7 +119,7 @@ struct HTTPConcurrencyTests {
                     group.addTask {
                         let (response, body) = try await postJSON(
                             url: url,
-                            sessionId: sessionId,
+                            sessionID: sessionID,
                             payload: toolCallPayload(
                                 id: index + 200,
                                 name: "XcodeRefreshCodeIssuesInFile",
@@ -156,7 +156,7 @@ struct HTTPConcurrencyTests {
 
 private enum ConcurrencyTestError: Error {
     case invalidResponse
-    case missingSessionId
+    case missingSessionID
 }
 
 private func runConcurrentInitialize(
@@ -168,22 +168,22 @@ private func runConcurrentInitialize(
             group.addTask {
                 let payload = initializePayload(id: index + 1)
                 let (response, body) = try await postJSON(
-                    url: url, sessionId: nil, payload: payload)
-                guard let sessionId = response.value(forHTTPHeaderField: "Mcp-Session-Id") else {
-                    throw ConcurrencyTestError.missingSessionId
+                    url: url, sessionID: nil, payload: payload)
+                guard let sessionID = response.value(forHTTPHeaderField: "Mcp-Session-ID") else {
+                    throw ConcurrencyTestError.missingSessionID
                 }
-                let responseId = (body["id"] as? NSNumber)?.intValue ?? -1
-                return (sessionId, responseId)
+                let responseID = (body["id"] as? NSNumber)?.intValue ?? -1
+                return (sessionID, responseID)
             }
         }
 
-        var sessionIds: [String] = []
+        var sessionIDs: [String] = []
         var ids: [Int] = []
-        for try await (sessionId, responseId) in group {
-            sessionIds.append(sessionId)
-            ids.append(responseId)
+        for try await (sessionID, responseID) in group {
+            sessionIDs.append(sessionID)
+            ids.append(responseID)
         }
-        return (sessionIds, ids)
+        return (sessionIDs, ids)
     }
 }
 
@@ -481,7 +481,7 @@ private func toolCallPayload(
 
 private func postJSON(
     url: URL,
-    sessionId: String?,
+    sessionID: String?,
     payload: [String: Any]
 ) async throws -> (HTTPURLResponse, [String: Any]) {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
@@ -490,8 +490,8 @@ private func postJSON(
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
-    if let sessionId {
-        request.setValue(sessionId, forHTTPHeaderField: "Mcp-Session-Id")
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-ID")
     }
 
     let (responseData, response) = try await URLSession.shared.data(for: request)

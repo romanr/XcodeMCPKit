@@ -7,11 +7,11 @@ import ProxySession
 package enum LocalPostHandling {
     case initialize(
         future: EventLoopFuture<ByteBuffer>,
-        sessionId: String,
-        originalId: RPCId
+        sessionID: String,
+        originalID: RPCID
     )
-    case immediateResponse(data: Data, sessionId: String)
-    case mcpError(id: RPCId?, code: Int, message: String, sessionId: String)
+    case immediateResponse(data: Data, sessionID: String)
+    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String)
 }
 
 package struct LocalMCPResponder {
@@ -25,7 +25,7 @@ package struct LocalMCPResponder {
 
     package func handle(
         object: [String: Any],
-        headerSessionId: String?,
+        headerSessionID: String?,
         headerSessionExists: Bool,
         eventLoop: EventLoop
     ) -> LocalPostHandling? {
@@ -34,42 +34,42 @@ package struct LocalMCPResponder {
         }
 
         if method == "initialize" {
-            guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
+            guard let originalIDValue = object["id"], let originalID = RPCID(any: originalIDValue) else {
                 return .mcpError(
                     id: nil,
                     code: -32600,
                     message: "missing id",
-                    sessionId: headerSessionId ?? UUID().uuidString
+                    sessionID: headerSessionID ?? UUID().uuidString
                 )
             }
-            let sessionId = headerSessionId ?? UUID().uuidString
-            _ = sessionManager.session(id: sessionId)
+            let sessionID = headerSessionID ?? UUID().uuidString
+            _ = sessionManager.session(id: sessionID)
             let future = sessionManager.registerInitialize(
-                sessionId: sessionId,
-                originalId: originalId,
+                sessionID: sessionID,
+                originalID: originalID,
                 requestObject: object,
                 on: eventLoop
             )
             return .initialize(
                 future: future,
-                sessionId: sessionId,
-                originalId: originalId
+                sessionID: sessionID,
+                originalID: originalID
             )
         }
 
         if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
-            guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
+            guard let originalIDValue = object["id"], let originalID = RPCID(any: originalIDValue) else {
                 return .mcpError(
                     id: nil,
                     code: -32600,
                     message: "missing id",
-                    sessionId: headerSessionId ?? UUID().uuidString
+                    sessionID: headerSessionID ?? UUID().uuidString
                 )
             }
 
-            let sessionId = headerSessionId ?? UUID().uuidString
-            if let headerSessionId, headerSessionExists == false {
-                _ = sessionManager.session(id: headerSessionId)
+            let sessionID = headerSessionID ?? UUID().uuidString
+            if let headerSessionID, headerSessionExists == false {
+                _ = sessionManager.session(id: headerSessionID)
             }
 
             let result: [String: Any] = (method == "resources/list")
@@ -77,7 +77,7 @@ package struct LocalMCPResponder {
                 : ["resourceTemplates": [Any]()]
             let response: [String: Any] = [
                 "jsonrpc": "2.0",
-                "id": originalId.value.foundationObject,
+                "id": originalID.value.foundationObject,
                 "result": result,
             ]
             guard JSONSerialization.isValidJSONObject(response),
@@ -85,38 +85,38 @@ package struct LocalMCPResponder {
             else {
                 return nil
             }
-            return .immediateResponse(data: data, sessionId: sessionId)
+            return .immediateResponse(data: data, sessionID: sessionID)
         }
 
         if method == "tools/list",
-            let headerSessionId,
+            let headerSessionID,
             sessionManager.isInitialized(),
             let cachedResult = sessionManager.cachedToolsListResult(),
-            let originalIdValue = object["id"],
-            let originalId = RPCId(any: originalIdValue)
+            let originalIDValue = object["id"],
+            let originalID = RPCID(any: originalIDValue)
         {
             if headerSessionExists == false {
-                _ = sessionManager.session(id: headerSessionId)
+                _ = sessionManager.session(id: headerSessionID)
             }
             let hasParams: Bool = {
                 guard let params = object["params"] else { return false }
                 return !(params is NSNull)
             }()
             let pinnedUpstreamIndex = sessionManager.chooseUpstreamIndex(
-                sessionId: headerSessionId,
+                sessionID: headerSessionID,
                 shouldPin: true
             )
             logger.debug(
                 "tools/list cache hit",
                 metadata: [
-                    "session": .string(headerSessionId),
+                    "session": .string(headerSessionID),
                     "has_params": .string(hasParams ? "true" : "false"),
                     "pinned_upstream": .string(pinnedUpstreamIndex.map(String.init) ?? "none"),
                 ]
             )
             let response: [String: Any] = [
                 "jsonrpc": "2.0",
-                "id": originalId.value.foundationObject,
+                "id": originalID.value.foundationObject,
                 "result": cachedResult.foundationObject,
             ]
             guard JSONSerialization.isValidJSONObject(response),
@@ -124,7 +124,7 @@ package struct LocalMCPResponder {
             else {
                 return nil
             }
-            return .immediateResponse(data: data, sessionId: headerSessionId)
+            return .immediateResponse(data: data, sessionID: headerSessionID)
         }
 
         return nil

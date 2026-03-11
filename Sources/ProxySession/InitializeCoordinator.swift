@@ -7,9 +7,9 @@ package final class InitializeCoordinator: Sendable {
     package struct PendingInitialize: Sendable {
         package let eventLoop: EventLoop
         package let promise: EventLoopPromise<ByteBuffer>
-        package let sessionId: String
+        package let sessionID: String
         package let sessionGeneration: UInt64
-        package let originalId: RPCId
+        package let originalID: RPCID
     }
 
     package struct RegisterDecision: Sendable {
@@ -29,7 +29,7 @@ package final class InitializeCoordinator: Sendable {
     package struct FailureResult: Sendable {
         package let pending: [PendingInitialize]
         package let timeout: Scheduled<Void>?
-        package let upstreamId: Int64?
+        package let upstreamID: Int64?
         package let shouldRetryEagerInitialize: Bool
     }
 
@@ -38,7 +38,7 @@ package final class InitializeCoordinator: Sendable {
         package let timeout: Scheduled<Void>?
         package let hadGlobalInit: Bool
         package let wasInFlight: Bool
-        package let primaryInitUpstreamId: Int64?
+        package let primaryInitUpstreamID: Int64?
     }
 
     package struct Snapshot: Sendable {
@@ -56,7 +56,7 @@ package final class InitializeCoordinator: Sendable {
         var initTimeout: Scheduled<Void>?
         var isShuttingDown = false
         var didWarmSecondary = false
-        var primaryInitUpstreamId: Int64?
+        var primaryInitUpstreamID: Int64?
         var shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
     }
 
@@ -93,16 +93,16 @@ package final class InitializeCoordinator: Sendable {
         }
     }
 
-    package func setPrimaryInitUpstreamId(_ upstreamId: Int64) {
+    package func setPrimaryInitUpstreamID(_ upstreamID: Int64) {
         state.withLockedValue { state in
-            state.primaryInitUpstreamId = upstreamId
+            state.primaryInitUpstreamID = upstreamID
         }
     }
 
     package func registerInitialize(
-        sessionId: String,
+        sessionID: String,
         sessionGeneration: UInt64,
-        originalId: RPCId,
+        originalID: RPCID,
         on eventLoop: EventLoop
     ) -> RegisterDecision {
         state.withLockedValue { state in
@@ -131,9 +131,9 @@ package final class InitializeCoordinator: Sendable {
                 PendingInitialize(
                     eventLoop: eventLoop,
                     promise: promise,
-                    sessionId: sessionId,
+                    sessionID: sessionID,
                     sessionGeneration: sessionGeneration,
-                    originalId: originalId
+                    originalID: originalID
                 )
             )
 
@@ -170,7 +170,7 @@ package final class InitializeCoordinator: Sendable {
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
-            state.primaryInitUpstreamId = nil
+            state.primaryInitUpstreamID = nil
             let shouldWarmSecondary = !state.didWarmSecondary
             if shouldWarmSecondary {
                 state.didWarmSecondary = true
@@ -197,12 +197,12 @@ package final class InitializeCoordinator: Sendable {
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
-            let upstreamId = state.primaryInitUpstreamId
-            state.primaryInitUpstreamId = nil
+            let upstreamID = state.primaryInitUpstreamID
+            state.primaryInitUpstreamID = nil
             return FailureResult(
                 pending: pending,
                 timeout: timeout,
-                upstreamId: upstreamId,
+                upstreamID: upstreamID,
                 shouldRetryEagerInitialize: shouldRetryEagerInitialize
             )
         }
@@ -224,14 +224,14 @@ package final class InitializeCoordinator: Sendable {
                 timeout: state.initTimeout,
                 hadGlobalInit: state.initResult != nil,
                 wasInFlight: state.initInFlight,
-                primaryInitUpstreamId: state.primaryInitUpstreamId
+                primaryInitUpstreamID: state.primaryInitUpstreamID
             )
 
             if upstreamIndex == 0, state.initInFlight {
                 state.initInFlight = false
                 state.initTimeout = nil
                 state.initPending.removeAll()
-                state.primaryInitUpstreamId = nil
+                state.primaryInitUpstreamID = nil
             }
 
             return result

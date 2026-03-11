@@ -6,7 +6,7 @@ package final class ToolsListCache: Sendable {
     private struct State: Sendable {
         var cachedResult: JSONValue?
         var warmupInFlight = false
-        var internalSessionId: String?
+        var internalSessionID: String?
     }
 
     private let state = NIOLockedValueBox(State())
@@ -40,8 +40,8 @@ package final class ToolsListCache: Sendable {
         state.withLockedValue { ($0.cachedResult, $0.warmupInFlight) }
     }
 
-    package func internalSessionId(hasSession: (String) -> Bool) -> String {
-        if let existing = state.withLockedValue({ $0.internalSessionId }) {
+    package func internalSessionID(hasSession: (String) -> Bool) -> String {
+        if let existing = state.withLockedValue({ $0.internalSessionID }) {
             return existing
         }
 
@@ -51,10 +51,10 @@ package final class ToolsListCache: Sendable {
         } while hasSession(candidate)
 
         return state.withLockedValue { state in
-            if let existing = state.internalSessionId {
+            if let existing = state.internalSessionID {
                 return existing
             }
-            state.internalSessionId = candidate
+            state.internalSessionID = candidate
             return candidate
         }
     }

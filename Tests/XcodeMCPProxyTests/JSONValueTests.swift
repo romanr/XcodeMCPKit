@@ -5,16 +5,16 @@ import Testing
 
 @Suite
 struct JSONValueTests {
-    @Test func rpcIdFromString() async throws {
-        let rpcId = RPCId(any: "abc")
-        #expect(rpcId?.key == "abc")
-        #expect(rpcId?.value.foundationObject as? String == "abc")
+    @Test func rpcIDFromString() async throws {
+        let rpcID = RPCID(any: "abc")
+        #expect(rpcID?.key == "abc")
+        #expect(rpcID?.value.foundationObject as? String == "abc")
     }
 
-    @Test func rpcIdFromNumber() async throws {
-        let rpcId = RPCId(any: NSNumber(value: 42))
-        #expect(rpcId?.key == "42")
-        #expect((rpcId?.value.foundationObject as? NSNumber)?.intValue == 42)
+    @Test func rpcIDFromNumber() async throws {
+        let rpcID = RPCID(any: NSNumber(value: 42))
+        #expect(rpcID?.key == "42")
+        #expect((rpcID?.value.foundationObject as? NSNumber)?.intValue == 42)
     }
 
     @Test func jsonValueRoundTrip() async throws {

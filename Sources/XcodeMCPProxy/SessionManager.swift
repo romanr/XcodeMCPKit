@@ -254,12 +254,22 @@ final class SessionManager: Sendable, SessionManaging {
     }
 
     func shutdown() {
-        let globalTimeout = initState.withLockedValue { state -> Scheduled<Void>? in
+        let pendingInitializes = initState.withLockedValue { state -> [InitPending] in
             state.isShuttingDown = true
             state.initInFlight = false
+            let pending = state.initPending
+            state.initPending.removeAll()
+            return pending
+        }
+        for pending in pendingInitializes {
+            pending.eventLoop.execute {
+                pending.promise.fail(CancellationError())
+            }
+        }
+
+        let globalTimeout = initState.withLockedValue { state -> Scheduled<Void>? in
             let existing = state.initTimeout
             state.initTimeout = nil
-            state.initPending.removeAll()
             return existing
         }
         globalTimeout?.cancel()

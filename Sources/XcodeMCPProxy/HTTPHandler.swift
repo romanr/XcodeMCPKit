@@ -60,6 +60,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         case success(Data)
         case timeout(responseIds: [RPCId], isBatch: Bool)
         case upstreamUnavailable(responseIds: [RPCId], isBatch: Bool)
+        case overloaded(responseIds: [RPCId], isBatch: Bool)
         case invalidRequest
         case invalidUpstreamResponse
     }
@@ -79,12 +80,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     init(
         config: ProxyConfig,
         sessionManager: any SessionManaging,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator(),
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
         warmupDriver: XcodeEditorWarmupDriver = XcodeEditorWarmupDriver()
     ) {
         self.config = config
         self.sessionManager = sessionManager
-        self.refreshCodeIssuesCoordinator = refreshCodeIssuesCoordinator
+        self.refreshCodeIssuesCoordinator =
+            refreshCodeIssuesCoordinator
+            ?? RefreshCodeIssuesCoordinator.makeDefault(
+                requestTimeout: config.requestTimeout
+            )
         self.warmupDriver = warmupDriver
     }
 
@@ -1158,142 +1163,189 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         requestIsBatch: Bool,
         eventLoop: EventLoop
     ) async -> RefreshForwardAttemptResult {
-        await refreshCodeIssuesCoordinator.withPermit(key: refreshRequest.queueKey) { queuePosition in
-            let baseMetadata: Logger.Metadata = [
-                "session": .string(sessionId),
-                "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
-                "queue_key": .string(refreshRequest.queueKey),
-            ]
-            if queuePosition > 0 {
-                logger.debug(
-                    "Queued refresh code issues request",
-                    metadata: baseMetadata.merging(
-                        ["queued_ahead": .string("\(queuePosition)")],
-                        uniquingKeysWith: { _, new in new }
-                    )
-                )
-            }
-            logger.debug(
-                "Dequeued refresh code issues request",
-                metadata: baseMetadata
-            )
-
-            let warmupResult = await warmupDriver.warmUp(
-                tabIdentifier: refreshRequest.tabIdentifier,
-                filePath: refreshRequest.filePath,
-                sessionId: sessionId,
-                eventLoop: eventLoop,
-                windowsProvider: { sessionId, eventLoop in
-                    await self.listXcodeWindows(
-                        sessionId: sessionId,
-                        eventLoop: eventLoop
-                    )
-                }
-            )
-            let warmupMetadata = baseMetadata
-                .merging(
-                    [
-                        "workspace_path": .string(warmupResult.workspacePath ?? "none"),
-                        "requested_file_path": .string(refreshRequest.filePath ?? "none"),
-                        "resolved_file_path": .string(warmupResult.resolvedFilePath ?? "none"),
-                    ],
-                    uniquingKeysWith: { _, new in new }
-                )
-
-            if let failureReason = warmupResult.failureReason,
-                failureReason != "disabled",
-                failureReason != "missing tabIdentifier",
-                failureReason != "missing filePath"
-            {
-                logger.debug(
-                    "Refresh code issues warm-up fell back to plain refresh",
-                    metadata: warmupMetadata.merging(
-                        [
-                            "warmup_stage": .string("fallback"),
-                            "failure_reason": .string(failureReason),
-                        ],
-                        uniquingKeysWith: { _, new in new }
-                    )
-                )
-            } else if warmupResult.context != nil {
-                logger.debug(
-                    "Refresh code issues warm-up completed",
-                    metadata: warmupMetadata.merging(
-                        ["warmup_stage": .string("ready")],
-                        uniquingKeysWith: { _, new in new }
-                    )
-                )
-            }
-            var finalResult: RefreshForwardAttemptResult = .invalidRequest
-
-            resultLoop: for attemptIndex in 0...Self.refreshRetryDelaysNanos.count {
-                let attempt = attemptIndex + 1
-                let attemptMetadata = warmupMetadata.merging(
-                    ["attempt": .string("\(attempt)")],
-                    uniquingKeysWith: { _, new in new }
-                )
-                if let context = warmupResult.context {
-                    let touched = await warmupDriver.touchResolvedTarget(context)
+        do {
+            return try await refreshCodeIssuesCoordinator.withPermit(
+                key: refreshRequest.queueKey
+            ) { permit in
+                let baseMetadata: Logger.Metadata = [
+                    "session": .string(sessionId),
+                    "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
+                    "queue_key": .string(refreshRequest.queueKey),
+                ]
+                let queueMetadata: Logger.Metadata = [
+                    "pending_for_key": .string("\(permit.pendingForKey)"),
+                    "pending_total": .string("\(permit.pendingTotal)"),
+                ]
+                if permit.queuePosition > 0 {
                     logger.debug(
-                        "Refresh code issues warm-up touch",
-                        metadata: attemptMetadata.merging(
-                            [
-                                "warmup_stage": .string("touch"),
-                                "touch_result": .string(touched ? "ready" : "failed"),
-                            ],
+                        "Queued refresh code issues request",
+                        metadata: baseMetadata.merging(
+                            queueMetadata.merging(
+                                ["queued_ahead": .string("\(permit.queuePosition)")],
+                                uniquingKeysWith: { _, new in new }
+                            ),
                             uniquingKeysWith: { _, new in new }
                         )
                     )
                 }
-
-                let result = await forwardOnce(
-                    bodyData: bodyData,
-                    sessionId: sessionId,
-                    requestIDs: requestIDs,
-                    requestIsBatch: requestIsBatch,
-                    eventLoop: eventLoop
-                )
-
-                switch result {
-                case .success(let responseData):
-                    let retryable = isRetryableRefreshCodeIssuesFailure(responseData)
-                    if retryable, attemptIndex < Self.refreshRetryDelaysNanos.count {
-                        let delayNanos = Self.refreshRetryDelaysNanos[attemptIndex]
-                        logger.debug(
-                            "Retrying refresh code issues request after error 5",
-                            metadata: attemptMetadata.merging(
-                                ["delay_ms": .string("\(delayNanos / 1_000_000)")],
-                                uniquingKeysWith: { _, new in new }
-                            )
-                        )
-                        try? await Task.sleep(nanoseconds: delayNanos)
-                        continue
-                    }
-                    if retryable {
-                        logger.debug(
-                            "Refresh code issues request still failing after retries",
-                            metadata: attemptMetadata
-                        )
-                    }
-                    finalResult = .success(responseData)
-                    break resultLoop
-                case .timeout, .upstreamUnavailable, .invalidRequest, .invalidUpstreamResponse:
-                    finalResult = result
-                    break resultLoop
-                }
-            }
-
-            let restoreResult = await warmupDriver.restore(warmupResult.context)
-            if warmupResult.context?.snapshot != nil {
                 logger.debug(
-                    "Refresh code issues restore finished",
-                    metadata: warmupMetadata.merging(
-                        ["restore_result": .string(restoreResult)],
+                    "Dequeued refresh code issues request",
+                    metadata: baseMetadata.merging(
+                        queueMetadata,
                         uniquingKeysWith: { _, new in new }
                     )
                 )
+
+                let warmupResult = await warmupDriver.warmUp(
+                    tabIdentifier: refreshRequest.tabIdentifier,
+                    filePath: refreshRequest.filePath,
+                    sessionId: sessionId,
+                    eventLoop: eventLoop,
+                    windowsProvider: { sessionId, eventLoop in
+                        await self.listXcodeWindows(
+                            sessionId: sessionId,
+                            eventLoop: eventLoop
+                        )
+                    }
+                )
+                let warmupMetadata = baseMetadata
+                    .merging(
+                        [
+                            "workspace_path": .string(warmupResult.workspacePath ?? "none"),
+                            "requested_file_path": .string(refreshRequest.filePath ?? "none"),
+                            "resolved_file_path": .string(warmupResult.resolvedFilePath ?? "none"),
+                        ],
+                        uniquingKeysWith: { _, new in new }
+                    )
+
+                if let failureReason = warmupResult.failureReason,
+                    failureReason != "disabled",
+                    failureReason != "missing tabIdentifier",
+                    failureReason != "missing filePath"
+                {
+                    logger.debug(
+                        "Refresh code issues warm-up fell back to plain refresh",
+                        metadata: warmupMetadata.merging(
+                            [
+                                "warmup_stage": .string("fallback"),
+                                "failure_reason": .string(failureReason),
+                            ],
+                            uniquingKeysWith: { _, new in new }
+                        )
+                    )
+                } else if warmupResult.context != nil {
+                    logger.debug(
+                        "Refresh code issues warm-up completed",
+                        metadata: warmupMetadata.merging(
+                            ["warmup_stage": .string("ready")],
+                            uniquingKeysWith: { _, new in new }
+                        )
+                    )
+                }
+                var finalResult: RefreshForwardAttemptResult = .invalidRequest
+
+                resultLoop: for attemptIndex in 0...Self.refreshRetryDelaysNanos.count {
+                    let attempt = attemptIndex + 1
+                    let attemptMetadata = warmupMetadata.merging(
+                        ["attempt": .string("\(attempt)")],
+                        uniquingKeysWith: { _, new in new }
+                    )
+                    if let context = warmupResult.context {
+                        let touched = await warmupDriver.touchResolvedTarget(context)
+                        logger.debug(
+                            "Refresh code issues warm-up touch",
+                            metadata: attemptMetadata.merging(
+                                [
+                                    "warmup_stage": .string("touch"),
+                                    "touch_result": .string(touched ? "ready" : "failed"),
+                                ],
+                                uniquingKeysWith: { _, new in new }
+                            )
+                        )
+                    }
+
+                    let result = await forwardOnce(
+                        bodyData: bodyData,
+                        sessionId: sessionId,
+                        requestIDs: requestIDs,
+                        requestIsBatch: requestIsBatch,
+                        eventLoop: eventLoop
+                    )
+
+                    switch result {
+                    case .success(let responseData):
+                        let retryable = isRetryableRefreshCodeIssuesFailure(responseData)
+                        if retryable, attemptIndex < Self.refreshRetryDelaysNanos.count {
+                            let delayNanos = Self.refreshRetryDelaysNanos[attemptIndex]
+                            logger.debug(
+                                "Retrying refresh code issues request after error 5",
+                                metadata: attemptMetadata.merging(
+                                    ["delay_ms": .string("\(delayNanos / 1_000_000)")],
+                                    uniquingKeysWith: { _, new in new }
+                                )
+                            )
+                            try? await Task.sleep(nanoseconds: delayNanos)
+                            continue
+                        }
+                        if retryable {
+                            logger.debug(
+                                "Refresh code issues request still failing after retries",
+                                metadata: attemptMetadata
+                            )
+                        }
+                        finalResult = .success(responseData)
+                        break resultLoop
+                    case .timeout, .upstreamUnavailable, .overloaded, .invalidRequest,
+                        .invalidUpstreamResponse:
+                        finalResult = result
+                        break resultLoop
+                    }
+                }
+
+                let restoreResult = await warmupDriver.restore(warmupResult.context)
+                if warmupResult.context?.snapshot != nil {
+                    logger.debug(
+                        "Refresh code issues restore finished",
+                        metadata: warmupMetadata.merging(
+                            ["restore_result": .string(restoreResult)],
+                            uniquingKeysWith: { _, new in new }
+                        )
+                    )
+                }
+                return finalResult
             }
-            return finalResult
+        } catch RefreshCodeIssuesCoordinator.AcquireError.queueLimitExceeded {
+            logger.warning(
+                "Rejected refresh code issues request because queue is full",
+                metadata: [
+                    "session": .string(sessionId),
+                    "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
+                    "queue_key": .string(refreshRequest.queueKey),
+                ]
+            )
+            return .overloaded(responseIds: requestIDs, isBatch: requestIsBatch)
+        } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
+            logger.warning(
+                "Rejected refresh code issues request after queue wait timeout",
+                metadata: [
+                    "session": .string(sessionId),
+                    "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
+                    "queue_key": .string(refreshRequest.queueKey),
+                ]
+            )
+            return .overloaded(responseIds: requestIDs, isBatch: requestIsBatch)
+        } catch is CancellationError {
+            logger.debug(
+                "Cancelled queued refresh code issues request",
+                metadata: [
+                    "session": .string(sessionId),
+                    "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
+                    "queue_key": .string(refreshRequest.queueKey),
+                ]
+            )
+            return .overloaded(responseIds: requestIDs, isBatch: requestIsBatch)
+        } catch {
+            return .invalidRequest
         }
     }
 
@@ -1354,6 +1406,29 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     ids: responseIds,
                     code: -32001,
                     message: "upstream unavailable",
+                    forceBatchArray: isBatch,
+                    prefersEventStream: prefersEventStream,
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            }
+        case .overloaded(let responseIds, let isBatch):
+            if responseIds.isEmpty {
+                sendPlain(
+                    on: channel,
+                    status: .tooManyRequests,
+                    body: "refresh queue overloaded",
+                    keepAlive: keepAlive,
+                    sessionId: sessionId,
+                    requestLog: requestLog
+                )
+            } else {
+                sendMCPError(
+                    on: channel,
+                    ids: responseIds,
+                    code: -32003,
+                    message: "refresh queue overloaded",
                     forceBatchArray: isBatch,
                     prefersEventStream: prefersEventStream,
                     keepAlive: keepAlive,

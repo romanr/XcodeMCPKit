@@ -20,7 +20,7 @@ extension XcodeMCPProxyServerCommand {
         return requested == actual
     }
 
-    static func resolveXcodePid() -> String? {
+    static func resolveXcodePID() -> String? {
         if let pid = firstLine(runCommand("/usr/bin/pgrep", ["-x", "Xcode"])) {
             return pid
         }

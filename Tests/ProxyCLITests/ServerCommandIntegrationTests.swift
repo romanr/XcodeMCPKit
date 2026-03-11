@@ -12,7 +12,7 @@ struct ServerCommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
-                resolveXcodePid: { "4321" },
+                resolveXcodePID: { "4321" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in IntegrationRecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -41,7 +41,7 @@ struct ServerCommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 stderr: { _ in },
-                resolveXcodePid: { "1234" },
+                resolveXcodePID: { "1234" },
                 terminateExistingServer: { host, port in
                     restarted.append("\(host):\(port)")
                     return true

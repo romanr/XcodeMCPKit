@@ -28,7 +28,7 @@ struct ServerCommandTests {
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,
-            hasXcodePidFlag: false,
+            hasXcodePIDFlag: false,
             hasLazyInitFlag: false,
             forceRestart: false,
             dryRun: false
@@ -41,7 +41,7 @@ struct ServerCommandTests {
                 "LAZY_INIT": "1",
             ],
             to: &options,
-            resolveXcodePid: { "4242" },
+            resolveXcodePID: { "4242" },
             stderr: { _ in }
         )
 
@@ -93,7 +93,7 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 stderr: { _ in },
-                resolveXcodePid: { "1234" },
+                resolveXcodePID: { "1234" },
                 terminateExistingServer: { host, port in
                     restarted.append("\(host):\(port)")
                     return true
@@ -132,7 +132,7 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
-                resolveXcodePid: { "5678" },
+                resolveXcodePID: { "5678" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -164,7 +164,7 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { errors.append($0) },
-                resolveXcodePid: { "7777" },
+                resolveXcodePID: { "7777" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -197,7 +197,7 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { errors.append($0) },
-                resolveXcodePid: { "7777" },
+                resolveXcodePID: { "7777" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },

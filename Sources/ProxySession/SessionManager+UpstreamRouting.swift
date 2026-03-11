@@ -79,30 +79,7 @@ extension SessionManager {
     }
 
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
-        let globalInit = initState.withLockedValue {
-            state -> (
-                pending: [InitPending], timeout: Scheduled<Void>?, hadGlobalInit: Bool,
-                wasInFlight: Bool,
-                primaryInitUpstreamId: Int64?
-            )? in
-            if state.isShuttingDown {
-                return nil
-            }
-            let wasInFlight = state.initInFlight
-            let hadGlobalInit = state.initResult != nil
-            let pending = state.initPending
-            let timeout = state.initTimeout
-            let primaryId = state.primaryInitUpstreamId
-
-            if upstreamIndex == 0 && wasInFlight {
-                state.initInFlight = false
-                state.initTimeout = nil
-                state.initPending.removeAll()
-                state.primaryInitUpstreamId = nil
-            }
-
-            return (pending, timeout, hadGlobalInit, wasInFlight, primaryId)
-        }
+        let globalInit = initializeCoordinator.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
 
         if upstreamIndex == 0 && globalInit.wasInFlight {
@@ -140,10 +117,7 @@ extension SessionManager {
             shouldResetGlobalInit = false
         }
         if shouldResetGlobalInit {
-            initState.withLockedValue { state in
-                state.initResult = nil
-                state.didWarmSecondary = false
-            }
+            initializeCoordinator.resetCachedInitializeResult()
         }
 
         if config.eagerInitialize {
@@ -157,13 +131,11 @@ extension SessionManager {
                 if shouldResetGlobalInit {
                     let primaryInitInFlight = upstreamPool.primaryInitInFlight()
                     if primaryInitInFlight {
-                        initState.withLockedValue { state in
-                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = true
-                        }
+                        initializeCoordinator
+                            .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
                     } else {
-                        initState.withLockedValue { state in
-                            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-                        }
+                        initializeCoordinator
+                            .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(false)
                         startEagerInitializePrimary()
                     }
                 }
@@ -221,17 +193,12 @@ extension SessionManager {
     }
 
     package func debugSnapshot() -> ProxyDebugSnapshot {
-        let initSnapshot = initState.withLockedValue { state in
-            (
-                proxyInitialized: state.initResult != nil,
-                isShuttingDown: state.isShuttingDown
-            )
-        }
+        let initSnapshot = initializeCoordinator.snapshot()
         let toolsSnapshot = toolsListCache.snapshot()
         let upstreamStates = upstreamPool.statesSnapshot()
 
         return debugRecorder.snapshot(
-            proxyInitialized: initSnapshot.proxyInitialized && !initSnapshot.isShuttingDown,
+            proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: toolsSnapshot.cachedResult != nil,
             warmupInFlight: toolsSnapshot.warmupInFlight,
             upstreamStates: upstreamStates,
@@ -241,22 +208,14 @@ extension SessionManager {
     }
 
     func testStateSnapshot() -> TestSnapshot {
-        let initSnapshot = initState.withLockedValue { state in
-            (
-                hasInitResult: state.initResult != nil,
-                initInFlight: state.initInFlight,
-                didWarmSecondary: state.didWarmSecondary,
-                shouldRetryEagerInitializePrimaryAfterWarmInitFailure: state
-                    .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-            )
-        }
+        let initSnapshot = initializeCoordinator.snapshot()
         let upstreams = upstreamPool.statesSnapshot().map { upstream in
                 TestSnapshot.Upstream(
                     isInitialized: upstream.isInitialized,
                     initInFlight: upstream.initInFlight,
                     healthState: upstream.healthState
                 )
-            }
+        }
         return TestSnapshot(
             hasInitResult: initSnapshot.hasInitResult,
             initInFlight: initSnapshot.initInFlight,

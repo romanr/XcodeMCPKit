@@ -75,29 +75,8 @@ package final class SessionManager: Sendable, SessionManaging {
         let upstreams: [Upstream]
     }
 
-    package struct InitPending: Sendable {
-        package let eventLoop: EventLoop
-        package let promise: EventLoopPromise<ByteBuffer>
-        package let sessionId: String
-        package let sessionGeneration: UInt64
-        package let originalId: RPCId
-    }
-
-    package struct InitState: Sendable {
-        package var initResult: JSONValue?
-        package var initPending: [InitPending] = []
-        package var initInFlight = false
-        package var initTimeout: Scheduled<Void>?
-        package var isShuttingDown = false
-        package var didWarmSecondary = false
-        package var primaryInitUpstreamId: Int64?
-        // If we drop the cached global init result while the primary is already performing a warm init,
-        // retry the eager/global init once that warm init finishes unsuccessfully (error/timeout).
-        package var shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-    }
-
     package let sessionRegistry: SessionRegistry
-    package let initState = NIOLockedValueBox(InitState())
+    package let initializeCoordinator = InitializeCoordinator()
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
     package let debugRecorder: ProxyDebugRecorder
     package let eventLoop: EventLoop
@@ -175,25 +154,14 @@ package final class SessionManager: Sendable, SessionManaging {
     }
 
     package func shutdown() {
-        let pendingInitializes = initState.withLockedValue { state -> [InitPending] in
-            state.isShuttingDown = true
-            state.initInFlight = false
-            let pending = state.initPending
-            state.initPending.removeAll()
-            return pending
-        }
+        let shutdownState = initializeCoordinator.beginShutdown()
+        let pendingInitializes = shutdownState.pending
         for pending in pendingInitializes {
             pending.eventLoop.execute {
                 pending.promise.fail(CancellationError())
             }
         }
-
-        let globalTimeout = initState.withLockedValue { state -> Scheduled<Void>? in
-            let existing = state.initTimeout
-            state.initTimeout = nil
-            return existing
-        }
-        globalTimeout?.cancel()
+        shutdownState.timeout?.cancel()
 
         let upstreamTimeouts = upstreamPool.clearInitTimeoutsForShutdown()
         for timeout in upstreamTimeouts {
@@ -216,7 +184,7 @@ package final class SessionManager: Sendable, SessionManaging {
     }
 
     package func isInitialized() -> Bool {
-        initState.withLockedValue { $0.initResult != nil }
+        initializeCoordinator.isInitialized()
     }
 
     package func cachedToolsListResult() -> JSONValue? {
@@ -378,40 +346,17 @@ package final class SessionManager: Sendable, SessionManaging {
     ) -> EventLoopFuture<ByteBuffer> {
         _ = session(id: sessionId)
         let sessionGeneration = sessionRegistry.generation(of: sessionId) ?? 0
-        var shouldSend = false
-        var shouldScheduleTimeout = false
-        var initRequest: [String: Any]?
-        var cachedResult: JSONValue?
-        var shuttingDown = false
-        var pendingPromise: EventLoopPromise<ByteBuffer>?
-
-        initState.withLockedValue { state in
-            if state.isShuttingDown {
-                shuttingDown = true
-                return
-            }
-            if let result = state.initResult {
-                cachedResult = result
-                return
-            }
-            let promise = eventLoop.makePromise(of: ByteBuffer.self)
-            pendingPromise = promise
-            state.initPending.append(
-                InitPending(
-                    eventLoop: eventLoop,
-                    promise: promise,
-                    sessionId: sessionId,
-                    sessionGeneration: sessionGeneration,
-                    originalId: originalId
-                )
-            )
-            if !state.initInFlight {
-                state.initInFlight = true
-                shouldSend = true
-                initRequest = requestObject
-                shouldScheduleTimeout = true
-            }
-        }
+        let decision = initializeCoordinator.registerInitialize(
+            sessionId: sessionId,
+            sessionGeneration: sessionGeneration,
+            originalId: originalId,
+            on: eventLoop
+        )
+        let cachedResult = decision.cachedResult
+        let shuttingDown = decision.isShuttingDown
+        let pendingPromise = decision.promise
+        let shouldSend = decision.shouldSendRequest
+        let shouldScheduleTimeout = decision.shouldScheduleTimeout
 
         if shouldScheduleTimeout {
             scheduleInitTimeout()
@@ -446,11 +391,10 @@ package final class SessionManager: Sendable, SessionManaging {
             )
         }
 
-        if shouldSend, var initRequest {
+        if shouldSend {
+            var initRequest = requestObject
             let upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
-            initState.withLockedValue { state in
-                state.primaryInitUpstreamId = upstreamId
-            }
+            initializeCoordinator.setPrimaryInitUpstreamId(upstreamId)
             markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
             initRequest["id"] = upstreamId
             if let data = try? JSONSerialization.data(withJSONObject: initRequest, options: []) {

@@ -308,15 +308,7 @@ extension SessionManager {
         idMapper.remove(upstreamIndex: upstreamIndex, upstreamId: upstreamId)
 
         guard upstreamIndex == 0, config.eagerInitialize else { return }
-        let shouldRetryEagerInit = initState.withLockedValue { state -> Bool in
-            let shouldRetry =
-                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-                && state.initResult == nil
-            if shouldRetry {
-                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-            }
-            return shouldRetry
-        }
+        let shouldRetryEagerInit = initializeCoordinator.consumeRetryAfterWarmInitFailureIfNeeded()
         if shouldRetryEagerInit {
             startEagerInitializePrimary()
         }

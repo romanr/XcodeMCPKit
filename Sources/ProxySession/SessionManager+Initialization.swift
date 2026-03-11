@@ -4,25 +4,16 @@ import ProxyCore
 
 extension SessionManager {
     func startEagerInitializePrimary() {
-        var shouldSend = false
-        var shouldScheduleTimeout = false
-        let upstreamId: Int64
-        initState.withLockedValue { state in
-            if state.initResult == nil && !state.initInFlight {
-                state.initInFlight = true
-                shouldSend = true
-                shouldScheduleTimeout = true
-            }
-        }
+        let decision = initializeCoordinator.beginEagerInitializePrimary()
+        let shouldSend = decision.shouldSendRequest
+        let shouldScheduleTimeout = decision.shouldScheduleTimeout
         if shouldScheduleTimeout {
             scheduleInitTimeout()
         }
         guard shouldSend else { return }
 
-        upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
-        initState.withLockedValue { state in
-            state.primaryInitUpstreamId = upstreamId
-        }
+        let upstreamId = idMapper.assignInitialize(upstreamIndex: 0)
+        initializeCoordinator.setPrimaryInitUpstreamId(upstreamId)
         markUpstreamInitInFlight(upstreamIndex: 0, upstreamId: upstreamId)
 
         let request = makeInternalInitializeRequest(id: upstreamId)
@@ -54,28 +45,7 @@ extension SessionManager {
             return
         }
 
-        let update = initState.withLockedValue {
-            state -> (pending: [InitPending], timeout: Scheduled<Void>?, shouldWarmSecondary: Bool)?
-            in
-            if state.isShuttingDown {
-                return nil
-            }
-            if state.initResult == nil {
-                state.initResult = result
-            }
-            state.initInFlight = false
-            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-            let timeout = state.initTimeout
-            state.initTimeout = nil
-            let pending = state.initPending
-            state.initPending.removeAll()
-            state.primaryInitUpstreamId = nil
-            let shouldWarmSecondary = !state.didWarmSecondary
-            if shouldWarmSecondary {
-                state.didWarmSecondary = true
-            }
-            return (pending, timeout, shouldWarmSecondary)
-        }
+        let update = initializeCoordinator.completePrimaryInitializeSuccess(result: result)
         guard let update else { return }
         update.timeout?.cancel()
 
@@ -143,29 +113,7 @@ extension SessionManager {
     }
 
     func completeInitPendingWithError(_ errorObject: [String: Any]) {
-        let result = initState.withLockedValue {
-            state -> (
-                pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?,
-                shouldRetryEagerInit: Bool
-            )? in
-            if state.isShuttingDown {
-                return nil
-            }
-            let shouldRetryEagerInit =
-                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-                && state.initResult == nil
-            if shouldRetryEagerInit {
-                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-            }
-            state.initInFlight = false
-            let timeout = state.initTimeout
-            state.initTimeout = nil
-            let pending = state.initPending
-            state.initPending.removeAll()
-            let upstreamId = state.primaryInitUpstreamId
-            state.primaryInitUpstreamId = nil
-            return (pending, timeout, upstreamId, shouldRetryEagerInit)
-        }
+        let result = initializeCoordinator.completePrimaryInitializeFailure()
         guard let result else { return }
         result.timeout?.cancel()
         if let upstreamId = result.upstreamId {
@@ -190,7 +138,7 @@ extension SessionManager {
             }
         }
 
-        if result.shouldRetryEagerInit, config.eagerInitialize {
+        if result.shouldRetryEagerInitialize, config.eagerInitialize {
             startEagerInitializePrimary()
         }
     }
@@ -219,38 +167,12 @@ extension SessionManager {
             guard let self else { return }
             self.failInitPending(error: TimeoutError())
         }
-        let previous = initState.withLockedValue { state -> Scheduled<Void>? in
-            let existing = state.initTimeout
-            state.initTimeout = timeout
-            return existing
-        }
+        let previous = initializeCoordinator.replaceInitTimeout(timeout)
         previous?.cancel()
     }
 
     func failInitPending(error: Error) {
-        let result = initState.withLockedValue {
-            state -> (
-                pending: [InitPending], timeout: Scheduled<Void>?, upstreamId: Int64?,
-                shouldRetryEagerInit: Bool
-            )? in
-            if state.isShuttingDown {
-                return nil
-            }
-            let shouldRetryEagerInit =
-                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-                && state.initResult == nil
-            if shouldRetryEagerInit {
-                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-            }
-            state.initInFlight = false
-            let timeout = state.initTimeout
-            state.initTimeout = nil
-            let pending = state.initPending
-            state.initPending.removeAll()
-            let upstreamId = state.primaryInitUpstreamId
-            state.primaryInitUpstreamId = nil
-            return (pending, timeout, upstreamId, shouldRetryEagerInit)
-        }
+        let result = initializeCoordinator.completePrimaryInitializeFailure()
         guard let result else { return }
         result.timeout?.cancel()
         if let upstreamId = result.upstreamId {
@@ -267,7 +189,7 @@ extension SessionManager {
             }
         }
 
-        if result.shouldRetryEagerInit, config.eagerInitialize {
+        if result.shouldRetryEagerInitialize, config.eagerInitialize {
             startEagerInitializePrimary()
         }
     }

@@ -87,7 +87,7 @@ actor RefreshCodeIssuesCoordinator {
         let timeoutTask = Task { [queueWaitTimeoutNanoseconds] in
             do {
                 try await Task.sleep(nanoseconds: queueWaitTimeoutNanoseconds)
-                await self.timeoutWaiter(key: key, waiterID: waiterID)
+                self.timeoutWaiter(key: key, waiterID: waiterID)
             } catch {
                 return
             }

@@ -17,7 +17,9 @@ public final class ProxyServer {
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let eventLoop = group.next()
         self.sessionManager = SessionManager(config: config, eventLoop: eventLoop)
-        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
+            requestTimeout: config.requestTimeout
+        )
         self.warmupDriver = XcodeEditorWarmupDriver()
     }
 

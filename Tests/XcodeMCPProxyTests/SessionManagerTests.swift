@@ -14,6 +14,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let request1 = makeInitializeRequest(id: 1)
         let request2 = makeInitializeRequest(id: 2)
@@ -52,6 +53,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-A"
         let session = manager.session(id: sessionId)
@@ -92,6 +94,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-handshake"
         let session = manager.session(id: sessionId)
@@ -132,6 +135,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let firstFuture = manager.registerInitialize(
             sessionId: "session-A",
@@ -178,6 +182,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-removed"
         _ = manager.session(id: sessionId)
@@ -206,6 +211,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-recreated"
         _ = manager.session(id: sessionId)
@@ -251,6 +257,7 @@ struct SessionManagerTests {
         let upstream1 = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: true, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
@@ -311,6 +318,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 1)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
@@ -342,6 +350,29 @@ struct SessionManagerTests {
         #expect((await upstream.sent()).count == 2)
     }
 
+    @Test func sessionManagerShutdownFailsPendingInitializeRequests() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let future = manager.registerInitialize(
+            originalId: RPCId(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+
+        manager.shutdown()
+
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
+        }
+    }
+
     @Test func sessionManagerTimeoutDoesNotClearRecreatedSessionInitializeRoutingState()
         async throws
     {
@@ -351,6 +382,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 0.1)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-timeout-recreated"
         _ = manager.session(id: sessionId)
@@ -393,6 +425,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-error-recreated"
         _ = manager.session(id: sessionId)
@@ -451,6 +484,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: true, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
         #expect(manager.isInitialized() == false)
 
         _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
@@ -467,6 +501,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
@@ -501,6 +536,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         // First init establishes the cached init result.
         let init1 = manager.registerInitialize(
@@ -545,6 +581,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // First init establishes the cached init result (primary only).
         let init1 = manager.registerInitialize(
@@ -613,6 +650,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
@@ -668,6 +706,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
@@ -721,6 +760,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Eager init -> upstream0
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -797,6 +837,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -860,6 +901,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -907,6 +949,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-A"
         let session = manager.session(id: sessionId)
@@ -931,6 +974,7 @@ struct SessionManagerTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let initMessages = await upstream.sent()
@@ -1033,6 +1077,7 @@ struct SessionManagerTests {
         config.prewarmToolsList = true
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize primary upstream0.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -1110,6 +1155,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -1161,6 +1207,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
@@ -1201,6 +1248,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -1267,6 +1315,7 @@ struct SessionManagerTests {
         let upstream = AlwaysOverloadedUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let sessionId = "session-overloaded"
         let session = manager.session(id: sessionId)
@@ -1307,6 +1356,7 @@ struct SessionManagerTests {
         let upstream = AlwaysOverloadedUpstreamClient()
         let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
         let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
 
         let original = RPCId(any: NSNumber(value: 1001))!
         let future = manager.registerInitialize(
@@ -1337,6 +1387,7 @@ struct SessionManagerTests {
         let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
         let manager = SessionManager(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        defer { manager.shutdown() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)

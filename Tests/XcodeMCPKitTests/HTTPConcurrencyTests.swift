@@ -210,7 +210,9 @@ private struct TestHTTPServer {
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = SessionManager(
             config: config, eventLoop: group.next(), upstreams: [upstream])
-        let refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator()
+        let refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
+            requestTimeout: config.requestTimeout
+        )
         let warmupDriver = XcodeEditorWarmupDriver.disabled()
 
         let bootstrap = ServerBootstrap(group: group)

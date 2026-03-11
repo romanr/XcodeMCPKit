@@ -78,6 +78,7 @@ Xcode's live diagnostics service is prone to transient failures when `XcodeRefre
 
 - `xcode-mcp-proxy-server` now serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
 - This reduces cold-start contention, but it can increase latency when many refresh requests target the same tab at once.
+- If a client bursts too many queued refreshes for the same tab, the proxy now applies backpressure and may return `refresh queue overloaded` instead of letting the queue grow without bound.
 - For broad issue sweeps, prefer `XcodeListNavigatorIssues` first and only use `XcodeRefreshCodeIssuesInFile` for files that need per-file diagnostics output.
 
 ## Xcode dialog does not appear

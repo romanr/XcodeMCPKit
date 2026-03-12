@@ -45,12 +45,13 @@ package final class HTTPPostService: Sendable {
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        warmupDriver: XcodeEditorWarmupDriver = XcodeEditorWarmupDriver(),
+        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.sessionManager = sessionManager
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
+            refreshCodeIssuesMode: config.refreshCodeIssuesMode,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
@@ -64,8 +65,9 @@ package final class HTTPPostService: Sendable {
             )
         self.windowQueryService = XcodeWindowQueryService()
         self.refreshWorkflow = RefreshCodeIssuesWorkflow(
+            mode: config.refreshCodeIssuesMode,
             coordinator: refreshCoordinator,
-            warmupDriver: warmupDriver,
+            targetResolver: refreshCodeIssuesTargetResolver,
             logger: ProxyLogging.make("http.refresh")
         )
         self.logger = logger
@@ -435,19 +437,22 @@ package final class HTTPPostService: Sendable {
         name: String,
         arguments: [String: Any],
         sessionID: String,
-        eventLoop: EventLoop
+        eventLoop: EventLoop,
+        upstreamIndexOverride: Int? = nil
     ) async -> [String: Any]? {
         await forwardingService.callInternalTool(
             name: name,
             arguments: arguments,
             sessionID: sessionID,
-            eventLoop: eventLoop
+            eventLoop: eventLoop,
+            upstreamIndexOverride: upstreamIndexOverride
         )
     }
 
     private func listXcodeWindows(
         sessionID: String,
-        eventLoop: EventLoop
+        eventLoop: EventLoop,
+        upstreamIndexOverride: Int? = nil
     ) async -> [XcodeWindowInfo]? {
         await windowQueryService.listWindows(
             sessionID: sessionID,
@@ -457,7 +462,8 @@ package final class HTTPPostService: Sendable {
                     name: name,
                     arguments: arguments,
                     sessionID: sessionID,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    upstreamIndexOverride: upstreamIndexOverride
                 )
             }
         )
@@ -550,8 +556,24 @@ package final class HTTPPostService: Sendable {
             requestIDs: requestIDs,
             requestIsBatch: requestIsBatch,
             eventLoop: eventLoop,
-            windowsProvider: { sessionID, eventLoop in
-                await self.listXcodeWindows(sessionID: sessionID, eventLoop: eventLoop)
+            windowsProvider: { sessionID, eventLoop, upstreamIndexOverride in
+                await self.listXcodeWindows(
+                    sessionID: sessionID,
+                    eventLoop: eventLoop,
+                    upstreamIndexOverride: upstreamIndexOverride
+                )
+            },
+            internalUpstreamChooser: { sessionID in
+                self.sessionManager.chooseInitializeUpstreamIndex(sessionID: sessionID)
+            },
+            internalToolCaller: { name, arguments, sessionID, eventLoop, upstreamIndexOverride in
+                await self.callInternalTool(
+                    name: name,
+                    arguments: arguments,
+                    sessionID: sessionID,
+                    eventLoop: eventLoop,
+                    upstreamIndexOverride: upstreamIndexOverride
+                )
             },
             forwarder: { bodyData, sessionID, requestIDs, requestIsBatch, eventLoop in
                 await self.forwardOnce(

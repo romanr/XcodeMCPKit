@@ -12,7 +12,7 @@ public final class ProxyServer {
     private let group: EventLoopGroup
     private let sessionManager: RuntimeCoordinator
     private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
-    private let warmupDriver: XcodeEditorWarmupDriver
+    private let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
     private var channels: [Channel] = []
     private let logger: Logger = ProxyLogging.make("server")
 
@@ -24,7 +24,7 @@ public final class ProxyServer {
         self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
             requestTimeout: config.requestTimeout
         )
-        self.warmupDriver = XcodeEditorWarmupDriver()
+        self.refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
     }
 
     public func run() async throws {
@@ -49,14 +49,14 @@ public final class ProxyServer {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { [sessionManager, config, refreshCodeIssuesCoordinator, warmupDriver] channel in
+            .childChannelInitializer { [sessionManager, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver] channel in
                 channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
                             sessionManager: sessionManager,
                             refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                            warmupDriver: warmupDriver
+                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver
                         )
                     )
                 }

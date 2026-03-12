@@ -207,7 +207,8 @@ private struct TestHTTPServer {
             upstreamSessionID: nil,
             maxBodyBytes: 1_048_576,
             requestTimeout: 5,
-            eagerInitialize: false
+            eagerInitialize: false,
+            refreshCodeIssuesMode: .upstream
         )
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
@@ -215,7 +216,7 @@ private struct TestHTTPServer {
         let refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
             requestTimeout: config.requestTimeout
         )
-        let warmupDriver = XcodeEditorWarmupDriver.disabled()
+        let refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -227,7 +228,7 @@ private struct TestHTTPServer {
                             config: config,
                             sessionManager: sessionManager,
                             refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                            warmupDriver: warmupDriver
+                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver
                         )
                     )
                 }

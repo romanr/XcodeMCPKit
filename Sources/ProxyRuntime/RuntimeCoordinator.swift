@@ -40,6 +40,7 @@ package protocol RuntimeCoordinating: Sendable {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
+    func chooseInitializeUpstreamIndex(sessionID: String) -> Int?
     func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int?
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
@@ -273,7 +274,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return chosen
     }
 
-    func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
+    package func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         var probesToStart: [HealthProbeRequest] = []
         probesToStart.reserveCapacity(1)

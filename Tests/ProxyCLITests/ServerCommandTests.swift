@@ -10,13 +10,19 @@ struct ServerCommandTests {
             "xcode-mcp-proxy-server",
             "--listen",
             "127.0.0.1:9000",
+            "--refresh-code-issues-mode",
+            "upstream",
             "--force-restart",
             "--dry-run",
         ])
 
-        #expect(options.forwardedArgs == ["--listen", "127.0.0.1:9000"])
+        #expect(options.forwardedArgs == [
+            "--listen", "127.0.0.1:9000",
+            "--refresh-code-issues-mode", "upstream",
+        ])
         #expect(options.showHelp == false)
         #expect(options.hasListenFlag == true)
+        #expect(options.hasRefreshCodeIssuesModeFlag == true)
         #expect(options.forceRestart == true)
         #expect(options.dryRun == true)
     }
@@ -30,6 +36,7 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasXcodePIDFlag: false,
             hasLazyInitFlag: false,
+            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )
@@ -39,6 +46,7 @@ struct ServerCommandTests {
                 "HOST": "127.0.0.1",
                 "PORT": "9999",
                 "LAZY_INIT": "1",
+                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
             ],
             to: &options,
             resolveXcodePID: { "4242" },
@@ -49,6 +57,7 @@ struct ServerCommandTests {
             "--listen", "127.0.0.1:9999",
             "--xcode-pid", "4242",
             "--lazy-init",
+            "--refresh-code-issues-mode", "upstream",
         ])
     }
 

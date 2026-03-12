@@ -121,6 +121,7 @@ See Quick Start for how to launch.
 
 - `MCP_XCODE_PID` (alternative to `--xcode-pid`)
 - `MCP_XCODE_SESSION_ID` (fixes the Xcode MCP session ID; usually not needed)
+- `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` (`proxy` or `upstream`; controls how `XcodeRefreshCodeIssuesInFile` is served)
 - `MCP_LOG_LEVEL` (log level: trace|debug|info|notice|warning|error|critical)
 
 Logs are written to stderr.
@@ -139,6 +140,7 @@ Note: when using `--upstream-processes` > 1, fixing the session id via `--sessio
 | `--session-id id` | Xcode MCP session ID (usually not needed) |
 | `--max-body-bytes n` | Max request body size |
 | `--request-timeout seconds` | Request timeout (`0` disables) |
+| `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
 | `--lazy-init` | Delay initialization until first request |
 | `--force-restart` | If the listen port is in use, terminate an existing `xcode-mcp-proxy-server` and restart |
 

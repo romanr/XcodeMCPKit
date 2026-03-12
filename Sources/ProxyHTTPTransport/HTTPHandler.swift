@@ -38,7 +38,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        warmupDriver: XcodeEditorWarmupDriver = XcodeEditorWarmupDriver()
+        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
     ) {
         self.config = config
         self.controlService = HTTPControlService(runtimeCoordinator: sessionManager)
@@ -46,7 +46,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-            warmupDriver: warmupDriver,
+            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
             logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))

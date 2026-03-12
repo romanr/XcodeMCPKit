@@ -12,6 +12,7 @@ package struct ProxyServerOptions {
     package var hasPortFlag: Bool
     package var hasXcodePIDFlag: Bool
     package var hasLazyInitFlag: Bool
+    package var hasRefreshCodeIssuesModeFlag: Bool
     package var forceRestart: Bool
     package var dryRun: Bool
 
@@ -23,6 +24,7 @@ package struct ProxyServerOptions {
         hasPortFlag: Bool,
         hasXcodePIDFlag: Bool,
         hasLazyInitFlag: Bool,
+        hasRefreshCodeIssuesModeFlag: Bool,
         forceRestart: Bool,
         dryRun: Bool
     ) {
@@ -33,6 +35,7 @@ package struct ProxyServerOptions {
         self.hasPortFlag = hasPortFlag
         self.hasXcodePIDFlag = hasXcodePIDFlag
         self.hasLazyInitFlag = hasLazyInitFlag
+        self.hasRefreshCodeIssuesModeFlag = hasRefreshCodeIssuesModeFlag
         self.forceRestart = forceRestart
         self.dryRun = dryRun
     }

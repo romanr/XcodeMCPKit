@@ -16,6 +16,7 @@ package struct ProxyCLIServerScan {
     package var hasPortFlag = false
     package var hasXcodePIDFlag = false
     package var hasLazyInitFlag = false
+    package var hasRefreshCodeIssuesModeFlag = false
     package var forceRestart = false
     package var dryRun = false
 }
@@ -36,6 +37,7 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-processes",
         "--xcode-pid",
         "--session-id",
+        "--refresh-code-issues-mode",
         "--lazy-init",
     ]
 
@@ -50,6 +52,7 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-processes",
         "--xcode-pid",
         "--session-id",
+        "--refresh-code-issues-mode",
     ]
 
     private static let serverForwardedValueFlags: Set<String> = [
@@ -64,6 +67,7 @@ package enum ProxyCLIInvocationScanner {
         "--session-id",
         "--max-body-bytes",
         "--request-timeout",
+        "--refresh-code-issues-mode",
     ]
 
     package static func scanAdapter(_ args: [String]) -> ProxyCLIAdapterScan {
@@ -147,6 +151,8 @@ package enum ProxyCLIInvocationScanner {
                 scan.hasPortFlag = true
             case "--xcode-pid":
                 scan.hasXcodePIDFlag = true
+            case "--refresh-code-issues-mode":
+                scan.hasRefreshCodeIssuesModeFlag = true
             default:
                 break
             }

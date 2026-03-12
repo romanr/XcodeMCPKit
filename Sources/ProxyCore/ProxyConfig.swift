@@ -12,6 +12,11 @@ public enum StdioUpstreamSource: String, Sendable {
     case fallback
 }
 
+public enum RefreshCodeIssuesMode: String, Sendable {
+    case proxy
+    case upstream
+}
+
 public struct ProxyConfig: Sendable {
     public var listenHost: String
     public var listenPort: Int
@@ -27,6 +32,7 @@ public struct ProxyConfig: Sendable {
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
     public var prewarmToolsList: Bool
+    public var refreshCodeIssuesMode: RefreshCodeIssuesMode
 
     public init(
         listenHost: String,
@@ -42,7 +48,8 @@ public struct ProxyConfig: Sendable {
         transport: ProxyTransport = .http,
         stdioUpstreamURL: URL? = nil,
         stdioUpstreamSource: StdioUpstreamSource? = nil,
-        prewarmToolsList: Bool = true
+        prewarmToolsList: Bool = true,
+        refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -58,6 +65,7 @@ public struct ProxyConfig: Sendable {
         self.stdioUpstreamURL = stdioUpstreamURL
         self.stdioUpstreamSource = stdioUpstreamSource
         self.prewarmToolsList = prewarmToolsList
+        self.refreshCodeIssuesMode = refreshCodeIssuesMode
     }
 }
 
@@ -75,6 +83,7 @@ public enum CLIError: Error, CustomStringConvertible {
 public struct CLIParser {
     private static let defaultStdioUpstream = "http://localhost:8765/mcp"
     private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
+    private static let refreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
 
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         return try parse(args: args, environment: environment, discoveryOverrideURL: nil)
@@ -97,6 +106,8 @@ public struct CLIParser {
         var eagerInitialize = true
         var stdioUpstreamURL: URL?
         var stdioUpstreamSource: StdioUpstreamSource?
+        var refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
+        var hasExplicitRefreshCodeIssuesMode = false
 
         var index = 1
         while index < args.count {
@@ -182,6 +193,16 @@ public struct CLIParser {
                 }
                 requestTimeout = TimeInterval(args[index + 1]) ?? requestTimeout
                 index += 2
+            case "--refresh-code-issues-mode":
+                guard index + 1 < args.count else {
+                    throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
+                }
+                guard let parsed = RefreshCodeIssuesMode(rawValue: args[index + 1]) else {
+                    throw CLIError.message("--refresh-code-issues-mode must be proxy or upstream")
+                }
+                refreshCodeIssuesMode = parsed
+                hasExplicitRefreshCodeIssuesMode = true
+                index += 2
             case "--lazy-init":
                 eagerInitialize = false
                 index += 1
@@ -213,6 +234,14 @@ public struct CLIParser {
         if upstreamSessionID == nil, let value = environment["MCP_XCODE_SESSION_ID"], !value.isEmpty {
             upstreamSessionID = value
         }
+        if let value = environment[refreshCodeIssuesModeEnv], hasExplicitRefreshCodeIssuesMode == false {
+            guard let parsed = RefreshCodeIssuesMode(rawValue: value) else {
+                throw CLIError.message(
+                    "\(refreshCodeIssuesModeEnv) must be proxy or upstream"
+                )
+            }
+            refreshCodeIssuesMode = parsed
+        }
         let transport: ProxyTransport = stdioUpstreamURL == nil ? .http : .stdio
 
         return ProxyConfig(
@@ -228,7 +257,8 @@ public struct CLIParser {
             eagerInitialize: eagerInitialize,
             transport: transport,
             stdioUpstreamURL: stdioUpstreamURL,
-            stdioUpstreamSource: stdioUpstreamSource
+            stdioUpstreamSource: stdioUpstreamSource,
+            refreshCodeIssuesMode: refreshCodeIssuesMode
         )
     }
 
@@ -248,6 +278,8 @@ public struct CLIParser {
           --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
           --max-body-bytes n         Max request body size (default: 1048576)
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
+          --refresh-code-issues-mode proxy|upstream
+                                     Refresh implementation (default: proxy; env \(refreshCodeIssuesModeEnv))
           --lazy-init                Initialize upstream only on first client request
           --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)
           -h, --help                 Show help

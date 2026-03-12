@@ -120,6 +120,7 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 
 - `MCP_XCODE_PID`（`--xcode-pid` の代替）
 - `MCP_XCODE_SESSION_ID`（Xcode MCP セッション ID を固定。通常は不要）
+- `MCP_XCODE_REFRESH_CODE_ISSUES_MODE`（`proxy` または `upstream`。`XcodeRefreshCodeIssuesInFile` の実装モードを切り替え）
 - `MCP_LOG_LEVEL`（ログレベル: trace|debug|info|notice|warning|error|critical）
 
 ログは stderr に出力されます。
@@ -138,6 +139,7 @@ Note: `--upstream-processes` > 1 を使う場合、`--session-id` / `MCP_XCODE_S
 | `--session-id id` | Xcode MCP セッション ID（通常は不要） |
 | `--max-body-bytes n` | 最大ボディサイズ |
 | `--request-timeout seconds` | リクエストタイムアウト（`0` で無制限） |
+| `--refresh-code-issues-mode proxy|upstream` | `XcodeRefreshCodeIssuesInFile` を proxy 側の navigator issues 経由（既定）で返すか、Xcode の live diagnostics へ直通するかを切り替え |
 | `--lazy-init` | 初回リクエストまで初期化を遅延 |
 | `--force-restart` | listen ポートが使用中の場合、既存の `xcode-mcp-proxy-server` を終了して起動し直す |
 

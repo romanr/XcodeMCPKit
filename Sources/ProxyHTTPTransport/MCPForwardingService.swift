@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import ProxyCore
+import ProxyFeatureXcode
 import ProxyRuntime
 
 package struct MCPForwardingService: Sendable {
@@ -33,15 +34,22 @@ package struct MCPForwardingService: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        shouldPinUpstreamOverride: Bool? = nil
+        shouldPinUpstreamOverride: Bool? = nil,
+        upstreamIndexOverride: Int? = nil
     ) throws -> PreparedRequest? {
-        let shouldPinUpstream =
-            shouldPinUpstreamOverride ?? MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
-        guard let upstreamIndex = sessionManager.chooseUpstreamIndex(
-            sessionID: sessionID,
-            shouldPin: shouldPinUpstream
-        ) else {
-            return nil
+        let upstreamIndex: Int
+        if let upstreamIndexOverride {
+            upstreamIndex = upstreamIndexOverride
+        } else {
+            let shouldPinUpstream =
+                shouldPinUpstreamOverride ?? MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
+            guard let chosen = sessionManager.chooseUpstreamIndex(
+                sessionID: sessionID,
+                shouldPin: shouldPinUpstream
+            ) else {
+                return nil
+            }
+            upstreamIndex = chosen
         }
 
         let transform = try RequestInspector.transform(
@@ -105,10 +113,15 @@ package struct MCPForwardingService: Sendable {
             guard let data = buffer.readData(length: buffer.readableBytes) else {
                 return .invalidUpstreamResponse
             }
-            let responseData = Self.rewriteUnsupportedResourcesListResponseIfNeeded(
+            let rewrittenResourcesData = Self.rewriteUnsupportedResourcesListResponseIfNeeded(
                 method: started.transform.method,
                 originalID: started.transform.originalID,
                 upstreamData: data
+            )
+            let responseData = Self.rewriteToolsListResponseIfNeeded(
+                method: started.transform.method,
+                upstreamData: rewrittenResourcesData,
+                mode: config.refreshCodeIssuesMode
             )
             if started.transform.isCacheableToolsListRequest,
                 let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
@@ -160,7 +173,8 @@ package struct MCPForwardingService: Sendable {
         name: String,
         arguments: [String: Any],
         sessionID: String,
-        eventLoop: EventLoop
+        eventLoop: EventLoop,
+        upstreamIndexOverride: Int? = nil
     ) async -> [String: Any]? {
         let requestObject: [String: Any] = [
             "jsonrpc": "2.0",
@@ -183,7 +197,8 @@ package struct MCPForwardingService: Sendable {
                 bodyData: bodyData,
                 parsedRequestJSON: requestObject,
                 sessionID: sessionID,
-                shouldPinUpstreamOverride: false
+                shouldPinUpstreamOverride: false,
+                upstreamIndexOverride: upstreamIndexOverride
             ) else {
                 return nil
             }
@@ -326,6 +341,20 @@ package struct MCPForwardingService: Sendable {
             return nil
         }
         return try? JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private static func rewriteToolsListResponseIfNeeded(
+        method: String?,
+        upstreamData: Data,
+        mode: RefreshCodeIssuesMode
+    ) -> Data {
+        guard method == "tools/list" else {
+            return upstreamData
+        }
+        return RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
+            upstreamData,
+            mode: mode
+        )
     }
 
     private static func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

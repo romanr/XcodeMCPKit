@@ -47,6 +47,15 @@ struct CLIParserTests {
         #expect(config.eagerInitialize == false)
     }
 
+    @Test func cliParsesRefreshCodeIssuesMode() async throws {
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--refresh-code-issues-mode", "upstream"],
+            environment: [:]
+        )
+
+        #expect(config.refreshCodeIssuesMode == .upstream)
+    }
+
     @Test func cliParsesUpstreamProcesses() async throws {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--upstream-processes", "10"],
@@ -87,10 +96,27 @@ struct CLIParserTests {
             environment: [
                 "MCP_XCODE_PID": "1234",
                 "MCP_XCODE_SESSION_ID": "session-xyz",
+                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
             ]
         )
         #expect(config.xcodePID == 1234)
         #expect(config.upstreamSessionID == "session-xyz")
+        #expect(config.refreshCodeIssuesMode == .upstream)
+    }
+
+    @Test func cliExplicitRefreshCodeIssuesModeOverridesEnvironment() async throws {
+        let config = try CLIParser.parse(
+            args: [
+                "xcode-mcp-proxy",
+                "--refresh-code-issues-mode",
+                "proxy",
+            ],
+            environment: [
+                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream"
+            ]
+        )
+
+        #expect(config.refreshCodeIssuesMode == .proxy)
     }
 
     @Test func cliParsesStdioUpstream() async throws {

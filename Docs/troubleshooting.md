@@ -74,12 +74,13 @@ it usually means the MCP server process (`xcode-mcp-proxy`) was terminated while
   - `pkill -f mcpbridge`
 
 ## `XcodeRefreshCodeIssuesInFile` intermittently returns `error 5`
-Xcode's live diagnostics service is prone to transient failures when `XcodeRefreshCodeIssuesInFile` is fired in bursts for the same `tabIdentifier`.
+When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagnostics service is prone to transient failures when `XcodeRefreshCodeIssuesInFile` is fired in bursts for the same `tabIdentifier`.
 
-- `xcode-mcp-proxy-server` now serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
+- The default mode is `proxy`, which serves `XcodeRefreshCodeIssuesInFile` through `XcodeListNavigatorIssues`-style diagnostics to avoid switching Spaces.
+- In `upstream` mode, `xcode-mcp-proxy-server` serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
 - This reduces cold-start contention, but it can increase latency when many refresh requests target the same tab at once.
-- If a client bursts too many queued refreshes for the same tab, the proxy now applies backpressure and may return `refresh queue overloaded` instead of letting the queue grow without bound.
-- For broad issue sweeps, prefer `XcodeListNavigatorIssues` first and only use `XcodeRefreshCodeIssuesInFile` for files that need per-file diagnostics output.
+- If a client bursts too many queued refreshes for the same tab in `upstream` mode, the proxy may return `refresh queue overloaded` instead of letting the queue grow without bound.
+- If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
 
 ## Xcode dialog does not appear
 Make sure `--lazy-init` is not set (when enabled, the dialog appears on the first request instead of at startup).

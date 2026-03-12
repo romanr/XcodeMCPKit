@@ -12,6 +12,7 @@ extension XcodeMCPProxyServerCommand {
             hasPortFlag: scan.hasPortFlag,
             hasXcodePIDFlag: scan.hasXcodePIDFlag,
             hasLazyInitFlag: scan.hasLazyInitFlag,
+            hasRefreshCodeIssuesModeFlag: scan.hasRefreshCodeIssuesModeFlag,
             forceRestart: scan.forceRestart,
             dryRun: scan.dryRun
         )
@@ -56,6 +57,12 @@ extension XcodeMCPProxyServerCommand {
         if !options.hasLazyInitFlag, isTruthy(environment["LAZY_INIT"]) {
             options.forwardedArgs.append("--lazy-init")
         }
+
+        if !options.hasRefreshCodeIssuesModeFlag,
+            let mode = nonEmpty(environment["MCP_XCODE_REFRESH_CODE_ISSUES_MODE"])
+        {
+            options.forwardedArgs += ["--refresh-code-issues-mode", mode]
+        }
     }
 
     package static func serverUsage() -> String {
@@ -69,6 +76,7 @@ extension XcodeMCPProxyServerCommand {
           --port port
           --upstream-processes n
           --xcode-pid pid
+          --refresh-code-issues-mode proxy|upstream
           --lazy-init
           --force-restart
           --dry-run

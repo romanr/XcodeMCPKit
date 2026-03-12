@@ -1932,6 +1932,151 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenWindowLookupFailsAfterPreviousSuccess() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let windowLookups = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    let lookupCount = windowLookups.withLockedValue { value in
+                        value += 1
+                        return value
+                    }
+                    if lookupCount == 1 {
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text:
+                                    "{\"message\":\"* tabIdentifier: windowtab-window-lookup-fallback, workspacePath: \(workspacePath)\"}"
+                            )
+                        )
+                    }
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "windows unavailable"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                    ]
+                                ],
+                                "structuredContent": [
+                                    "issues": [
+                                        [
+                                            "path": target.path,
+                                            "message": "target warning",
+                                            "line": 12,
+                                            "severity": "warning",
+                                        ]
+                                    ],
+                                    "totalFound": 1,
+                                    "truncated": false,
+                                ],
+                            ]
+                        )
+                    )
+                case "XcodeRefreshCodeIssuesInFile":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "upstream-after-window-lookup-failure"
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (firstResponse, firstBody) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-window-lookup-fallback",
+                payload: toolsCallPayload(
+                    id: 30,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-window-lookup-fallback",
+                        "filePath": "App/Sources/App.swift",
+                    ]
+                )
+            )
+
+            #expect(firstResponse.statusCode == 200)
+            let firstResult = firstBody["result"] as? [String: Any]
+            let firstStructuredContent = firstResult?["structuredContent"] as? [String: Any]
+            #expect((firstStructuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+
+            let (secondResponse, secondBody) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-window-lookup-fallback",
+                payload: toolsCallPayload(
+                    id: 31,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-window-lookup-fallback",
+                        "filePath": "App/Sources/App.swift",
+                    ]
+                )
+            )
+
+            #expect(secondResponse.statusCode == 200)
+            let secondResult = secondBody["result"] as? [String: Any]
+            let secondContent = secondResult?["content"] as? [[String: Any]]
+            #expect(secondContent?.first?["text"] as? String == "upstream-after-window-lookup-failure")
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+                "XcodeListWindows",
+                "XcodeRefreshCodeIssuesInFile",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenResolverCannotFindTarget() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy

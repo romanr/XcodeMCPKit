@@ -33,14 +33,7 @@ package actor RefreshCodeIssuesTargetResolver {
         let filePath: String
     }
 
-    private struct WorkspaceCacheKey: Hashable {
-        let sessionID: String
-        let tabIdentifier: String
-        let upstreamIndex: Int?
-    }
-
     private let fileManager = FileManager.default
-    private var workspacePathCache: [WorkspaceCacheKey: String] = [:]
     private var resolvedFilePathCache: [FileResolutionKey: String] = [:]
 
     package init() {}
@@ -50,7 +43,6 @@ package actor RefreshCodeIssuesTargetResolver {
         filePath: String?,
         sessionID: String,
         eventLoop: EventLoop,
-        upstreamIndex: Int? = nil,
         windowsProvider: WindowsProvider
     ) async -> RefreshCodeIssuesTargetResolution {
         guard let tabIdentifier, tabIdentifier.isEmpty == false else {
@@ -74,7 +66,6 @@ package actor RefreshCodeIssuesTargetResolver {
             tabIdentifier: tabIdentifier,
             sessionID: sessionID,
             eventLoop: eventLoop,
-            upstreamIndex: upstreamIndex,
             windowsProvider: windowsProvider
         )
         guard let workspacePath else {
@@ -223,24 +214,12 @@ package actor RefreshCodeIssuesTargetResolver {
         tabIdentifier: String,
         sessionID: String,
         eventLoop: EventLoop,
-        upstreamIndex: Int?,
         windowsProvider: WindowsProvider
     ) async -> String? {
-        let cacheKey = WorkspaceCacheKey(
-            sessionID: sessionID,
-            tabIdentifier: tabIdentifier,
-            upstreamIndex: upstreamIndex
-        )
-        let cached = workspacePathCache[cacheKey]
         guard let windows = await windowsProvider(sessionID, eventLoop) else {
-            return cached
-        }
-        guard let workspacePath = windows.first(where: { $0.tabIdentifier == tabIdentifier })?.workspacePath else {
-            workspacePathCache.removeValue(forKey: cacheKey)
             return nil
         }
-        workspacePathCache[cacheKey] = workspacePath
-        return workspacePath
+        return windows.first(where: { $0.tabIdentifier == tabIdentifier })?.workspacePath
     }
 
     private func normalizedPathComponents(_ path: String) -> [String] {

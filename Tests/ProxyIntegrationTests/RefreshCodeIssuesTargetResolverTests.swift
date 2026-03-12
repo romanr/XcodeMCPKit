@@ -209,7 +209,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         #expect(resolution.target?.workspaceRelativePath == "SampleProject/Feature/Scene/PrimaryView.swift")
     }
 
-    @Test func resolverRevalidatesCachedWorkspacePath() async throws {
+    @Test func resolverUsesLatestWorkspacePathOnRepeatedLookups() async throws {
         let rootA = makeTemporaryWorkspaceRoot()
         let rootB = makeTemporaryWorkspaceRoot()
         defer {
@@ -266,7 +266,51 @@ struct RefreshCodeIssuesTargetResolverTests {
         #expect(second.target?.resolvedFilePath == targetB.path)
     }
 
-    @Test func resolverDoesNotReuseWorkspaceCacheAcrossSessions() async throws {
+    @Test func resolverFallsBackWhenWindowLookupFailsAfterPreviousSuccess() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let workspacePath = URL(fileURLWithPath: root)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(atPath: workspacePath, withIntermediateDirectories: true)
+
+        let target = URL(fileURLWithPath: root)
+            .appendingPathComponent("SampleProject/Feature/Scene/PrimaryView.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let resolver = RefreshCodeIssuesTargetResolver()
+        let eventLoop = EmbeddedEventLoop()
+
+        let first = await resolver.resolve(
+            tabIdentifier: "windowtab2",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
+            sessionID: "session-1",
+            eventLoop: eventLoop,
+            windowsProvider: { _, _ in
+                [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
+            }
+        )
+        let second = await resolver.resolve(
+            tabIdentifier: "windowtab2",
+            filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
+            sessionID: "session-1",
+            eventLoop: eventLoop,
+            windowsProvider: { _, _ in
+                nil
+            }
+        )
+
+        #expect(first.failureReason == nil)
+        #expect(second.target == nil)
+        #expect(second.workspacePath == nil)
+        #expect(second.failureReason == "workspacePath not found")
+    }
+
+    @Test func resolverRequiresWindowLookupPerSession() async throws {
         let root = makeTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
 

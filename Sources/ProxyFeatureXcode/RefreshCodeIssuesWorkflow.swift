@@ -197,7 +197,6 @@ package struct RefreshCodeIssuesWorkflow {
             filePath: refreshRequest.filePath,
             sessionID: sessionID,
             eventLoop: eventLoop,
-            upstreamIndex: internalUpstreamIndex,
             windowsProvider: { sessionID, eventLoop in
                 await windowsProvider(sessionID, eventLoop, internalUpstreamIndex)
             }

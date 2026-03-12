@@ -375,7 +375,10 @@ package struct RefreshCodeIssuesWorkflow {
 
         let filteredIssues = issues.filter { issue in
             guard let path = issue["path"] as? String else { return false }
-            return normalizedIssuePath(path) == normalizedIssuePath(resolvedFilePath)
+            return RefreshCodeIssuesPathMatcher.matches(
+                issuePath: path,
+                resolvedFilePath: resolvedFilePath
+            )
         }
 
         var filteredStructuredContent = structuredContent
@@ -401,11 +404,6 @@ package struct RefreshCodeIssuesWorkflow {
             return "{\"issues\":[],\"totalFound\":0,\"truncated\":false}"
         }
         return text
-    }
-
-    private static func normalizedIssuePath(_ path: String) -> String {
-        let symlinkResolvedPath = (path as NSString).resolvingSymlinksInPath
-        return URL(fileURLWithPath: symlinkResolvedPath).standardizedFileURL.path
     }
 
     private static func escapeGlobLiteralPath(_ path: String) -> String {

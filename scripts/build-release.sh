@@ -102,7 +102,7 @@ for product in "${products[@]}"; do
   cp "$source_path" "$target_path"
   chmod +x "$target_path"
   if command -v codesign >/dev/null 2>&1; then
-    codesign --remove-signature "$target_path" >/dev/null 2>&1 || true
+    codesign --force --sign - "$target_path" >/dev/null
   fi
 done
 

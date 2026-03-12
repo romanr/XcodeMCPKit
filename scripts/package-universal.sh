@@ -110,7 +110,7 @@ for product in "${products[@]}"; do
   lipo -create -output "$target" "$arm_bin/$product" "$x86_bin/$product"
   chmod +x "$target"
   if command -v codesign >/dev/null 2>&1; then
-    codesign --remove-signature "$target" >/dev/null 2>&1 || true
+    codesign --force --sign - "$target" >/dev/null
   fi
 done
 

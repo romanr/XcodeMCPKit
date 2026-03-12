@@ -85,6 +85,59 @@ struct ServerCommandTests {
         )
     }
 
+    @Test func serverCommandExtractsListeningPIDsFromLsofFieldOutputForLocalhost() throws {
+        let output = """
+        p51731
+        f9
+        n127.0.0.1:8765
+        f13
+        n[::1]:8765
+        p60000
+        f8
+        n10.0.0.5:8765
+        """
+
+        #expect(
+            XcodeMCPProxyServerCommand.listeningPIDs(fromLsofOutput: output, matchingHost: "localhost")
+                == [51731]
+        )
+    }
+
+    @Test func serverCommandExtractsListeningPIDsFromLsofFieldOutputSkipsNonMatchingHosts() throws {
+        let output = """
+        p51731
+        f9
+        n[::1]:8765
+        p60000
+        f8
+        n10.0.0.5:8765
+        """
+
+        #expect(
+            XcodeMCPProxyServerCommand.listeningPIDs(fromLsofOutput: output, matchingHost: "127.0.0.1")
+                .isEmpty
+        )
+    }
+
+    @Test func serverCommandExtractsListeningPIDsFromLegacyTCPNames() throws {
+        let output = """
+        p111
+        f9
+        nTCP 127.0.0.1:8765 (LISTEN)
+        p222
+        f13
+        nTCP [::1]:8765 (LISTEN)
+        p333
+        f8
+        nTCP 10.0.0.5:8765 (LISTEN)
+        """
+
+        #expect(
+            XcodeMCPProxyServerCommand.listeningPIDs(fromLsofOutput: output, matchingHost: "localhost")
+                == [111, 222]
+        )
+    }
+
     @Test func serverCommandInvokesForceRestartBeforeStartingInjectedServer() async throws {
         let restarted = CapturedLines()
         let fakeServer = RecordingProxyServer()

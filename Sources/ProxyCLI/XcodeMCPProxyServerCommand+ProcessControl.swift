@@ -141,9 +141,17 @@ extension XcodeMCPProxyServerCommand {
     }
 
     private static func extractListenerHost(fromLsofName name: String) -> String? {
-        guard name.hasPrefix("TCP ") else { return nil }
-        let rest = name.dropFirst(4)
-        guard let endpoint = rest.split(whereSeparator: \.isWhitespace).first else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let endpointSource: Substring
+        if trimmed.hasPrefix("TCP ") {
+            endpointSource = trimmed.dropFirst(4)
+        } else {
+            endpointSource = trimmed[...]
+        }
+
+        guard let endpoint = endpointSource.split(whereSeparator: \.isWhitespace).first else { return nil }
         let endpointString = String(endpoint)
         if endpointString.hasPrefix("["),
            let close = endpointString.firstIndex(of: "]") {
@@ -155,10 +163,6 @@ extension XcodeMCPProxyServerCommand {
     }
 
     private static func listeningPIDs(onTCPPort port: Int, matchingHost host: String) -> [Int] {
-        if isWildcardHost(host) {
-            return listeningPIDs(onTCPPort: port)
-        }
-
         guard let output = runCommand(
             "/usr/sbin/lsof",
             ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpn"]
@@ -166,11 +170,17 @@ extension XcodeMCPProxyServerCommand {
             return []
         }
 
+        return listeningPIDs(fromLsofOutput: output, matchingHost: host)
+    }
+
+    package static func listeningPIDs(fromLsofOutput output: String, matchingHost host: String) -> [Int] {
+        let matchAllHosts = isWildcardHost(host)
+
         var pids: [Int] = []
         pids.reserveCapacity(4)
 
         var currentPID: Int?
-        var currentMatched = false
+        var currentMatched = matchAllHosts
 
         func flush() {
             if let pid = currentPID, currentMatched {
@@ -183,10 +193,10 @@ extension XcodeMCPProxyServerCommand {
             if first == "p" {
                 flush()
                 currentPID = Int(rawLine.dropFirst())
-                currentMatched = false
+                currentMatched = matchAllHosts
                 continue
             }
-            if first == "n" {
+            if first == "n", !matchAllHosts {
                 let name = String(rawLine.dropFirst())
                 if let listenerHost = extractListenerHost(fromLsofName: name),
                    hostMatches(requestedHost: host, actualHost: listenerHost) {
@@ -198,17 +208,6 @@ extension XcodeMCPProxyServerCommand {
 
         var seen = Set<Int>()
         return pids.filter { seen.insert($0).inserted }
-    }
-
-    private static func listeningPIDs(onTCPPort port: Int) -> [Int] {
-        guard let output = runCommand(
-            "/usr/sbin/lsof",
-            ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]
-        ) else {
-            return []
-        }
-        let lines = output.split(whereSeparator: \.isNewline)
-        return lines.compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 
     private static func isProxyServerProcess(pid: Int) -> Bool {

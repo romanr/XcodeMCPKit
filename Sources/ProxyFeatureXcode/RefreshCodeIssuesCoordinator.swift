@@ -18,9 +18,9 @@ package actor RefreshCodeIssuesCoordinator {
         let continuation: CheckedContinuation<Permit, Error>
     }
 
-    private let maxPendingPerKey: Int
-    private let maxPendingTotal: Int
-    private let queueWaitTimeoutNanoseconds: UInt64
+    package nonisolated let maxPendingPerKey: Int
+    package nonisolated let maxPendingTotal: Int
+    package nonisolated let queueWaitTimeoutNanoseconds: UInt64
     private var nextWaiterID: UInt64 = 0
     private var busyKeys: Set<String> = []
     private var pendingWaiterCount = 0
@@ -44,6 +44,10 @@ package actor RefreshCodeIssuesCoordinator {
         self.maxPendingPerKey = max(0, maxPendingPerKey)
         self.maxPendingTotal = max(0, maxPendingTotal)
         self.queueWaitTimeoutNanoseconds = Self.nanoseconds(from: queueWaitTimeout)
+    }
+
+    package nonisolated var queueWaitTimeoutSeconds: Double {
+        Double(queueWaitTimeoutNanoseconds) / 1_000_000_000
     }
 
     package func withPermit<T: Sendable>(

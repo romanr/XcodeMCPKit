@@ -69,12 +69,15 @@ package struct MCPForwardingService: Sendable {
     package func startRequest(
         _ prepared: PreparedRequest,
         session: SessionContext,
-        on eventLoop: EventLoop
+        on eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount? = nil
     ) throws -> StartedRequest {
-        let requestTimeout = MCPMethodDispatcher.timeoutForMethod(
-            prepared.transform.method,
-            defaultSeconds: config.requestTimeout
-        )
+        let requestTimeout =
+            requestTimeoutOverride
+            ?? MCPMethodDispatcher.timeoutForMethod(
+                prepared.transform.method,
+                defaultSeconds: config.requestTimeout
+            )
         let future: EventLoopFuture<ByteBuffer>
         if prepared.transform.isBatch {
             future = session.router.registerBatch(on: eventLoop, timeout: requestTimeout)
@@ -174,7 +177,8 @@ package struct MCPForwardingService: Sendable {
         arguments: [String: Any],
         sessionID: String,
         eventLoop: EventLoop,
-        upstreamIndexOverride: Int? = nil
+        upstreamIndexOverride: Int? = nil,
+        requestTimeoutOverride: TimeAmount? = nil
     ) async -> [String: Any]? {
         let requestObject: [String: Any] = [
             "jsonrpc": "2.0",
@@ -210,7 +214,12 @@ package struct MCPForwardingService: Sendable {
         let session = sessionManager.session(id: sessionID)
         let started: StartedRequest
         do {
-            started = try startRequest(prepared, session: session, on: eventLoop)
+            started = try startRequest(
+                prepared,
+                session: session,
+                on: eventLoop,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
         } catch {
             return nil
         }

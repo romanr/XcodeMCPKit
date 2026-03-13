@@ -13,6 +13,7 @@ public final class ProxyServer {
     private let sessionManager: RuntimeCoordinator
     private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
     private let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
+    private let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState
     private var channels: [Channel] = []
     private let logger: Logger = ProxyLogging.make("server")
 
@@ -25,6 +26,11 @@ public final class ProxyServer {
             requestTimeout: config.requestTimeout
         )
         self.refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
+        self.refreshCodeIssuesDebugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: refreshCodeIssuesCoordinator.maxPendingPerKey,
+            maxPendingTotal: refreshCodeIssuesCoordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: refreshCodeIssuesCoordinator.queueWaitTimeoutSeconds
+        )
     }
 
     public func run() async throws {
@@ -49,14 +55,16 @@ public final class ProxyServer {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { [sessionManager, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver] channel in
+            .childChannelInitializer {
+                [sessionManager, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver, refreshCodeIssuesDebugState] channel in
                 channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
                             sessionManager: sessionManager,
                             refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver
+                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
+                            refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
                         )
                     )
                 }

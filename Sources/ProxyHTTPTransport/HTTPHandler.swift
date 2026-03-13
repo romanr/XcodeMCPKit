@@ -38,15 +38,32 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
+        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
+        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
     ) {
+        let refreshCoordinator =
+            refreshCodeIssuesCoordinator
+            ?? RefreshCodeIssuesCoordinator.makeDefault(
+                requestTimeout: config.requestTimeout
+            )
+        let refreshDebugState =
+            refreshCodeIssuesDebugState
+            ?? RefreshCodeIssuesDebugState(
+                maxPendingPerKey: refreshCoordinator.maxPendingPerKey,
+                maxPendingTotal: refreshCoordinator.maxPendingTotal,
+                queueWaitTimeoutSeconds: refreshCoordinator.queueWaitTimeoutSeconds
+            )
         self.config = config
-        self.controlService = HTTPControlService(runtimeCoordinator: sessionManager)
+        self.controlService = HTTPControlService(
+            runtimeCoordinator: sessionManager,
+            refreshCodeIssuesDebugState: refreshDebugState
+        )
         self.postService = HTTPPostService(
             config: config,
             sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+            refreshCodeIssuesCoordinator: refreshCoordinator,
             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
+            refreshCodeIssuesDebugState: refreshDebugState,
             logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))

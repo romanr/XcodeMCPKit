@@ -44,8 +44,9 @@ package final class HTTPPostService: Sendable {
     package init(
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
+        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.sessionManager = sessionManager
@@ -58,16 +59,13 @@ package final class HTTPPostService: Sendable {
             config: config,
             sessionManager: sessionManager
         )
-        let refreshCoordinator =
-            refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault(
-                requestTimeout: config.requestTimeout
-            )
         self.windowQueryService = XcodeWindowQueryService()
         self.refreshWorkflow = RefreshCodeIssuesWorkflow(
             mode: config.refreshCodeIssuesMode,
-            coordinator: refreshCoordinator,
+            requestTimeout: config.requestTimeout,
+            coordinator: refreshCodeIssuesCoordinator,
             targetResolver: refreshCodeIssuesTargetResolver,
+            debugState: refreshCodeIssuesDebugState,
             logger: ProxyLogging.make("http.refresh")
         )
         self.logger = logger
@@ -438,21 +436,24 @@ package final class HTTPPostService: Sendable {
         arguments: [String: Any],
         sessionID: String,
         eventLoop: EventLoop,
-        upstreamIndexOverride: Int? = nil
+        upstreamIndexOverride: Int? = nil,
+        requestTimeoutOverride: TimeAmount? = nil
     ) async -> [String: Any]? {
         await forwardingService.callInternalTool(
             name: name,
             arguments: arguments,
             sessionID: sessionID,
             eventLoop: eventLoop,
-            upstreamIndexOverride: upstreamIndexOverride
+            upstreamIndexOverride: upstreamIndexOverride,
+            requestTimeoutOverride: requestTimeoutOverride
         )
     }
 
     private func listXcodeWindows(
         sessionID: String,
         eventLoop: EventLoop,
-        upstreamIndexOverride: Int? = nil
+        upstreamIndexOverride: Int? = nil,
+        requestTimeoutOverride: TimeAmount? = nil
     ) async -> [XcodeWindowInfo]? {
         await windowQueryService.listWindows(
             sessionID: sessionID,
@@ -463,7 +464,8 @@ package final class HTTPPostService: Sendable {
                     arguments: arguments,
                     sessionID: sessionID,
                     eventLoop: eventLoop,
-                    upstreamIndexOverride: upstreamIndexOverride
+                    upstreamIndexOverride: upstreamIndexOverride,
+                    requestTimeoutOverride: requestTimeoutOverride
                 )
             }
         )
@@ -474,7 +476,8 @@ package final class HTTPPostService: Sendable {
         sessionID: String,
         requestIDs: [RPCID],
         requestIsBatch: Bool,
-        eventLoop: EventLoop
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount? = nil
     ) async -> RefreshForwardAttemptResult {
         let parsedRequestJSON: Any
         do {
@@ -506,7 +509,8 @@ package final class HTTPPostService: Sendable {
             started = try forwardingService.startRequest(
                 prepared,
                 session: session,
-                on: eventLoop
+                on: eventLoop,
+                requestTimeoutOverride: requestTimeoutOverride
             )
         } catch {
             return .invalidRequest
@@ -556,32 +560,37 @@ package final class HTTPPostService: Sendable {
             requestIDs: requestIDs,
             requestIsBatch: requestIsBatch,
             eventLoop: eventLoop,
-            windowsProvider: { sessionID, eventLoop, upstreamIndexOverride in
+            windowsProvider: { sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
                 await self.listXcodeWindows(
                     sessionID: sessionID,
                     eventLoop: eventLoop,
-                    upstreamIndexOverride: upstreamIndexOverride
+                    upstreamIndexOverride: upstreamIndexOverride,
+                    requestTimeoutOverride: requestTimeoutOverride
                 )
             },
             internalUpstreamChooser: { sessionID in
                 self.sessionManager.chooseInitializeUpstreamIndex(sessionID: sessionID)
             },
-            internalToolCaller: { name, arguments, sessionID, eventLoop, upstreamIndexOverride in
+            internalToolCaller: {
+                name, arguments, sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
                 await self.callInternalTool(
                     name: name,
                     arguments: arguments,
                     sessionID: sessionID,
                     eventLoop: eventLoop,
-                    upstreamIndexOverride: upstreamIndexOverride
+                    upstreamIndexOverride: upstreamIndexOverride,
+                    requestTimeoutOverride: requestTimeoutOverride
                 )
             },
-            forwarder: { bodyData, sessionID, requestIDs, requestIsBatch, eventLoop in
+            forwarder: {
+                bodyData, sessionID, requestIDs, requestIsBatch, eventLoop, requestTimeoutOverride in
                 await self.forwardOnce(
                     bodyData: bodyData,
                     sessionID: sessionID,
                     requestIDs: requestIDs,
                     requestIsBatch: requestIsBatch,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    requestTimeoutOverride: requestTimeoutOverride
                 )
             }
         )

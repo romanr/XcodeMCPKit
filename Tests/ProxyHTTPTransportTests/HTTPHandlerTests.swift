@@ -7,6 +7,7 @@ import Testing
 import ProxyCore
 import ProxyRuntime
 import ProxyFeatureXcode
+import XcodeMCPTestSupport
 
 @testable import ProxyHTTPTransport
 
@@ -67,6 +68,118 @@ struct HTTPHandlerTests {
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .notFound)
         #expect(response.body == "not found")
+    }
+
+    @Test func httpDebugUpstreamsIncludesActiveRefreshCodeIssuesState() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("A.swift")
+        try "".write(to: target, atomically: true, encoding: .utf8)
+        let firstSent = SyncSignal()
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-debug-state, workspacePath: \(temporaryRoot)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    firstSent.signal()
+                    return .manual(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [[
+                                    "type": "text",
+                                    "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"warn\",\"line\":1,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                ]],
+                                "structuredContent": [
+                                    "issues": [[
+                                        "path": target.path,
+                                        "message": "warn",
+                                        "line": 1,
+                                        "severity": "warning",
+                                    ]],
+                                    "totalFound": 1,
+                                    "truncated": false,
+                                ],
+                            ]
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let refreshTask = Task<Void, Error> {
+                _ = try await postHTTPJSON(
+                    url: server.url,
+                    sessionID: "session-debug-state",
+                    payload: toolsCallPayload(
+                        id: 34,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-debug-state",
+                            "filePath": "A.swift",
+                        ]
+                    )
+                )
+            }
+
+            await firstSent.wait()
+
+            let (httpResponse, data) = try await getHTTPData(url: makeDebugSnapshotURL(from: server.url))
+            #expect(httpResponse.statusCode == 200)
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(HTTPDebugSnapshot.self, from: data)
+            let refreshSnapshot = try #require(snapshot.refreshCodeIssues)
+            #expect(refreshSnapshot.queue.activeRequestCount == 1)
+            #expect(refreshSnapshot.activeRequests.count == 1)
+            #expect(refreshSnapshot.activeRequests.first?.queueKey == "windowtab-debug-state")
+            #expect(refreshSnapshot.activeRequests.first?.step == "proxy.list_navigator_issues")
+            #expect(refreshSnapshot.activeRequests.first?.state == "running")
+
+            sessionManager.deliverNextPendingResponse()
+            _ = try await refreshTask.value
+
+            let (completedResponse, completedData) = try await getHTTPData(
+                url: makeDebugSnapshotURL(from: server.url)
+            )
+            #expect(completedResponse.statusCode == 200)
+            let completedSnapshot = try decoder.decode(HTTPDebugSnapshot.self, from: completedData)
+            let completedRefreshSnapshot = try #require(completedSnapshot.refreshCodeIssues)
+            #expect(completedRefreshSnapshot.queue.activeRequestCount == 0)
+            #expect(completedRefreshSnapshot.recentCompletedRequests.first?.finalState == "completed")
+            #expect(completedRefreshSnapshot.recentCompletedRequests.first?.outcome == "success")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
     }
 
     @Test func httpSSERequiresAcceptHeader() async throws {
@@ -2245,6 +2358,201 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func refreshWorkflowFallsBackToUpstreamWhenNavigatorIssuesTimesOut() async throws {
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let config = makeConfig(requestTimeout: 1)
+        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let debugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: coordinator.maxPendingPerKey,
+            maxPendingTotal: coordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+        )
+        let workflow = RefreshCodeIssuesWorkflow(
+            mode: .proxy,
+            requestTimeout: config.requestTimeout,
+            coordinator: coordinator,
+            targetResolver: RefreshCodeIssuesTargetResolver(),
+            debugState: debugState,
+            windowLookupTimeout: 0.2,
+            navigatorIssuesTimeout: 0.05,
+            logger: ProxyLogging.make("test.refresh")
+        )
+        let observedTimeouts = NIOLockedValueBox<[Int64]>([])
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let requestID = RPCID(any: NSNumber(value: 33))!
+        let requestPayload = toolsCallPayload(
+            id: 33,
+            name: "XcodeRefreshCodeIssuesInFile",
+            arguments: [
+                "tabIdentifier": "windowtab-navigator-timeout",
+                "filePath": "App/Sources/App.swift",
+            ]
+        )
+        let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
+        let upstreamFallbackData = try makeToolSuccessResponse(
+            id: requestID,
+            text: "upstream-after-navigator-timeout"
+        )
+
+        let result = await workflow.run(
+            refreshRequest: RefreshCodeIssuesRequest(
+                tabIdentifier: "windowtab-navigator-timeout",
+                filePath: "App/Sources/App.swift"
+            ),
+            bodyData: requestData,
+            sessionID: "session-navigator-timeout",
+            requestIDs: [requestID],
+            requestIsBatch: false,
+            eventLoop: group.next(),
+            windowsProvider: { _, _, _, _ in
+                [
+                    XcodeWindowInfo(
+                        tabIdentifier: "windowtab-navigator-timeout",
+                        workspacePath: workspacePath
+                    )
+                ]
+            },
+            internalUpstreamChooser: { _ in 0 },
+            internalToolCaller: { name, _, _, _, _, requestTimeoutOverride in
+                guard name == "XcodeListNavigatorIssues" else {
+                    return nil
+                }
+                observedTimeouts.withLockedValue { values in
+                    values.append(requestTimeoutOverride?.nanoseconds ?? -1)
+                }
+                let simulatedDelayNanos: UInt64 = 200_000_000
+                if let requestTimeoutOverride {
+                    let timeoutNanos = UInt64(max(0, requestTimeoutOverride.nanoseconds))
+                    try? await Task.sleep(nanoseconds: min(simulatedDelayNanos, timeoutNanos))
+                }
+                return nil
+            },
+            forwarder: { _, _, _, _, _, _ in
+                .success(upstreamFallbackData)
+            }
+        )
+
+        switch result {
+        case .success(let responseData):
+            let object = try #require(
+                JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+            )
+            let responseResult: [String: Any]? = object["result"] as? [String: Any]
+            let content: [[String: Any]]? = responseResult?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "upstream-after-navigator-timeout")
+        default:
+            Issue.record("expected workflow to fall back to upstream after navigator timeout")
+        }
+
+        #expect(observedTimeouts.withLockedValue { $0.first } == 50_000_000)
+    }
+
+    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWithUnlimitedTimeout() async throws {
+        var config = makeConfig(requestTimeout: 0)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("App.swift")
+        try "".write(to: target, atomically: true, encoding: .utf8)
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-unlimited-timeout, workspacePath: \(workspacePath)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "navigator failed"
+                        )
+                    )
+                case "XcodeRefreshCodeIssuesInFile":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "upstream-after-unlimited-timeout-fallback"
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-unlimited-timeout",
+                payload: toolsCallPayload(
+                    id: 35,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-unlimited-timeout",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "upstream-after-unlimited-timeout-fallback")
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+                "XcodeRefreshCodeIssuesInFile",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream
@@ -3322,13 +3630,15 @@ private func addHTTPHandler(
     config: ProxyConfig,
     sessionManager: any RuntimeCoordinating,
     refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-    refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
+    refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
+    refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
 ) throws {
     let handler = HTTPHandler(
         config: config,
         sessionManager: sessionManager,
         refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-        refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver
+        refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
+        refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
     )
     try channel.pipeline.addHandler(handler).wait()
 }
@@ -3412,6 +3722,16 @@ private struct TestHTTPHandlerServer {
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let refreshCoordinator =
+            refreshCodeIssuesCoordinator
+            ?? RefreshCodeIssuesCoordinator.makeDefault(
+                requestTimeout: config.requestTimeout
+            )
+        let refreshDebugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: refreshCoordinator.maxPendingPerKey,
+            maxPendingTotal: refreshCoordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: refreshCoordinator.queueWaitTimeoutSeconds
+        )
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -3421,8 +3741,9 @@ private struct TestHTTPHandlerServer {
                         HTTPHandler(
                             config: config,
                             sessionManager: sessionManager,
-                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver
+                            refreshCodeIssuesCoordinator: refreshCoordinator,
+                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
+                            refreshCodeIssuesDebugState: refreshDebugState
                         )
                     )
                 }
@@ -3472,6 +3793,21 @@ private func postHTTPJSON(
         (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
         ?? [:]
     return (httpResponse, object)
+}
+
+private func getHTTPData(url: URL) async throws -> (HTTPURLResponse, Data) {
+    let (data, response) = try await URLSession.shared.data(from: url)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw HTTPTestError.missingResponseHead
+    }
+    return (httpResponse, data)
+}
+
+private func makeDebugSnapshotURL(from mcpURL: URL) -> URL {
+    var components = URLComponents(url: mcpURL, resolvingAgainstBaseURL: false)!
+    components.path = "/debug/upstreams"
+    components.query = nil
+    return components.url!
 }
 
 private actor AsyncSignal {

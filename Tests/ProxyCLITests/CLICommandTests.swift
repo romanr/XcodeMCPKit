@@ -140,6 +140,33 @@ struct CLICommandTests {
         #expect(output.snapshot() == [CLIParser.removedLazyInitMessage])
     }
 
+    @Test func cliCommandRejectsRemovedXcodePIDFlag() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { output.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--xcode-pid", "1234"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [CLIParser.removedXcodePIDMessage])
+    }
+
     @Test func cliCommandBuildsAdapterFromResolvedEnvironmentURL() async throws {
         let createdAdapter = RecordingCLIAdapter()
         let captured = LockedBox<(url: URL?, timeout: TimeInterval?)>((nil, nil))

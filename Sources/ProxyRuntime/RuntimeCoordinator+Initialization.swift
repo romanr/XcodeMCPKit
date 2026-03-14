@@ -251,8 +251,8 @@ extension RuntimeCoordinator {
             "protocolVersion": .string("2025-03-26"),
             "capabilities": .object([:]),
             "clientInfo": .object([
-                "name": .string("Codex"),
-                "version": .string(defaultClientVersion(for: "Codex")),
+                "name": .string(defaultProxyClientName()),
+                "version": .string(defaultProxyClientVersion()),
             ]),
         ]
     }
@@ -270,19 +270,26 @@ extension RuntimeCoordinator {
             return params
         }
 
-        clientInfo["version"] = .string(defaultClientVersion(for: clientName))
+        guard let resolvedVersion = xcodeChatClientVersion(for: clientName) else {
+            return params
+        }
+
+        clientInfo["version"] = .string(resolvedVersion)
         var updated = params
         updated["clientInfo"] = .object(clientInfo)
         return updated
     }
 
     func defaultClientVersion(for clientName: String) -> String {
-        xcodeChatClientVersion(for: clientName) ?? defaultCodexClientVersion()
+        xcodeChatClientVersion(for: clientName) ?? defaultProxyClientVersion()
     }
 
-    func defaultCodexClientVersion() -> String {
-        let fallback = "0.87.0"
-        return xcodeChatVersionValue(forDefaultsKey: "IDEChatCodexVersion") ?? fallback
+    func defaultProxyClientName() -> String {
+        "XcodeMCPKit"
+    }
+
+    func defaultProxyClientVersion() -> String {
+        "dev"
     }
 
     func xcodeChatClientVersion(for clientName: String) -> String? {

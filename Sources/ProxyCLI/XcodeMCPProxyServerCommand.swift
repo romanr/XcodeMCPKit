@@ -11,7 +11,6 @@ package struct ProxyServerOptions {
     package var hasHostFlag: Bool
     package var hasPortFlag: Bool
     package var hasConfigFlag: Bool
-    package var hasXcodePIDFlag: Bool
     package var hasRefreshCodeIssuesModeFlag: Bool
     package var forceRestart: Bool
     package var dryRun: Bool
@@ -23,7 +22,6 @@ package struct ProxyServerOptions {
         hasHostFlag: Bool,
         hasPortFlag: Bool,
         hasConfigFlag: Bool,
-        hasXcodePIDFlag: Bool,
         hasRefreshCodeIssuesModeFlag: Bool,
         forceRestart: Bool,
         dryRun: Bool
@@ -34,7 +32,6 @@ package struct ProxyServerOptions {
         self.hasHostFlag = hasHostFlag
         self.hasPortFlag = hasPortFlag
         self.hasConfigFlag = hasConfigFlag
-        self.hasXcodePIDFlag = hasXcodePIDFlag
         self.hasRefreshCodeIssuesModeFlag = hasRefreshCodeIssuesModeFlag
         self.forceRestart = forceRestart
         self.dryRun = dryRun
@@ -57,7 +54,6 @@ package struct XcodeMCPProxyServerCommand {
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
         package var stderr: (String) -> Void
-        package var resolveXcodePID: () -> String?
         package var terminateExistingServer: (String, Int) -> Bool
         package var makeServer: (ProxyConfig) -> any ProxyServerCommandServer
         package var isAddressAlreadyInUse: (Error) -> Bool
@@ -67,7 +63,6 @@ package struct XcodeMCPProxyServerCommand {
             bootstrapLogging: @escaping ([String: String]) -> Void,
             stdout: @escaping (String) -> Void,
             stderr: @escaping (String) -> Void,
-            resolveXcodePID: @escaping () -> String?,
             terminateExistingServer: @escaping (String, Int) -> Bool,
             makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
             isAddressAlreadyInUse: @escaping (Error) -> Bool,
@@ -76,7 +71,6 @@ package struct XcodeMCPProxyServerCommand {
             self.bootstrapLogging = bootstrapLogging
             self.stdout = stdout
             self.stderr = stderr
-            self.resolveXcodePID = resolveXcodePID
             self.terminateExistingServer = terminateExistingServer
             self.makeServer = makeServer
             self.isAddressAlreadyInUse = isAddressAlreadyInUse
@@ -88,7 +82,6 @@ package struct XcodeMCPProxyServerCommand {
                 bootstrapLogging: ProxyLogging.bootstrap,
                 stdout: { print($0) },
                 stderr: { FileHandle.writeLine($0, to: .standardError) },
-                resolveXcodePID: XcodeMCPProxyServerCommand.resolveXcodePID,
                 terminateExistingServer: XcodeMCPProxyServerCommand.terminateExistingProxyServerIfNeeded,
                 makeServer: { ProxyServer(config: $0) },
                 isAddressAlreadyInUse: XcodeMCPProxyServerCommand.isAddressAlreadyInUse,

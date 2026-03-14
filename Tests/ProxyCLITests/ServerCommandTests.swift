@@ -27,7 +27,7 @@ struct ServerCommandTests {
         #expect(options.dryRun == true)
     }
 
-    @Test func serverCommandAppliesEnvironmentDefaultsAndResolvedXcodePID() throws {
+    @Test func serverCommandAppliesEnvironmentDefaultsWithoutXcodePID() throws {
         var options = ProxyServerOptions(
             forwardedArgs: [],
             showHelp: false,
@@ -35,7 +35,6 @@ struct ServerCommandTests {
             hasHostFlag: false,
             hasPortFlag: false,
             hasConfigFlag: false,
-            hasXcodePIDFlag: false,
             hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
@@ -48,15 +47,12 @@ struct ServerCommandTests {
                 "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
             ],
-            to: &options,
-            resolveXcodePID: { "4242" },
-            stderr: { _ in }
+            to: &options
         )
 
         #expect(options.forwardedArgs == [
             "--listen", "127.0.0.1:9999",
             "--config", "/tmp/proxy-config.toml",
-            "--xcode-pid", "4242",
             "--refresh-code-issues-mode", "upstream",
         ])
     }
@@ -69,7 +65,6 @@ struct ServerCommandTests {
             hasHostFlag: false,
             hasPortFlag: false,
             hasConfigFlag: true,
-            hasXcodePIDFlag: false,
             hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
@@ -79,14 +74,40 @@ struct ServerCommandTests {
             from: [
                 "MCP_XCODE_CONFIG": "/tmp/environment.toml",
             ],
-            to: &options,
-            resolveXcodePID: { nil },
-            stderr: { _ in }
+            to: &options
         )
 
         #expect(options.forwardedArgs.contains("--config"))
         #expect(options.forwardedArgs.contains("/tmp/explicit.toml"))
         #expect(options.forwardedArgs.contains("/tmp/environment.toml") == false)
+    }
+
+    @Test func serverCommandIgnoresRemovedXcodePIDEnvironment() throws {
+        var options = ProxyServerOptions(
+            forwardedArgs: [],
+            showHelp: false,
+            hasListenFlag: false,
+            hasHostFlag: false,
+            hasPortFlag: false,
+            hasConfigFlag: false,
+            hasRefreshCodeIssuesModeFlag: false,
+            forceRestart: false,
+            dryRun: false
+        )
+
+        try XcodeMCPProxyServerCommand.applyDefaults(
+            from: [
+                "HOST": "127.0.0.1",
+                "PORT": "9999",
+                "XCODE_PID": "1234",
+                "MCP_XCODE_PID": "5678",
+            ],
+            to: &options
+        )
+
+        #expect(options.forwardedArgs == [
+            "--listen", "127.0.0.1:9999",
+        ])
     }
 
     @Test func serverCommandRejectsRemovedLazyInitEnvironment() async throws {
@@ -96,7 +117,6 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
-                resolveXcodePID: { "5678" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -123,7 +143,6 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
-                resolveXcodePID: { "5678" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -139,6 +158,32 @@ struct ServerCommandTests {
         #expect(exitCode == 1)
         #expect(output.snapshot() == [
             "error: \(CLIParser.removedLazyInitMessage)",
+            "run with --help for usage",
+        ])
+    }
+
+    @Test func serverCommandRejectsRemovedXcodePIDFlagBeforeDryRun() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { output.append($0) },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in RecordingProxyServer() },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--xcode-pid", "1234", "--dry-run"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [
+            "error: \(CLIParser.removedXcodePIDMessage)",
             "run with --help for usage",
         ])
     }
@@ -237,7 +282,6 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 stderr: { _ in },
-                resolveXcodePID: { "1234" },
                 terminateExistingServer: { host, port in
                     restarted.append("\(host):\(port)")
                     return true
@@ -276,7 +320,6 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
-                resolveXcodePID: { "5678" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -297,7 +340,6 @@ struct ServerCommandTests {
         let line = try #require(output.snapshot().first)
         #expect(line.contains("--listen 127.0.0.1:9999"))
         #expect(line.contains("--config /tmp/proxy-config.toml"))
-        #expect(line.contains("--xcode-pid 5678"))
         #expect(line.contains("--lazy-init") == false)
     }
 
@@ -309,7 +351,6 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { errors.append($0) },
-                resolveXcodePID: { "7777" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -330,7 +371,6 @@ struct ServerCommandTests {
         #expect(errors.snapshot().isEmpty)
         let line = try #require(output.snapshot().first)
         #expect(line.contains("--upstream-arg --help"))
-        #expect(line.contains("--xcode-pid 7777"))
         #expect(line.contains("Usage:") == false)
     }
 
@@ -342,7 +382,6 @@ struct ServerCommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { errors.append($0) },
-                resolveXcodePID: { "7777" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in RecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },

@@ -20,31 +20,6 @@ extension XcodeMCPProxyServerCommand {
         return requested == actual
     }
 
-    static func resolveXcodePID() -> String? {
-        if let pid = firstLine(runCommand("/usr/bin/pgrep", ["-x", "Xcode"])) {
-            return pid
-        }
-        if let pid = firstLine(
-            runCommand("/usr/bin/pgrep", ["-f", "/Applications/Xcode.*\\.app/Contents/MacOS/Xcode"])
-        ) {
-            return pid
-        }
-        if let pid = firstLine(
-            runCommand("/usr/bin/pgrep", ["-f", "Xcode.app/Contents/MacOS/Xcode"])
-        ) {
-            return pid
-        }
-
-        _ = runCommand("/usr/bin/open", ["-a", "Xcode"])
-        for _ in 0..<40 {
-            if let pid = firstLine(runCommand("/usr/bin/pgrep", ["-x", "Xcode"])) {
-                return pid
-            }
-            Thread.sleep(forTimeInterval: 0.25)
-        }
-        return nil
-    }
-
     @discardableResult
     static func terminateExistingProxyServerIfNeeded(host: String, port: Int) -> Bool {
         if let record = Discovery.read(),

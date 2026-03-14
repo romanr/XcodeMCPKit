@@ -17,7 +17,6 @@ package struct ProxyCLIServerScan {
     package var hasHostFlag = false
     package var hasPortFlag = false
     package var hasConfigFlag = false
-    package var hasXcodePIDFlag = false
     package var hasRefreshCodeIssuesModeFlag = false
     package var forceRestart = false
     package var dryRun = false
@@ -38,7 +37,6 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-args",
         "--upstream-arg",
         "--upstream-processes",
-        "--xcode-pid",
         "--session-id",
         "--refresh-code-issues-mode",
     ]
@@ -53,7 +51,6 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-args",
         "--upstream-arg",
         "--upstream-processes",
-        "--xcode-pid",
         "--session-id",
         "--refresh-code-issues-mode",
     ]
@@ -67,7 +64,6 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-args",
         "--upstream-arg",
         "--upstream-processes",
-        "--xcode-pid",
         "--session-id",
         "--max-body-bytes",
         "--request-timeout",
@@ -103,6 +99,11 @@ package enum ProxyCLIInvocationScanner {
                     scan.removedFlagMessage = CLIParser.removedLazyInitMessage
                 }
                 cursor.advance()
+            case "--xcode-pid":
+                if scan.removedFlagMessage == nil {
+                    scan.removedFlagMessage = CLIParser.removedXcodePIDMessage
+                }
+                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
             case "--request-timeout":
                 cursor.advancePastCurrentAndOptionalValue(where: shouldConsumeRequestTimeoutValue)
             case let flag where serverOnlyFlags.contains(flag):
@@ -147,6 +148,8 @@ package enum ProxyCLIInvocationScanner {
                 throw ProxyServerCommandError.message(
                     "--url is not supported in server mode (use xcode-mcp-proxy)"
                 )
+            case "--xcode-pid":
+                throw ProxyServerCommandError.message(CLIParser.removedXcodePIDMessage)
             case "--lazy-init":
                 throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
             case "--listen":
@@ -157,8 +160,6 @@ package enum ProxyCLIInvocationScanner {
                 scan.hasPortFlag = true
             case "--config":
                 scan.hasConfigFlag = true
-            case "--xcode-pid":
-                scan.hasXcodePIDFlag = true
             case "--refresh-code-issues-mode":
                 scan.hasRefreshCodeIssuesModeFlag = true
             default:

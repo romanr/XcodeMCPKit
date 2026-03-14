@@ -203,7 +203,6 @@ private struct TestHTTPServer {
             listenPort: 0,
             upstreamCommand: "xcrun",
             upstreamArgs: ["mcpbridge"],
-            xcodePID: nil,
             upstreamSessionID: nil,
             maxBodyBytes: 1_048_576,
             requestTimeout: 5,

@@ -39,6 +39,10 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ProxyBuildInfoSupport",
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPKit",
             dependencies: [
                 "XcodeMCPProxy"
@@ -117,7 +121,10 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            swiftSettings: strictSwiftSettings
+            swiftSettings: strictSwiftSettings,
+            plugins: [
+                .plugin(name: "ProxyBuildInfoPlugin"),
+            ]
         ),
         .target(
             name: "ProxyCLI",
@@ -151,6 +158,16 @@ let package = Package(
             name: "XcodeMCPProxyInstall",
             dependencies: ["ProxyCLI"],
             swiftSettings: strictSwiftSettings
+        ),
+        .executableTarget(
+            name: "ProxyBuildInfoTool",
+            dependencies: ["ProxyBuildInfoSupport"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .plugin(
+            name: "ProxyBuildInfoPlugin",
+            capability: .buildTool(),
+            dependencies: ["ProxyBuildInfoTool"]
         ),
         .testTarget(
             name: "ProxyRuntimeTests",
@@ -205,6 +222,14 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Tests/ProxyCLITests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "ProxyBuildInfoSupportTests",
+            dependencies: [
+                "ProxyBuildInfoSupport",
+            ],
+            path: "Tests/ProxyBuildInfoSupportTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

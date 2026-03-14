@@ -3,6 +3,7 @@ import XcodeMCPProxy
 
 package struct ProxyCLIAdapterScan {
     package var showHelp = false
+    package var showVersion = false
     package var usesRemovedURLHelper = false
     package var removedFlagMessage: String?
     package var hasExplicitURL = false
@@ -13,6 +14,7 @@ package struct ProxyCLIAdapterScan {
 package struct ProxyCLIServerScan {
     package var forwardedArgs: [String] = []
     package var showHelp = false
+    package var showVersion = false
     package var hasListenFlag = false
     package var hasHostFlag = false
     package var hasPortFlag = false
@@ -24,6 +26,7 @@ package struct ProxyCLIServerScan {
 
 package struct ProxyCLIInstallScan {
     package var showHelp = false
+    package var showVersion = false
 }
 
 package enum ProxyCLIInvocationScanner {
@@ -72,12 +75,16 @@ package enum ProxyCLIInvocationScanner {
 
     package static func scanAdapter(_ args: [String]) -> ProxyCLIAdapterScan {
         var scan = ProxyCLIAdapterScan()
+        scan.showVersion = containsVersionFlag(args)
         var cursor = CLIArgumentCursor(args: args)
 
         while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
                 scan.showHelp = true
+                cursor.advance()
+            case "--version":
+                scan.showVersion = true
                 cursor.advance()
             case "url" where cursor.index == 1:
                 scan.usesRemovedURLHelper = true
@@ -125,13 +132,33 @@ package enum ProxyCLIInvocationScanner {
 
     package static func scanServer(_ args: [String]) throws -> ProxyCLIServerScan {
         var scan = ProxyCLIServerScan()
+        scan.showVersion = containsVersionFlag(args)
         var cursor = CLIArgumentCursor(args: args)
 
         while let arg = cursor.current {
+            if scan.showVersion {
+                switch arg {
+                case "-h", "--help":
+                    scan.showHelp = true
+                    return scan
+                default:
+                    if serverForwardedValueFlags.contains(arg) {
+                        cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+                    } else {
+                        cursor.advance()
+                    }
+                    continue
+                }
+            }
+
             switch arg {
             case "-h", "--help":
                 scan.showHelp = true
                 return scan
+            case "--version":
+                scan.showVersion = true
+                cursor.advance()
+                continue
             case "--dry-run":
                 scan.dryRun = true
                 cursor.advance()
@@ -183,12 +210,16 @@ package enum ProxyCLIInvocationScanner {
 
     package static func scanInstall(_ args: [String]) -> ProxyCLIInstallScan {
         var scan = ProxyCLIInstallScan()
+        scan.showVersion = containsVersionFlag(args)
         var cursor = CLIArgumentCursor(args: args)
 
         while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
                 scan.showHelp = true
+                cursor.advance()
+            case "--version":
+                scan.showVersion = true
                 cursor.advance()
             case "--prefix", "--bindir":
                 cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
@@ -210,5 +241,9 @@ package enum ProxyCLIInvocationScanner {
             return true
         }
         return !token.hasPrefix("-")
+    }
+
+    private static func containsVersionFlag(_ args: [String]) -> Bool {
+        args.dropFirst().contains("--version")
     }
 }

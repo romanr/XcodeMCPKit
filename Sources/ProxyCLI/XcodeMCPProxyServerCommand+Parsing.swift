@@ -7,6 +7,7 @@ extension XcodeMCPProxyServerCommand {
         return ProxyServerOptions(
             forwardedArgs: scan.forwardedArgs,
             showHelp: scan.showHelp,
+            showVersion: scan.showVersion,
             hasListenFlag: scan.hasListenFlag,
             hasHostFlag: scan.hasHostFlag,
             hasPortFlag: scan.hasPortFlag,
@@ -72,6 +73,7 @@ extension XcodeMCPProxyServerCommand {
           --refresh-code-issues-mode proxy|upstream
           --force-restart
           --dry-run
+          --version
           -h, --help
 
         Notes:

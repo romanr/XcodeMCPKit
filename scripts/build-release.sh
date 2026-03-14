@@ -78,7 +78,7 @@ products=(
 pushd "$repo_root" >/dev/null
 
 for product in "${products[@]}"; do
-  swift build -c release \
+  XCODE_MCP_BUILD_VERSION="$version" swift build -c release \
     -Xswiftc -strict-concurrency=minimal \
     --arch "$arch" \
     --product "$product"
@@ -105,12 +105,6 @@ for product in "${products[@]}"; do
     codesign --force --sign - "$target_path" >/dev/null
   fi
 done
-
-cat > "$out_dir/manifest.txt" <<EOF
-version=$version
-arch=$arch
-built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EOF
 
 popd >/dev/null
 

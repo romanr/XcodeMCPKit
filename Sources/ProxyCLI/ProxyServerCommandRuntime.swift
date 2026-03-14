@@ -15,6 +15,15 @@ package struct ProxyServerCommandRuntime {
                 dependencies.stdout(XcodeMCPProxyServerCommand.serverUsage())
                 return 0
             }
+            if options.showVersion {
+                dependencies.stdout(
+                    ProxyBuildInfo.versionLine(
+                        arguments: args,
+                        defaultExecutableName: "xcode-mcp-proxy-server"
+                    )
+                )
+                return 0
+            }
             try XcodeMCPProxyServerCommand.applyDefaults(from: environment, to: &options)
 
             let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])

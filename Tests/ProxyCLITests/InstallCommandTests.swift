@@ -1,9 +1,88 @@
 import Foundation
 import Testing
 import ProxyCLI
+import XcodeMCPProxy
 
 @Suite
 struct InstallCommandTests {
+    @Test func installCommandPrintsVersionWithoutResolvingExecutableURL() throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyInstallCommand(
+            dependencies: .init(
+                stdout: { output.append($0) },
+                stderr: { _ in },
+                executableURL: {
+                    Issue.record("executableURL should not be called for --version")
+                    return nil
+                },
+                buildProducts: { _, _ in
+                    Issue.record("buildProducts should not be called for --version")
+                }
+            )
+        )
+
+        let exitCode = command.run(
+            args: ["xcode-mcp-proxy-install", "--version", "--unknown"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot() == ["xcode-mcp-proxy-install \(ProxyBuildInfo.version)"])
+    }
+
+    @Test func installCommandPrintsVersionWhenFlagAppearsAsBindirValue() throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyInstallCommand(
+            dependencies: .init(
+                stdout: { output.append($0) },
+                stderr: { _ in },
+                executableURL: {
+                    Issue.record("executableURL should not be called for --version")
+                    return nil
+                },
+                buildProducts: { _, _ in
+                    Issue.record("buildProducts should not be called for --version")
+                }
+            )
+        )
+
+        let exitCode = command.run(
+            args: ["xcode-mcp-proxy-install", "--bindir", "--version"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot() == ["xcode-mcp-proxy-install \(ProxyBuildInfo.version)"])
+    }
+
+    @Test func installCommandHelpWinsOverVersion() throws {
+        let output = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyInstallCommand(
+            dependencies: .init(
+                stdout: { output.append($0) },
+                stderr: { errors.append($0) },
+                executableURL: {
+                    Issue.record("executableURL should not be called for --help")
+                    return nil
+                },
+                buildProducts: { _, _ in
+                    Issue.record("buildProducts should not be called for --help")
+                }
+            )
+        )
+
+        let exitCode = command.run(
+            args: ["xcode-mcp-proxy-install", "--version", "--help"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(errors.snapshot().isEmpty)
+        let line = try #require(output.snapshot().first)
+        #expect(line.contains("Usage:"))
+    }
+
     @Test func installCommandParsesOptionsAndPrefersBindir() throws {
         let options = try XcodeMCPProxyInstallCommand.parseOptions(
             [

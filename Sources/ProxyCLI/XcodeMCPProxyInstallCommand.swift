@@ -16,6 +16,7 @@ package struct InstallOptions {
 
 package struct InstallCommandInvocation {
     package var showHelp = false
+    package var showVersion = false
 }
 
 package enum InstallCommandError: Error, CustomStringConvertible {

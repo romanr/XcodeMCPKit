@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPProxy
 
 package struct InstallCommandRuntime {
     private let dependencies: XcodeMCPProxyInstallCommand.Dependencies
@@ -11,6 +12,15 @@ package struct InstallCommandRuntime {
         let invocation = XcodeMCPProxyInstallCommand.scanInvocation(args)
         if invocation.showHelp {
             dependencies.stdout(XcodeMCPProxyInstallCommand.usage())
+            return 0
+        }
+        if invocation.showVersion {
+            dependencies.stdout(
+                ProxyBuildInfo.versionLine(
+                    arguments: args,
+                    defaultExecutableName: "xcode-mcp-proxy-install"
+                )
+            )
             return 0
         }
 

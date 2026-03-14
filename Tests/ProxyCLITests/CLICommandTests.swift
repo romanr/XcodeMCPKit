@@ -5,6 +5,97 @@ import XcodeMCPProxy
 
 @Suite
 struct CLICommandTests {
+    @Test func cliCommandPrintsVersionWithoutCreatingLogSink() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                makeLogSink: {
+                    Issue.record("makeLogSink should not be called for --version")
+                    return CLICommandLogSink(
+                        error: { _ in },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in
+                    RecordingCLIAdapter()
+                },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--version", "--config", "/tmp/proxy-config.toml"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot() == ["xcode-mcp-proxy \(ProxyBuildInfo.version)"])
+    }
+
+    @Test func cliCommandPrintsVersionWhenFlagAppearsAsURLValue() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                makeLogSink: {
+                    Issue.record("makeLogSink should not be called for --version")
+                    return CLICommandLogSink(
+                        error: { _ in },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in
+                    RecordingCLIAdapter()
+                },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--url", "--version"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot() == ["xcode-mcp-proxy \(ProxyBuildInfo.version)"])
+    }
+
+    @Test func cliCommandHelpWinsOverVersion() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                makeLogSink: {
+                    Issue.record("makeLogSink should not be called for --help")
+                    return CLICommandLogSink(
+                        error: { _ in },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in
+                    RecordingCLIAdapter()
+                },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--version", "--help"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        let line = try #require(output.snapshot().first)
+        #expect(line.contains("Usage:"))
+    }
+
     @Test func cliCommandRewritesURLFlagToStdio() throws {
         let rewritten = try XcodeMCPProxyCLICommand.rewriteURLFlagToStdio([
             "xcode-mcp-proxy",

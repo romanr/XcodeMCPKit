@@ -10,13 +10,24 @@ package struct CLICommandRuntime {
     }
 
     package func execute(args: [String], environment: [String: String]) async -> Int32 {
-        let logSink = dependencies.makeLogSink()
         let invocation = XcodeMCPProxyCLICommand.scanInvocation(args)
 
         if invocation.showHelp {
             dependencies.stdout(XcodeMCPProxyCLICommand.usage())
             return 0
         }
+
+        if invocation.showVersion {
+            dependencies.stdout(
+                ProxyBuildInfo.versionLine(
+                    arguments: args,
+                    defaultExecutableName: "xcode-mcp-proxy"
+                )
+            )
+            return 0
+        }
+
+        let logSink = dependencies.makeLogSink()
 
         if invocation.usesRemovedURLHelper {
             logSink.error(

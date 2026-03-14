@@ -572,7 +572,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "custom-proxy")
-        #expect(clientInfo["version"] as? String == manager.defaultCodexClientVersion())
+        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
         #expect(capabilities["roots"] as? Bool == true)
     }
 
@@ -641,7 +641,8 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
-        #expect(clientInfo["name"] as? String == "Codex")
+        #expect(clientInfo["name"] as? String == manager.defaultProxyClientName())
+        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
     }
 
     @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
@@ -697,7 +698,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "configured-proxy")
-        #expect(clientInfo["version"] as? String == manager.defaultCodexClientVersion())
+        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
     }
 
     @Test func sessionManagerSendsInitializedOnce() async throws {

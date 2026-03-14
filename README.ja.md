@@ -152,8 +152,8 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 | キー | 型 | 既定値 |
 |------|----|--------|
 | `upstream_handshake.protocolVersion` | string | `"2025-03-26"` |
-| `upstream_handshake.clientName` | string | `"Codex"` |
-| `upstream_handshake.clientVersion` | string | `auto` |
+| `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
+| `upstream_handshake.clientVersion` | string | `"dev"` |
 | `upstream_handshake.capabilities` | table | `{}` |
 
 `clientVersion` を省略した場合、`clientName` に対応する Xcode の `IDEChat*Version` があれば、その version を自動で使います。

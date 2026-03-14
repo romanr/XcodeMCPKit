@@ -152,8 +152,8 @@ Logs are written to stderr.
 | Key | Type | Default |
 |-----|------|---------|
 | `upstream_handshake.protocolVersion` | string | `"2025-03-26"` |
-| `upstream_handshake.clientName` | string | `"Codex"` |
-| `upstream_handshake.clientVersion` | string | `auto` |
+| `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
+| `upstream_handshake.clientVersion` | string | `"dev"` |
 | `upstream_handshake.capabilities` | table | `{}` |
 
 If `clientVersion` is omitted, the proxy auto-resolves it from the Xcode `IDEChat*Version` entry matching `clientName` when available.

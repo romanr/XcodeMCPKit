@@ -23,6 +23,11 @@ final class SessionContext: Sendable {
     }
 }
 
+struct CachedToolsListReservation: Sendable {
+    let result: JSONValue
+    let upstreamIndex: Int
+}
+
 protocol SessionManaging: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
@@ -30,7 +35,8 @@ protocol SessionManaging: Sendable {
     func shutdown()
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
-    func setCachedToolsListResult(_ result: JSONValue)
+    func reserveCachedToolsList(sessionId: String) -> CachedToolsListReservation?
+    func setCachedToolsListResult(_ result: JSONValue, upstreamIndex: Int)
     func refreshToolsListIfNeeded()
     func registerInitialize(
         originalId: RPCId,
@@ -87,6 +93,7 @@ final class SessionManager: Sendable, SessionManaging {
 
     private struct ToolsListState: Sendable {
         var cachedResult: JSONValue?
+        var cachedUpstreamIndex: Int?
         // Tracks a best-effort warmup to populate the in-memory tools/list cache once.
         var warmupInFlight = false
         var internalSessionId: String?
@@ -281,10 +288,72 @@ final class SessionManager: Sendable, SessionManaging {
         }
     }
 
-    func setCachedToolsListResult(_ result: JSONValue) {
+    func reserveCachedToolsList(sessionId: String) -> CachedToolsListReservation? {
+        guard
+            let snapshot = toolsListState.withLockedValue({
+                state -> CachedToolsListReservation? in
+                guard let result = state.cachedResult,
+                      let upstreamIndex = state.cachedUpstreamIndex
+                else {
+                    return nil
+                }
+                return CachedToolsListReservation(
+                    result: result,
+                    upstreamIndex: upstreamIndex
+                )
+            })
+        else {
+            return nil
+        }
+
+        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        var probesToStart: [(upstreamIndex: Int, probeGeneration: UInt64)] = []
+        let isUsable = upstreamState.withLockedValue { state in
+            guard snapshot.upstreamIndex >= 0,
+                  snapshot.upstreamIndex < state.upstreamStates.count
+            else {
+                return false
+            }
+
+            let health = classifyHealthAndCollectProbeIfNeeded(
+                upstreamIndex: snapshot.upstreamIndex,
+                nowUptimeNs: nowUptimeNs,
+                state: &state,
+                probesToStart: &probesToStart
+            )
+            let isHealthyEnough: Bool
+            switch health {
+            case .healthy, .degraded:
+                isHealthyEnough = true
+            case .quarantined:
+                isHealthyEnough = false
+            }
+            return isHealthyEnough && state.upstreamStates[snapshot.upstreamIndex].isInitialized
+        }
+
+        for probe in probesToStart {
+            probeUpstreamHealth(
+                upstreamIndex: probe.upstreamIndex,
+                probeGeneration: probe.probeGeneration
+            )
+        }
+
+        guard isUsable else {
+            clearCachedToolsList(upstreamIndex: snapshot.upstreamIndex)
+            return nil
+        }
+
+        sessionsState.withLockedValue { state in
+            state.sessions[sessionId]?.pinnedUpstreamIndex = snapshot.upstreamIndex
+        }
+        return snapshot
+    }
+
+    func setCachedToolsListResult(_ result: JSONValue, upstreamIndex: Int) {
         guard isValidToolsListResult(result) else { return }
         toolsListState.withLockedValue { state in
             state.cachedResult = result
+            state.cachedUpstreamIndex = upstreamIndex
         }
     }
 
@@ -1433,6 +1502,7 @@ final class SessionManager: Sendable, SessionManaging {
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex] = DebugUpstreamState()
         }
+        clearCachedToolsList(upstreamIndex: upstreamIndex)
     }
 
     private func markUpstreamInitialized(upstreamIndex: Int) {
@@ -1795,7 +1865,7 @@ final class SessionManager: Sendable, SessionManaging {
             }
 
             markToolsListRefreshSucceeded(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs)
-            setCachedToolsListResult(result)
+            setCachedToolsListResult(result, upstreamIndex: upstreamIndex)
             logger.debug(
                 "tools/list refresh succeeded",
                 metadata: [
@@ -1817,6 +1887,18 @@ final class SessionManager: Sendable, SessionManaging {
             return true
         }
         return false
+    }
+
+    private func clearCachedToolsList(upstreamIndex: Int? = nil) {
+        toolsListState.withLockedValue { state in
+            if let upstreamIndex,
+               state.cachedUpstreamIndex != upstreamIndex
+            {
+                return
+            }
+            state.cachedResult = nil
+            state.cachedUpstreamIndex = nil
+        }
     }
 
     private func startUpstreamWarmInitialize(upstreamIndex: Int) {

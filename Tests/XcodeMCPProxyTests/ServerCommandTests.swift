@@ -25,6 +25,7 @@ struct ServerCommandTests {
         var options = ProxyServerOptions(
             forwardedArgs: [],
             showHelp: false,
+            showVersion: false,
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,

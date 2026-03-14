@@ -453,45 +453,43 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             if method == "tools/list",
                let headerSessionId,
                sessionManager.isInitialized(),
-               let cachedResult = sessionManager.cachedToolsListResult(),
                let originalIdValue = object["id"],
                let originalId = RPCId(any: originalIdValue) {
                 if headerSessionExists == false {
                     _ = sessionManager.session(id: headerSessionId)
                 }
-                let hasParams: Bool = {
-                    guard let params = object["params"] else { return false }
-                    return !(params is NSNull)
-                }()
-                // Even when tools/list is served from cache, pin the session so later upstream messages
-                // route consistently instead of fanning out across unpinned sessions.
-                let pinnedUpstreamIndex = sessionManager.chooseUpstreamIndex(sessionId: headerSessionId, shouldPin: true)
-                logger.debug(
-                    "tools/list cache hit",
-                    metadata: [
-                        "session": .string(headerSessionId),
-                        "has_params": .string(hasParams ? "true" : "false"),
-                        "pinned_upstream": .string(pinnedUpstreamIndex.map(String.init) ?? "none"),
+                if let cachedToolsList = sessionManager.reserveCachedToolsList(sessionId: headerSessionId) {
+                    let hasParams: Bool = {
+                        guard let params = object["params"] else { return false }
+                        return !(params is NSNull)
+                    }()
+                    logger.debug(
+                        "tools/list cache hit",
+                        metadata: [
+                            "session": .string(headerSessionId),
+                            "has_params": .string(hasParams ? "true" : "false"),
+                            "pinned_upstream": .string("\(cachedToolsList.upstreamIndex)"),
+                        ]
+                    )
+                    // Intentionally do not refresh tools/list in the background.
+                    // Once we have a valid tool list, keeping it stable for the lifetime of the proxy
+                    // avoids upstream churn (and Xcode permission prompts) caused by best-effort refreshes.
+                    let response: [String: Any] = [
+                        "jsonrpc": "2.0",
+                        "id": originalId.value.foundationObject,
+                        "result": cachedToolsList.result.foundationObject,
                     ]
-                )
-                // Intentionally do not refresh tools/list in the background.
-                // Once we have a valid tool list, keeping it stable for the lifetime of the proxy
-                // avoids upstream churn (and Xcode permission prompts) caused by best-effort refreshes.
-                let response: [String: Any] = [
-                    "jsonrpc": "2.0",
-                    "id": originalId.value.foundationObject,
-                    "result": cachedResult.foundationObject,
-                ]
-                if JSONSerialization.isValidJSONObject(response),
-                   let data = try? JSONSerialization.data(withJSONObject: response, options: []) {
-                    if prefersEventStream {
-                        sendSingleSSE(on: context.channel, data: data, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
-                    } else {
-                        var out = context.channel.allocator.buffer(capacity: data.count)
-                        out.writeBytes(data)
-                        sendJSON(on: context.channel, buffer: out, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
+                    if JSONSerialization.isValidJSONObject(response),
+                       let data = try? JSONSerialization.data(withJSONObject: response, options: []) {
+                        if prefersEventStream {
+                            sendSingleSSE(on: context.channel, data: data, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
+                        } else {
+                            var out = context.channel.allocator.buffer(capacity: data.count)
+                            out.writeBytes(data)
+                            sendJSON(on: context.channel, buffer: out, keepAlive: head.isKeepAlive, sessionId: headerSessionId, requestLog: requestLog)
+                        }
+                        return
                     }
-                    return
                 }
             }
         }
@@ -691,7 +689,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                        let object = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
                        let resultAny = object["result"],
                        let result = JSONValue(any: resultAny) {
-                        self.sessionManager.setCachedToolsListResult(result)
+                        self.sessionManager.setCachedToolsListResult(result, upstreamIndex: upstreamIndex)
                     }
                     if self.shouldNotifyUpstreamSuccess(for: responseData) {
                         for responseId in transform.responseIds {

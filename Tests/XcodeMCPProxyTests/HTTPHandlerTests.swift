@@ -770,8 +770,8 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIdCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        #expect(sessionManager.reserveCachedToolsListCallCount() == 1)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
@@ -845,8 +845,8 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIdCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        #expect(sessionManager.reserveCachedToolsListCallCount() == 1)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
@@ -1471,10 +1471,12 @@ private final class TestSessionManager: SessionManaging {
         var assignUpstreamIdCount = 0
         var initialized = false
         var cachedToolsList: JSONValue?
+        var cachedToolsListUpstreamIndex: Int?
         var refreshToolsListCalls = 0
         var upstreamSendCount = 0
         var upstreamIdMapping: [Int64: UpstreamMapping] = [:]
         var chooseUpstreamCalls: [ChooseUpstreamCall] = []
+        var reserveCachedToolsListCalls: [String] = []
         var availableUpstreamIndex: Int? = 0
         var requestTimeoutNotifications = 0
         var requestSuccessNotifications = 0
@@ -1529,10 +1531,26 @@ private final class TestSessionManager: SessionManaging {
         state.withLockedValue { $0.cachedToolsList }
     }
 
-    func setCachedToolsListResult(_ result: JSONValue) {
+    func reserveCachedToolsList(sessionId: String) -> CachedToolsListReservation? {
+        state.withLockedValue { state in
+            state.reserveCachedToolsListCalls.append(sessionId)
+            guard let result = state.cachedToolsList else {
+                return nil
+            }
+            let upstreamIndex = state.cachedToolsListUpstreamIndex ?? state.availableUpstreamIndex ?? 0
+            return CachedToolsListReservation(result: result, upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func setCachedToolsListResult(_ result: JSONValue, upstreamIndex: Int) {
         state.withLockedValue { state in
             state.cachedToolsList = result
+            state.cachedToolsListUpstreamIndex = upstreamIndex
         }
+    }
+
+    func setCachedToolsListResult(_ result: JSONValue) {
+        setCachedToolsListResult(result, upstreamIndex: 0)
     }
 
     func refreshToolsListIfNeeded() {
@@ -1677,6 +1695,10 @@ private final class TestSessionManager: SessionManaging {
 
     func lastChooseUpstreamShouldPin() -> Bool {
         state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
+    }
+
+    func reserveCachedToolsListCallCount() -> Int {
+        state.withLockedValue { $0.reserveCachedToolsListCalls.count }
     }
 
     func refreshToolsListCallCount() -> Int {

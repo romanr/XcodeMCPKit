@@ -789,6 +789,71 @@ struct SessionManagerTests {
         #expect(repinned == 0)
     }
 
+    @Test func sessionManagerReservesCachedToolsListOnItsSourceUpstream() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let manager = SessionManager(
+            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+
+        try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
+        let init0 = await upstream0.sent()
+        let init0Id = try extractUpstreamId(from: init0[0])
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0Id)))
+
+        try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+        let init1 = await upstream1.sent()
+        let init1Id = try extractUpstreamId(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1Id)))
+
+        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+        let sessionId = "session-cache-affinity"
+        _ = manager.session(id: sessionId)
+        manager.setCachedToolsListResult(
+            JSONValue(any: ["tools": [Any]()])!,
+            upstreamIndex: 1
+        )
+
+        let reservation = try #require(
+            manager.reserveCachedToolsList(sessionId: sessionId)
+        )
+        #expect(reservation.upstreamIndex == 1)
+        #expect(manager.chooseUpstreamIndex(sessionId: sessionId, shouldPin: true) == 1)
+    }
+
+    @Test func sessionManagerExitInvalidatesCachedToolsListForExitedUpstream() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let manager = SessionManager(config: config, eventLoop: eventLoop, upstreams: [upstream])
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        let initMessages = await upstream.sent()
+        let initId = try extractUpstreamId(from: initMessages[0])
+        await upstream.yield(.message(try makeInitializeResponse(id: initId)))
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.setCachedToolsListResult(
+            JSONValue(any: ["tools": [Any]()])!,
+            upstreamIndex: 0
+        )
+        #expect(manager.cachedToolsListResult() != nil)
+
+        await upstream.yield(.exit(1))
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.cachedToolsListResult() == nil
+            }
+        )
+    }
+
     @Test func sessionManagerRepinsWhenPinnedUpstreamIsQuarantinedByTimeouts() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

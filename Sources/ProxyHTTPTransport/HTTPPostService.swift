@@ -438,7 +438,7 @@ package final class HTTPPostService: Sendable {
         eventLoop: EventLoop,
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
-    ) async -> [String: Any]? {
+    ) async -> RefreshInternalToolResult {
         await forwardingService.callInternalTool(
             name: name,
             arguments: arguments,
@@ -459,14 +459,19 @@ package final class HTTPPostService: Sendable {
             sessionID: sessionID,
             eventLoop: eventLoop,
             toolCaller: { name, arguments, sessionID, eventLoop in
-                await self.callInternalTool(
+                switch await self.callInternalTool(
                     name: name,
                     arguments: arguments,
                     sessionID: sessionID,
                     eventLoop: eventLoop,
                     upstreamIndexOverride: upstreamIndexOverride,
                     requestTimeoutOverride: requestTimeoutOverride
-                )
+                ) {
+                case .success(let result):
+                    return result
+                case .timeout, .unavailable:
+                    return nil
+                }
             }
         )
     }

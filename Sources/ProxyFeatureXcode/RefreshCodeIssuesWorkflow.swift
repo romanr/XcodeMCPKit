@@ -32,6 +32,12 @@ package enum RefreshForwardAttemptResult: Sendable {
     case invalidUpstreamResponse
 }
 
+package enum RefreshInternalToolResult {
+    case success([String: Any])
+    case timeout
+    case unavailable
+}
+
 package struct RefreshCodeIssuesWorkflow {
     package typealias WindowsProvider =
         @Sendable (
@@ -49,7 +55,7 @@ package struct RefreshCodeIssuesWorkflow {
             _ eventLoop: EventLoop,
             _ upstreamIndexOverride: Int?,
             _ requestTimeoutOverride: TimeAmount?
-        ) async -> [String: Any]?
+        ) async -> RefreshInternalToolResult
     package typealias Forwarder =
         @Sendable (
             _ bodyData: Data,
@@ -64,6 +70,7 @@ package struct RefreshCodeIssuesWorkflow {
         200_000_000,
         500_000_000,
     ]
+    package static let minimumUpstreamFallbackBudgetSeconds: TimeInterval = 0.05
 
     private struct ExecutionBudget: Sendable {
         let deadlineUptimeNs: UInt64?
@@ -88,26 +95,34 @@ package struct RefreshCodeIssuesWorkflow {
             return deadlineUptimeNs - now
         }
 
-        func remainingTimeout(cappedAt capSeconds: TimeInterval? = nil) -> TimeAmount? {
+        func remainingTimeout(
+            cappedAt capSeconds: TimeInterval? = nil,
+            reserving reserveSeconds: TimeInterval = 0
+        ) -> TimeAmount? {
             guard let remainingNs = remainingNanoseconds() else {
                 if let capSeconds {
                     return makeRequestTimeout(capSeconds)
                 }
                 return nil
             }
-            guard remainingNs > 0 else { return nil }
+            let reservedNs = Self.nanoseconds(from: reserveSeconds)
+            guard remainingNs > reservedNs else { return nil }
 
-            var cappedNs = remainingNs
+            var cappedNs = remainingNs - reservedNs
             if let capSeconds {
                 cappedNs = min(cappedNs, Self.nanoseconds(from: capSeconds))
             }
+            guard cappedNs > 0 else { return nil }
 
             let maxTimeAmountNs = UInt64(Int64.max)
             return .nanoseconds(Int64(min(cappedNs, maxTimeAmountNs)))
         }
 
-        func stepTimeout(cappedAt capSeconds: TimeInterval) -> TimeAmount? {
-            remainingTimeout(cappedAt: capSeconds)
+        func stepTimeout(
+            cappedAt capSeconds: TimeInterval,
+            reserving reserveSeconds: TimeInterval = 0
+        ) -> TimeAmount? {
+            remainingTimeout(cappedAt: capSeconds, reserving: reserveSeconds)
         }
 
         func canDelay(_ delayNanoseconds: UInt64) -> Bool {
@@ -386,13 +401,16 @@ package struct RefreshCodeIssuesWorkflow {
             eventLoop: eventLoop,
             windowsProvider: { sessionID, eventLoop in
                 let timeout = executionBudget.stepTimeout(
-                    cappedAt: windowLookupTimeoutSeconds
+                    cappedAt: windowLookupTimeoutSeconds,
+                    reserving: Self.minimumUpstreamFallbackBudgetSeconds
                 )
-                if timeout == nil, executionBudget.isExhausted {
+                if timeout == nil {
                     self.debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "proxy.execution_budget_exhausted",
-                        state: "timed_out"
+                        step: executionBudget.isExhausted
+                            ? "proxy.execution_budget_exhausted"
+                            : "proxy.reserved_upstream_budget",
+                        state: executionBudget.isExhausted ? "timed_out" : nil
                     )
                     return nil
                 }
@@ -449,14 +467,17 @@ package struct RefreshCodeIssuesWorkflow {
             "glob": "**/" + Self.escapeGlobLiteralPath(target.workspaceRelativePath),
         ]
         let navigatorIssuesTimeout = executionBudget.stepTimeout(
-            cappedAt: navigatorIssuesTimeoutSeconds
+            cappedAt: navigatorIssuesTimeoutSeconds,
+            reserving: Self.minimumUpstreamFallbackBudgetSeconds
         )
-        if navigatorIssuesTimeout == nil, executionBudget.isExhausted {
-            let fallbackReason = "execution budget exhausted before navigator issues"
+        if navigatorIssuesTimeout == nil {
+            let fallbackReason = executionBudget.isExhausted
+                ? "execution budget exhausted before navigator issues"
+                : "reserved upstream fallback budget before navigator issues"
             debugState.updateStep(
                 requestID: debugRequestID,
                 step: "proxy.fallback_to_upstream",
-                state: "timed_out",
+                state: executionBudget.isExhausted ? "timed_out" : nil,
                 metadata: ["fallback_reason": fallbackReason]
             )
             logger.debug(
@@ -477,14 +498,41 @@ package struct RefreshCodeIssuesWorkflow {
                 "timeout_ms": Self.timeoutDescription(navigatorIssuesTimeout),
             ]
         )
-        guard let navigatorResult = await internalToolCaller(
+        let navigatorToolResult = await internalToolCaller(
             "XcodeListNavigatorIssues",
             arguments,
             sessionID,
             eventLoop,
             internalUpstreamIndex,
             navigatorIssuesTimeout
-        ) else {
+        )
+        let navigatorResult: [String: Any]
+        switch navigatorToolResult {
+        case .success(let result):
+            navigatorResult = result
+        case .timeout:
+            let fallbackReason = "navigator issues timed out"
+            debugState.updateStep(
+                requestID: debugRequestID,
+                step: "proxy.fallback_to_upstream",
+                state: "timed_out",
+                metadata: [
+                    "fallback_reason": fallbackReason,
+                    "resolved_target": target.resolvedFilePath,
+                ]
+            )
+            logger.debug(
+                "Refresh code issues proxy mode fell back to upstream refresh",
+                metadata: metadata.merging(
+                    [
+                        "fallback_reason": .string(fallbackReason),
+                        "resolved_target": .string(target.resolvedFilePath),
+                    ],
+                    uniquingKeysWith: { _, new in new }
+                )
+            )
+            return nil
+        case .unavailable:
             let fallbackReason = "navigator issues unavailable"
             debugState.updateStep(
                 requestID: debugRequestID,

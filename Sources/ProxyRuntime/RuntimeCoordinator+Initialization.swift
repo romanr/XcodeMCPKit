@@ -293,10 +293,17 @@ extension RuntimeCoordinator {
     }
 
     func xcodeChatClientVersion(for clientName: String) -> String? {
+        let defaults = UserDefaults(suiteName: "com.apple.dt.Xcode")?.dictionaryRepresentation() ?? [:]
+        return xcodeChatClientVersion(for: clientName, defaults: defaults)
+    }
+
+    func xcodeChatClientVersion(for clientName: String, defaults: [String: Any]) -> String? {
         let normalizedName = normalizedChatClientName(clientName)
         guard !normalizedName.isEmpty else { return nil }
 
-        let defaults = UserDefaults(suiteName: "com.apple.dt.Xcode")?.dictionaryRepresentation() ?? [:]
+        var exactMatches: [(stem: String, version: String)] = []
+        var aliasMatches: [(stem: String, version: String)] = []
+
         for (key, value) in defaults {
             guard key.hasPrefix("IDEChat"), key.hasSuffix("Version") else { continue }
             guard let raw = value as? String, let version = xcodeChatVersionValue(from: raw) else {
@@ -308,11 +315,29 @@ extension RuntimeCoordinator {
                     .dropFirst("IDEChat".count)
                     .dropLast("Version".count)
             )
+
+            let normalizedStem = normalizedChatClientName(stem)
+            if normalizedStem == normalizedName {
+                exactMatches.append((stem, version))
+                continue
+            }
+
             if chatClientAliases(forVersionStem: stem).contains(normalizedName) {
-                return version
+                aliasMatches.append((stem, version))
             }
         }
-        return nil
+
+        let orderedExactMatches = exactMatches.sorted { lhs, rhs in
+            lhs.stem.localizedStandardCompare(rhs.stem) == .orderedAscending
+        }
+        if let match = orderedExactMatches.first {
+            return match.version
+        }
+
+        let orderedAliasMatches = aliasMatches.sorted { lhs, rhs in
+            lhs.stem.localizedStandardCompare(rhs.stem) == .orderedAscending
+        }
+        return orderedAliasMatches.first?.version
     }
 
     func xcodeChatVersionValue(forDefaultsKey defaultsKey: String) -> String? {

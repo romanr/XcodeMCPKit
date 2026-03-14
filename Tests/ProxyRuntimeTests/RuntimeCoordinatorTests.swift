@@ -603,7 +603,7 @@ struct RuntimeCoordinatorTests {
         #expect(clientInfo["version"] as? String == manager.defaultClientVersion(for: "Claude"))
     }
 
-    @Test func defaultClientVersionTreatsClaudeAndClaudeCodeAsSameAutoVersion() async throws {
+    @Test func xcodeChatClientVersionFallsBackToCodeAliasWhenExactStemMissing() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -612,7 +612,34 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        #expect(manager.defaultClientVersion(for: "Claude") == manager.defaultClientVersion(for: "Claude Code"))
+        let version = manager.xcodeChatClientVersion(
+            for: "Claude",
+            defaults: [
+                "IDEChatClaudeCodeVersion": #"{"version":"9.9.9"}"#,
+            ]
+        )
+
+        #expect(version == "9.9.9")
+    }
+
+    @Test func xcodeChatClientVersionPrefersExactStemMatchOverGenericCodeAlias() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let version = manager.xcodeChatClientVersion(
+            for: "Claude",
+            defaults: [
+                "IDEChatClaudeVersion": #"{"version":"1.2.3"}"#,
+                "IDEChatClaudeCodeVersion": #"{"version":"9.9.9"}"#,
+            ]
+        )
+
+        #expect(version == "1.2.3")
     }
 
     @Test func sessionManagerFallsBackToDefaultInitializeParamsWhenConfigFileIsInvalid()

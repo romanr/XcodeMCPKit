@@ -11,7 +11,6 @@ extension XcodeMCPProxyServerCommand {
             hasHostFlag: scan.hasHostFlag,
             hasPortFlag: scan.hasPortFlag,
             hasConfigFlag: scan.hasConfigFlag,
-            hasXcodePIDFlag: scan.hasXcodePIDFlag,
             hasRefreshCodeIssuesModeFlag: scan.hasRefreshCodeIssuesModeFlag,
             forceRestart: scan.forceRestart,
             dryRun: scan.dryRun
@@ -20,9 +19,7 @@ extension XcodeMCPProxyServerCommand {
 
     package static func applyDefaults(
         from environment: [String: String],
-        to options: inout ProxyServerOptions,
-        resolveXcodePID: () -> String?,
-        stderr: (String) -> Void
+        to options: inout ProxyServerOptions
     ) throws {
         if !options.hasListenFlag && !options.hasHostFlag && !options.hasPortFlag {
             if let listen = nonEmpty(environment["LISTEN"]) {
@@ -50,16 +47,6 @@ extension XcodeMCPProxyServerCommand {
             options.forwardedArgs += ["--config", configPath]
         }
 
-        if !options.hasXcodePIDFlag {
-            if let explicit = nonEmpty(environment["XCODE_PID"]) ?? nonEmpty(environment["MCP_XCODE_PID"]) {
-                options.forwardedArgs += ["--xcode-pid", explicit]
-            } else if let resolved = resolveXcodePID() {
-                options.forwardedArgs += ["--xcode-pid", resolved]
-            } else {
-                stderr("warning: Xcode PID not found; running without --xcode-pid.")
-            }
-        }
-
         if isTruthy(environment["LAZY_INIT"]) {
             throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
         }
@@ -82,7 +69,6 @@ extension XcodeMCPProxyServerCommand {
           --port port
           --config path
           --upstream-processes n
-          --xcode-pid pid
           --refresh-code-issues-mode proxy|upstream
           --force-restart
           --dry-run
@@ -93,7 +79,6 @@ extension XcodeMCPProxyServerCommand {
           - Use xcode-mcp-proxy as a STDIO adapter for Codex / Claude Code.
           - Default listen: localhost:8765 (override via --listen / --host / --port or env LISTEN/HOST/PORT).
           - Initialize config path: --config or env \(CLIParser.configPathEnv)
-          - Xcode PID is detected automatically when not specified.
           - When the listen port is already in use, rerun with --force-restart to terminate an existing xcode-mcp-proxy-server.
         """
     }

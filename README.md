@@ -125,12 +125,11 @@ See Quick Start for how to launch.
 | `--upstream-args a,b,c` | `mcpbridge` args (comma-separated) |
 | `--upstream-arg value` | Append a single `mcpbridge` arg |
 | `--upstream-processes n` | Spawn `n` upstream `mcpbridge` processes (default: 1, max: 10) |
-| `--xcode-pid pid` | Xcode PID |
 | `--session-id id` | Explicit Xcode MCP session ID |
 | `--max-body-bytes n` | Max request body size |
 | `--request-timeout seconds` | Request timeout (`0` disables non-initialize timeouts; `initialize` still uses a bounded handshake timeout) |
 | `--config path` | Path to proxy config TOML for overriding the upstream handshake |
-| `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
+| `--refresh-code-issues-mode mode` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
 | `--force-restart` | If the listen port is in use, terminate an existing `xcode-mcp-proxy-server` and restart |
 
 #### Environment Variables
@@ -140,8 +139,7 @@ See Quick Start for how to launch.
 | `LISTEN` | Listen address; example: `127.0.0.1:8765` |
 | `HOST` | Listen host; used with `PORT` when `LISTEN` is unset |
 | `PORT` | Listen port; used with `HOST` when `LISTEN` is unset |
-| `XCODE_PID` | Xcode PID |
-| `MCP_XCODE_PID` | Xcode PID fallback |
+| `MCP_XCODE_PID` | Passed through to upstream `mcpbridge`; the proxy itself does not parse it |
 | `MCP_XCODE_SESSION_ID` | Optional explicit upstream session ID |
 | `MCP_XCODE_CONFIG` | Proxy config TOML path; `--config` takes precedence |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream` |

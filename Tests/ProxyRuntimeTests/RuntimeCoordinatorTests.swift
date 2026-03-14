@@ -7,6 +7,26 @@ import XcodeMCPTestSupport
 
 @Suite(.serialized)
 struct RuntimeCoordinatorTests {
+    @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
+        let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
+
+        #expect(environment["MCP_XCODE_PID"] == nil)
+    }
+
+    @Test func defaultUpstreamsPassThroughInheritedMCPXcodePIDEnvironment() async throws {
+        let environment = try withEnvironmentVariables(
+            [
+                "XCODE_PID": "1234",
+                "MCP_XCODE_PID": "5678",
+            ]
+        ) {
+            try defaultUpstreamEnvironment(sharedSessionID: nil)
+        }
+
+        #expect(environment["XCODE_PID"] == nil)
+        #expect(environment["MCP_XCODE_PID"] == "5678")
+    }
+
     @Test func defaultUpstreamsDoNotInjectSessionIDWhenConfigDoesNotSpecifyOne() async throws {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
 
@@ -1642,7 +1662,6 @@ private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {
         listenPort: 0,
         upstreamCommand: "xcrun",
         upstreamArgs: ["mcpbridge"],
-        xcodePID: nil,
         upstreamSessionID: nil,
         maxBodyBytes: 1024,
         requestTimeout: requestTimeout,
@@ -1674,6 +1693,31 @@ private func upstreamEnvironment(from upstream: UpstreamProcess) throws -> [Stri
             as? [String: String],
         "UpstreamProcess.Config should include environment for tests"
     )
+}
+
+private func withEnvironmentVariables<T>(
+    _ values: [String: String],
+    body: () throws -> T
+) throws -> T {
+    let originalValues = values.keys.reduce(into: [String: String?]()) { result, key in
+        result[key] = ProcessInfo.processInfo.environment[key]
+    }
+
+    for (key, value) in values {
+        _ = unsafe setenv(key, value, 1)
+    }
+
+    defer {
+        for (key, value) in originalValues {
+            if let value {
+                _ = unsafe setenv(key, value, 1)
+            } else {
+                _ = unsafe unsetenv(key)
+            }
+        }
+    }
+
+    return try body()
 }
 
 private actor AlwaysOverloadedUpstreamClient: UpstreamClient {

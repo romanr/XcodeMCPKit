@@ -12,7 +12,6 @@ struct ServerCommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
-                resolveXcodePID: { "4321" },
                 terminateExistingServer: { _, _ in false },
                 makeServer: { _ in IntegrationRecordingProxyServer() },
                 isAddressAlreadyInUse: { _ in false },
@@ -30,7 +29,7 @@ struct ServerCommandIntegrationTests {
 
         #expect(exitCode == 0)
         let line = try #require(output.snapshot().first)
-        #expect(line == "xcode-mcp-proxy-server --listen 127.0.0.1:7777 --config /tmp/proxy-config.toml --xcode-pid 4321")
+        #expect(line == "xcode-mcp-proxy-server --listen 127.0.0.1:7777 --config /tmp/proxy-config.toml")
     }
 
     @Test func serverCommandStartsInjectedProxyServer() async throws {
@@ -41,7 +40,6 @@ struct ServerCommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 stderr: { _ in },
-                resolveXcodePID: { "1234" },
                 terminateExistingServer: { host, port in
                     restarted.append("\(host):\(port)")
                     return true

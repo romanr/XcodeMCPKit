@@ -5,6 +5,7 @@ extension XcodeMCPProxyInstallCommand {
         let scan = ProxyCLIInvocationScanner.scanInstall(args)
         var invocation = InstallCommandInvocation()
         invocation.showHelp = scan.showHelp
+        invocation.showVersion = scan.showVersion
         return invocation
     }
 
@@ -17,6 +18,7 @@ extension XcodeMCPProxyInstallCommand {
           --bindir path   Install to this directory (overrides --prefix)
           --prefix path   Install to <prefix>/bin (default: ~/.local)
           --dry-run       Print actions without copying files
+          --version       Show version
           -h, --help      Show this help
 
         Examples:

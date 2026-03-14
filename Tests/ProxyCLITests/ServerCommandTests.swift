@@ -21,16 +21,105 @@ struct ServerCommandTests {
             "--refresh-code-issues-mode", "upstream",
         ])
         #expect(options.showHelp == false)
+        #expect(options.showVersion == false)
         #expect(options.hasListenFlag == true)
         #expect(options.hasRefreshCodeIssuesModeFlag == true)
         #expect(options.forceRestart == true)
         #expect(options.dryRun == true)
     }
 
+    @Test func serverCommandPrintsVersionBeforeValidation() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { _ in },
+                terminateExistingServer: { _, _ in
+                    Issue.record("terminateExistingServer should not be called for --version")
+                    return false
+                },
+                makeServer: { _ in
+                    Issue.record("makeServer should not be called for --version")
+                    return RecordingProxyServer()
+                },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--version", "--url", "http://localhost:8765/mcp"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(ProxyBuildInfo.version)"])
+    }
+
+    @Test func serverCommandPrintsVersionWhenFlagAppearsAsConfigValue() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { _ in },
+                terminateExistingServer: { _, _ in
+                    Issue.record("terminateExistingServer should not be called for --version")
+                    return false
+                },
+                makeServer: { _ in
+                    Issue.record("makeServer should not be called for --version")
+                    return RecordingProxyServer()
+                },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--config", "--version"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(ProxyBuildInfo.version)"])
+    }
+
+    @Test func serverCommandHelpWinsOverVersion() async throws {
+        let output = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { errors.append($0) },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in
+                    Issue.record("makeServer should not be called for --help")
+                    return RecordingProxyServer()
+                },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--version", "--help", "--url"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(errors.snapshot().isEmpty)
+        let line = try #require(output.snapshot().first)
+        #expect(line.contains("Usage:"))
+    }
+
     @Test func serverCommandAppliesEnvironmentDefaultsWithoutXcodePID() throws {
         var options = ProxyServerOptions(
             forwardedArgs: [],
             showHelp: false,
+            showVersion: false,
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,
@@ -61,6 +150,7 @@ struct ServerCommandTests {
         var options = ProxyServerOptions(
             forwardedArgs: ["--config", "/tmp/explicit.toml"],
             showHelp: false,
+            showVersion: false,
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,
@@ -86,6 +176,7 @@ struct ServerCommandTests {
         var options = ProxyServerOptions(
             forwardedArgs: [],
             showHelp: false,
+            showVersion: false,
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,

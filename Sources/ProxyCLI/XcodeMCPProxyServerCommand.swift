@@ -7,6 +7,7 @@ extension ProxyServer: ProxyServerCommandServer {}
 package struct ProxyServerOptions {
     package var forwardedArgs: [String]
     package var showHelp: Bool
+    package var showVersion: Bool
     package var hasListenFlag: Bool
     package var hasHostFlag: Bool
     package var hasPortFlag: Bool
@@ -18,6 +19,7 @@ package struct ProxyServerOptions {
     package init(
         forwardedArgs: [String],
         showHelp: Bool,
+        showVersion: Bool,
         hasListenFlag: Bool,
         hasHostFlag: Bool,
         hasPortFlag: Bool,
@@ -28,6 +30,7 @@ package struct ProxyServerOptions {
     ) {
         self.forwardedArgs = forwardedArgs
         self.showHelp = showHelp
+        self.showVersion = showVersion
         self.hasListenFlag = hasListenFlag
         self.hasHostFlag = hasHostFlag
         self.hasPortFlag = hasPortFlag

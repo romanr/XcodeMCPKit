@@ -6,6 +6,7 @@ extension XcodeMCPProxyCLICommand {
         let scan = ProxyCLIInvocationScanner.scanAdapter(args)
         var invocation = CLICommandInvocation()
         invocation.showHelp = scan.showHelp
+        invocation.showVersion = scan.showVersion
         invocation.usesRemovedURLHelper = scan.usesRemovedURLHelper
         invocation.removedFlagMessage = scan.removedFlagMessage
         invocation.hasExplicitURL = scan.hasExplicitURL
@@ -73,6 +74,7 @@ extension XcodeMCPProxyCLICommand {
         Options:
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
           --url url                  Explicit upstream URL (default: env/discovery/http://localhost:8765/mcp)
+          --version                  Show version
           -h, --help                 Show help
 
         Environment:

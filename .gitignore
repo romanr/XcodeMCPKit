@@ -3,8 +3,8 @@
 /Packages
 xcuserdata/
 DerivedData/
+.swiftpm/xcode/
 .swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 .codex/tmp/
 /dist

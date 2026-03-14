@@ -43,7 +43,7 @@ public final class ProxyServer {
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
         writeDiscovery(resolvedHost: host, port: port)
-        logger.info("Xcode MCP proxy listening on http://\(displayHost):\(port)")
+        logger.info("\(Self.listeningLogLine(displayHost: displayHost, port: port))")
         return (host, port)
     }
 
@@ -167,6 +167,10 @@ public final class ProxyServer {
         default:
             return resolvedHost
         }
+    }
+
+    package static func listeningLogLine(displayHost: String, port: Int) -> String {
+        "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(ProxyBuildInfo.version))"
     }
 }
 

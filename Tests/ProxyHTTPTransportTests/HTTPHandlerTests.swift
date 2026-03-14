@@ -2433,17 +2433,12 @@ struct HTTPHandlerTests {
             internalUpstreamChooser: { _ in 0 },
             internalToolCaller: { name, _, _, _, _, requestTimeoutOverride in
                 guard name == "XcodeListNavigatorIssues" else {
-                    return nil
+                    return .unavailable
                 }
                 observedTimeouts.withLockedValue { values in
                     values.append(requestTimeoutOverride?.nanoseconds ?? -1)
                 }
-                let simulatedDelayNanos: UInt64 = 200_000_000
-                if let requestTimeoutOverride {
-                    let timeoutNanos = UInt64(max(0, requestTimeoutOverride.nanoseconds))
-                    try? await Task.sleep(nanoseconds: min(simulatedDelayNanos, timeoutNanos))
-                }
-                return nil
+                return .timeout
             },
             forwarder: { _, _, _, _, _, _ in
                 .success(upstreamFallbackData)
@@ -3117,7 +3112,7 @@ struct HTTPHandlerTests {
     }
 
     @Test func httpRefreshProxyInternalToolCallsDoNotResetUpstreamSuccessState() async throws {
-        var config = makeConfig(requestTimeout: 0.05)
+        var config = makeConfig(requestTimeout: 0.2)
         config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }

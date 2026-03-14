@@ -179,7 +179,7 @@ package struct MCPForwardingService: Sendable {
         eventLoop: EventLoop,
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
-    ) async -> [String: Any]? {
+    ) async -> RefreshInternalToolResult {
         let requestObject: [String: Any] = [
             "jsonrpc": "2.0",
             "id": "__internal-\(UUID().uuidString)",
@@ -192,7 +192,7 @@ package struct MCPForwardingService: Sendable {
 
         guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
         else {
-            return nil
+            return .unavailable
         }
 
         let prepared: PreparedRequest
@@ -204,11 +204,11 @@ package struct MCPForwardingService: Sendable {
                 shouldPinUpstreamOverride: false,
                 upstreamIndexOverride: upstreamIndexOverride
             ) else {
-                return nil
+                return .unavailable
             }
             prepared = candidate
         } catch {
-            return nil
+            return .unavailable
         }
 
         let session = sessionManager.session(id: sessionID)
@@ -221,7 +221,7 @@ package struct MCPForwardingService: Sendable {
                 requestTimeoutOverride: requestTimeoutOverride
             )
         } catch {
-            return nil
+            return .unavailable
         }
 
         let resolution: ResponseResolution
@@ -243,17 +243,23 @@ package struct MCPForwardingService: Sendable {
             )
         }
 
-        guard case .success(let responseData) = resolution,
-            let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
+        switch resolution {
+        case .success(let responseData):
+            guard let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
                 as? [String: Any],
-            let result = object["result"] as? [String: Any]
-        else {
-            return nil
+                let result = object["result"] as? [String: Any]
+            else {
+                return .unavailable
+            }
+            if let isError = result["isError"] as? Bool, isError {
+                return .unavailable
+            }
+            return .success(result)
+        case .timeout:
+            return .timeout
+        case .invalidUpstreamResponse:
+            return .unavailable
         }
-        if let isError = result["isError"] as? Bool, isError {
-            return nil
-        }
-        return result
     }
 
     private static func rewriteUnsupportedResourcesListResponseIfNeeded(

@@ -7,12 +7,44 @@ import XcodeMCPTestSupport
 
 @Suite(.serialized)
 struct RuntimeCoordinatorTests {
+    @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
+        let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
+
+        #expect(environment["MCP_XCODE_PID"] == nil)
+    }
+
+    @Test func defaultUpstreamsPassThroughInheritedMCPXcodePIDEnvironment() async throws {
+        let environment = try withEnvironmentVariables(
+            [
+                "XCODE_PID": "1234",
+                "MCP_XCODE_PID": "5678",
+            ]
+        ) {
+            try defaultUpstreamEnvironment(sharedSessionID: nil)
+        }
+
+        #expect(environment["XCODE_PID"] == nil)
+        #expect(environment["MCP_XCODE_PID"] == "5678")
+    }
+
+    @Test func defaultUpstreamsDoNotInjectSessionIDWhenConfigDoesNotSpecifyOne() async throws {
+        let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
+
+        #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
+    }
+
+    @Test func defaultUpstreamsInjectExplicitSessionIDWhenConfigured() async throws {
+        let environment = try defaultUpstreamEnvironment(sharedSessionID: "session-explicit")
+
+        #expect(environment["MCP_XCODE_SESSION_ID"] == "session-explicit")
+    }
+
     @Test func sessionManagerQueuesInitializeRequests() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -51,7 +83,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -92,7 +124,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -133,7 +165,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -180,7 +212,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -209,7 +241,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -255,7 +287,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
 
@@ -316,7 +348,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 1)
+        let config = makeConfig(requestTimeout: 1)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -355,7 +387,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -380,7 +412,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 0.1)
+        let config = makeConfig(requestTimeout: 0.1)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -423,7 +455,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -482,7 +514,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
         #expect(manager.isInitialized() == false)
@@ -494,12 +526,214 @@ struct RuntimeCoordinatorTests {
         _ = manager
     }
 
+    @Test func initializeTimeoutRemainsBoundedWhenRequestTimeoutIsDisabled() throws {
+        let timeout = MCPMethodDispatcher.timeoutForInitialize(defaultSeconds: 0)
+        #expect(timeout?.nanoseconds == TimeAmount.seconds(60).nanoseconds)
+    }
+
+    @Test func sessionManagerStillAutoInitializesWhenRequestTimeoutIsDisabled() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 0)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+    }
+
+    @Test func sessionManagerUsesInitializeParamsOverrideFromConfigFile() async throws {
+        let configPath = try makeTempProxyConfigFile(
+            """
+            [upstream_handshake]
+            clientName = "custom-proxy"
+
+            [upstream_handshake.capabilities]
+            roots = true
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.configPath = configPath
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
+        let params = try #require(object?["params"] as? [String: Any])
+        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+        let capabilities = try #require(params["capabilities"] as? [String: Any])
+
+        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(clientInfo["name"] as? String == "custom-proxy")
+        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(capabilities["roots"] as? Bool == true)
+    }
+
+    @Test func sessionManagerAutoResolvesInitializeVersionFromConfiguredClientName() async throws {
+        let configPath = try makeTempProxyConfigFile(
+            """
+            [upstream_handshake]
+            clientName = "Claude"
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.configPath = configPath
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
+        let params = try #require(object?["params"] as? [String: Any])
+        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+
+        #expect(clientInfo["name"] as? String == "Claude")
+        #expect(clientInfo["version"] as? String == manager.defaultClientVersion(for: "Claude"))
+    }
+
+    @Test func xcodeChatClientVersionFallsBackToCodeAliasWhenExactStemMissing() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let version = manager.xcodeChatClientVersion(
+            for: "Claude",
+            defaults: [
+                "IDEChatClaudeCodeVersion": #"{"version":"9.9.9"}"#,
+            ]
+        )
+
+        #expect(version == "9.9.9")
+    }
+
+    @Test func xcodeChatClientVersionPrefersExactStemMatchOverGenericCodeAlias() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let version = manager.xcodeChatClientVersion(
+            for: "Claude",
+            defaults: [
+                "IDEChatClaudeVersion": #"{"version":"1.2.3"}"#,
+                "IDEChatClaudeCodeVersion": #"{"version":"9.9.9"}"#,
+            ]
+        )
+
+        #expect(version == "1.2.3")
+    }
+
+    @Test func sessionManagerFallsBackToDefaultInitializeParamsWhenConfigFileIsInvalid()
+        async throws
+    {
+        let configPath = try makeTempProxyConfigFile(
+            """
+            [upstream_handshake
+            protocolVersion = "broken"
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.configPath = configPath
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
+        let params = try #require(object?["params"] as? [String: Any])
+        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+
+        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(clientInfo["name"] as? String == manager.defaultProxyClientName())
+        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+    }
+
+    @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
+        async throws
+    {
+        let configPath = try makeTempProxyConfigFile(
+            """
+            [upstream_handshake]
+            clientName = "configured-proxy"
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 0.1)
+        config.configPath = configPath
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                let snapshot = manager.testStateSnapshot()
+                return snapshot.initInFlight == false && snapshot.hasInitResult == false
+            }
+        )
+
+        _ = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": [
+                    "protocolVersion": "2099-01-01",
+                    "capabilities": [String: Any](),
+                    "clientInfo": [
+                        "name": "downstream-client",
+                        "version": "9.9",
+                    ],
+                ],
+            ],
+            on: eventLoop
+        )
+
+        let resent = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        let object = try JSONSerialization.jsonObject(with: resent, options: []) as? [String: Any]
+        let params = try #require(object?["params"] as? [String: Any])
+        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+
+        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(clientInfo["name"] as? String == "configured-proxy")
+        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+    }
+
     @Test func sessionManagerSendsInitializedOnce() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -534,7 +768,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -578,7 +812,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 5)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -647,7 +881,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
+        let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -703,7 +937,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
+        let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -757,7 +991,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -834,7 +1068,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -898,7 +1132,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -947,7 +1181,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -972,7 +1206,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -1073,7 +1307,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        var config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        var config = makeConfig(requestTimeout: 2)
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
@@ -1152,7 +1386,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -1204,7 +1438,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -1245,7 +1479,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 0.3)
+        let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -1313,7 +1547,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = AlwaysOverloadedUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -1354,7 +1588,7 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = AlwaysOverloadedUpstreamClient()
-        let config = makeConfig(eagerInitialize: false, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
@@ -1384,7 +1618,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let config = makeConfig(eagerInitialize: true, requestTimeout: 2)
+        let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
         defer { manager.shutdown() }
@@ -1450,19 +1684,68 @@ struct RuntimeCoordinatorTests {
     }
 }
 
-private func makeConfig(eagerInitialize: Bool, requestTimeout: TimeInterval) -> ProxyConfig {
+private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {
     ProxyConfig(
         listenHost: "127.0.0.1",
         listenPort: 0,
         upstreamCommand: "xcrun",
         upstreamArgs: ["mcpbridge"],
-        xcodePID: nil,
         upstreamSessionID: nil,
         maxBodyBytes: 1024,
         requestTimeout: requestTimeout,
-        eagerInitialize: eagerInitialize,
         prewarmToolsList: false
     )
+}
+
+private func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {
+    var config = makeConfig(requestTimeout: 5)
+    config.upstreamSessionID = sharedSessionID
+    let upstreams = RuntimeCoordinator.makeDefaultUpstreams(
+        config: config,
+        sharedSessionID: sharedSessionID,
+        count: 1
+    )
+    let upstream = try #require(upstreams.first)
+    return try upstreamEnvironment(from: upstream)
+}
+
+private func upstreamEnvironment(from upstream: UpstreamProcess) throws -> [String: String] {
+    let mirror = Mirror(reflecting: upstream)
+    let config = try #require(
+        mirror.children.first(where: { $0.label == "config" })?.value,
+        "UpstreamProcess should expose a stored config for tests"
+    )
+    let configMirror = Mirror(reflecting: config)
+    return try #require(
+        configMirror.children.first(where: { $0.label == "environment" })?.value
+            as? [String: String],
+        "UpstreamProcess.Config should include environment for tests"
+    )
+}
+
+private func withEnvironmentVariables<T>(
+    _ values: [String: String],
+    body: () throws -> T
+) throws -> T {
+    let originalValues = values.keys.reduce(into: [String: String?]()) { result, key in
+        result[key] = ProcessInfo.processInfo.environment[key]
+    }
+
+    for (key, value) in values {
+        _ = unsafe setenv(key, value, 1)
+    }
+
+    defer {
+        for (key, value) in originalValues {
+            if let value {
+                _ = unsafe setenv(key, value, 1)
+            } else {
+                _ = unsafe unsetenv(key)
+            }
+        }
+    }
+
+    return try body()
 }
 
 private actor AlwaysOverloadedUpstreamClient: UpstreamClient {
@@ -1570,6 +1853,15 @@ private func makeInitializeRequest(id: Int) -> [String: Any] {
             ],
         ],
     ]
+}
+
+private func makeTempProxyConfigFile(_ contents: String) throws -> String {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let fileURL = directory.appendingPathComponent("proxy-config.toml")
+    try contents.write(to: fileURL, atomically: true, encoding: .utf8)
+    return fileURL.path
 }
 
 private func makeInitializeResponse(id: Int64) throws -> Data {

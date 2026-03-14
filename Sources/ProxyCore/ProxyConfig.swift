@@ -23,11 +23,10 @@ public struct ProxyConfig: Sendable {
     public var upstreamCommand: String
     public var upstreamArgs: [String]
     public var upstreamProcessCount: Int
-    public var xcodePID: Int?
     public var upstreamSessionID: String?
     public var maxBodyBytes: Int
     public var requestTimeout: TimeInterval
-    public var eagerInitialize: Bool
+    public var configPath: String?
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
@@ -40,11 +39,10 @@ public struct ProxyConfig: Sendable {
         upstreamCommand: String,
         upstreamArgs: [String],
         upstreamProcessCount: Int = 1,
-        xcodePID: Int? = nil,
         upstreamSessionID: String? = nil,
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
-        eagerInitialize: Bool = true,
+        configPath: String? = nil,
         transport: ProxyTransport = .http,
         stdioUpstreamURL: URL? = nil,
         stdioUpstreamSource: StdioUpstreamSource? = nil,
@@ -56,11 +54,10 @@ public struct ProxyConfig: Sendable {
         self.upstreamCommand = upstreamCommand
         self.upstreamArgs = upstreamArgs
         self.upstreamProcessCount = upstreamProcessCount
-        self.xcodePID = xcodePID
         self.upstreamSessionID = upstreamSessionID
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
-        self.eagerInitialize = eagerInitialize
+        self.configPath = configPath
         self.transport = transport
         self.stdioUpstreamURL = stdioUpstreamURL
         self.stdioUpstreamSource = stdioUpstreamSource
@@ -84,6 +81,11 @@ public struct CLIParser {
     private static let defaultStdioUpstream = "http://localhost:8765/mcp"
     private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
     private static let refreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
+    public static let configPathEnv = "MCP_XCODE_CONFIG"
+    public static let removedLazyInitMessage =
+        "The proxy always uses eager initialization; --lazy-init has been removed."
+    public static let removedXcodePIDMessage =
+        "Xcode PID support has been removed; --xcode-pid is no longer supported."
 
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         return try parse(args: args, environment: environment, discoveryOverrideURL: nil)
@@ -99,11 +101,10 @@ public struct CLIParser {
         var upstreamCommand = "xcrun"
         var upstreamArgs = ["mcpbridge"]
         var upstreamProcessCount = 1
-        var xcodePID: Int?
         var upstreamSessionID: String?
         var maxBodyBytes = 1_048_576
         var requestTimeout: TimeInterval = 300
-        var eagerInitialize = true
+        var configPath: String?
         var stdioUpstreamURL: URL?
         var stdioUpstreamSource: StdioUpstreamSource?
         var refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
@@ -170,11 +171,7 @@ public struct CLIParser {
                 upstreamProcessCount = parsed
                 index += 2
             case "--xcode-pid":
-                guard index + 1 < args.count else {
-                    throw CLIError.message("--xcode-pid requires a value")
-                }
-                xcodePID = Int(args[index + 1])
-                index += 2
+                throw CLIError.message(Self.removedXcodePIDMessage)
             case "--session-id":
                 guard index + 1 < args.count else {
                     throw CLIError.message("--session-id requires a value")
@@ -193,6 +190,12 @@ public struct CLIParser {
                 }
                 requestTimeout = TimeInterval(args[index + 1]) ?? requestTimeout
                 index += 2
+            case "--config":
+                guard index + 1 < args.count else {
+                    throw CLIError.message("--config requires a value")
+                }
+                configPath = args[index + 1]
+                index += 2
             case "--refresh-code-issues-mode":
                 guard index + 1 < args.count else {
                     throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
@@ -204,8 +207,7 @@ public struct CLIParser {
                 hasExplicitRefreshCodeIssuesMode = true
                 index += 2
             case "--lazy-init":
-                eagerInitialize = false
-                index += 1
+                throw CLIError.message(Self.removedLazyInitMessage)
             case "--stdio":
                 if index + 1 < args.count {
                     let candidate = args[index + 1]
@@ -228,9 +230,6 @@ public struct CLIParser {
             }
         }
 
-        if xcodePID == nil, let value = environment["MCP_XCODE_PID"], let parsed = Int(value) {
-            xcodePID = parsed
-        }
         if upstreamSessionID == nil, let value = environment["MCP_XCODE_SESSION_ID"], !value.isEmpty {
             upstreamSessionID = value
         }
@@ -242,6 +241,9 @@ public struct CLIParser {
             }
             refreshCodeIssuesMode = parsed
         }
+        if configPath == nil, let value = nonEmpty(environment[configPathEnv]) {
+            configPath = value
+        }
         let transport: ProxyTransport = stdioUpstreamURL == nil ? .http : .stdio
 
         return ProxyConfig(
@@ -250,11 +252,10 @@ public struct CLIParser {
             upstreamCommand: upstreamCommand,
             upstreamArgs: upstreamArgs,
             upstreamProcessCount: upstreamProcessCount,
-            xcodePID: xcodePID,
             upstreamSessionID: upstreamSessionID,
             maxBodyBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
-            eagerInitialize: eagerInitialize,
+            configPath: configPath,
             transport: transport,
             stdioUpstreamURL: stdioUpstreamURL,
             stdioUpstreamSource: stdioUpstreamSource,
@@ -274,13 +275,12 @@ public struct CLIParser {
           --upstream-args a,b,c      Upstream args (default: mcpbridge)
           --upstream-arg value       Append a single upstream arg
           --upstream-processes n     Upstream process count (default: 1, max: 10)
-          --xcode-pid pid            Xcode PID (env MCP_XCODE_PID)
           --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
           --max-body-bytes n         Max request body size (default: 1048576)
-          --request-timeout seconds  Request timeout (default: 300, 0 disables)
+          --request-timeout seconds  Request timeout (default: 300, 0 disables non-initialize timeouts)
+          --config path              Path to proxy config TOML (env \(configPathEnv))
           --refresh-code-issues-mode proxy|upstream
                                      Refresh implementation (default: proxy; env \(refreshCodeIssuesModeEnv))
-          --lazy-init                Initialize upstream only on first client request
           --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)
           -h, --help                 Show help
         """

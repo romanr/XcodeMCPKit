@@ -38,13 +38,42 @@ struct CLIParserTests {
         #expect(config.listenPort == 0)
     }
 
-    @Test func cliParsesTimeoutAndLazyInit() async throws {
-        let config = try CLIParser.parse(
-            args: ["xcode-mcp-proxy", "--request-timeout", "12", "--lazy-init"],
-            environment: [:]
-        )
-        #expect(config.requestTimeout == 12)
-        #expect(config.eagerInitialize == false)
+    @Test func cliRejectsRemovedLazyInit() async throws {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--request-timeout", "12", "--lazy-init"],
+                environment: [:]
+            )
+        }
+
+        do {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--request-timeout", "12", "--lazy-init"],
+                environment: [:]
+            )
+            #expect(Bool(false))
+        } catch let error as CLIError {
+            #expect(error.description == CLIParser.removedLazyInitMessage)
+        }
+    }
+
+    @Test func cliRejectsRemovedXcodePID() async throws {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--xcode-pid", "1234"],
+                environment: [:]
+            )
+        }
+
+        do {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--xcode-pid", "1234"],
+                environment: [:]
+            )
+            #expect(Bool(false))
+        } catch let error as CLIError {
+            #expect(error.description == CLIParser.removedXcodePIDMessage)
+        }
     }
 
     @Test func cliParsesRefreshCodeIssuesMode() async throws {
@@ -54,6 +83,15 @@ struct CLIParserTests {
         )
 
         #expect(config.refreshCodeIssuesMode == .upstream)
+    }
+
+    @Test func cliParsesConfigPath() async throws {
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--config", "/tmp/proxy-config.toml"],
+            environment: [:]
+        )
+
+        #expect(config.configPath == "/tmp/proxy-config.toml")
     }
 
     @Test func cliParsesUpstreamProcesses() async throws {
@@ -94,14 +132,38 @@ struct CLIParserTests {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy"],
             environment: [
-                "MCP_XCODE_PID": "1234",
+                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "MCP_XCODE_SESSION_ID": "session-xyz",
                 "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
             ]
         )
-        #expect(config.xcodePID == 1234)
+        #expect(config.configPath == "/tmp/proxy-config.toml")
         #expect(config.upstreamSessionID == "session-xyz")
         #expect(config.refreshCodeIssuesMode == .upstream)
+    }
+
+    @Test func cliIgnoresRemovedXcodePIDEnvironment() async throws {
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy"],
+            environment: [
+                "XCODE_PID": "1234",
+                "MCP_XCODE_PID": "5678",
+                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+            ]
+        )
+
+        #expect(config.configPath == "/tmp/proxy-config.toml")
+    }
+
+    @Test func cliExplicitConfigOverridesEnvironment() async throws {
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--config", "/tmp/explicit.toml"],
+            environment: [
+                "MCP_XCODE_CONFIG": "/tmp/environment.toml"
+            ]
+        )
+
+        #expect(config.configPath == "/tmp/explicit.toml")
     }
 
     @Test func cliExplicitRefreshCodeIssuesModeOverridesEnvironment() async throws {

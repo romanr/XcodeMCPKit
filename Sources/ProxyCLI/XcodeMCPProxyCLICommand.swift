@@ -20,6 +20,7 @@ package struct CLICommandLogSink {
 package struct CLICommandInvocation {
     package var showHelp = false
     package var usesRemovedURLHelper = false
+    package var removedFlagMessage: String?
     package var hasExplicitURL = false
     package var hasStdioFlag = false
     package var serverOnlyFlag: String?

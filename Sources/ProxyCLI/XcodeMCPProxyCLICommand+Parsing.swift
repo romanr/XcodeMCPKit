@@ -7,6 +7,7 @@ extension XcodeMCPProxyCLICommand {
         var invocation = CLICommandInvocation()
         invocation.showHelp = scan.showHelp
         invocation.usesRemovedURLHelper = scan.usesRemovedURLHelper
+        invocation.removedFlagMessage = scan.removedFlagMessage
         invocation.hasExplicitURL = scan.hasExplicitURL
         invocation.hasStdioFlag = scan.hasStdioFlag
         invocation.serverOnlyFlag = scan.serverOnlyFlag
@@ -79,6 +80,7 @@ extension XcodeMCPProxyCLICommand {
 
         Notes:
           - Proxy server: xcode-mcp-proxy-server
+          - --config is only supported by xcode-mcp-proxy-server
           - Discovery file: \(discoveryFileURL.path)
         """
     }

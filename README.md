@@ -117,17 +117,6 @@ See Quick Start for how to launch.
 - initialization: eager at startup
 - discovery: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
 
-#### Environment Variables
-
-- `MCP_XCODE_PID` (alternative to `--xcode-pid`)
-- `MCP_XCODE_SESSION_ID` (fixes the Xcode MCP session ID; usually not needed)
-- `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` (`proxy` or `upstream`; controls how `XcodeRefreshCodeIssuesInFile` is served)
-- `MCP_LOG_LEVEL` (log level: trace|debug|info|notice|warning|error|critical)
-
-Logs are written to stderr.
-
-Note: when using `--upstream-processes` > 1, fixing the session id via `--session-id` / `MCP_XCODE_SESSION_ID` can help reduce permission dialog prompts in Xcode.
-
 #### Options
 
 | Option | Description |
@@ -136,13 +125,38 @@ Note: when using `--upstream-processes` > 1, fixing the session id via `--sessio
 | `--upstream-args a,b,c` | `mcpbridge` args (comma-separated) |
 | `--upstream-arg value` | Append a single `mcpbridge` arg |
 | `--upstream-processes n` | Spawn `n` upstream `mcpbridge` processes (default: 1, max: 10) |
-| `--xcode-pid pid` | Xcode PID |
-| `--session-id id` | Xcode MCP session ID (usually not needed) |
+| `--session-id id` | Explicit Xcode MCP session ID |
 | `--max-body-bytes n` | Max request body size |
-| `--request-timeout seconds` | Request timeout (`0` disables) |
-| `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
-| `--lazy-init` | Delay initialization until first request |
+| `--request-timeout seconds` | Request timeout (`0` disables non-initialize timeouts; `initialize` still uses a bounded handshake timeout) |
+| `--config path` | Path to proxy config TOML for overriding the upstream handshake |
+| `--refresh-code-issues-mode mode` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
 | `--force-restart` | If the listen port is in use, terminate an existing `xcode-mcp-proxy-server` and restart |
+
+#### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `LISTEN` | Listen address; example: `127.0.0.1:8765` |
+| `HOST` | Listen host; used with `PORT` when `LISTEN` is unset |
+| `PORT` | Listen port; used with `HOST` when `LISTEN` is unset |
+| `MCP_XCODE_PID` | Passed through to upstream `mcpbridge`; the proxy itself does not parse it |
+| `MCP_XCODE_SESSION_ID` | Optional explicit upstream session ID |
+| `MCP_XCODE_CONFIG` | Proxy config TOML path; `--config` takes precedence |
+| `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream` |
+| `MCP_LOG_LEVEL` | Log level: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` |
+
+Logs are written to stderr.
+
+#### Proxy Config
+
+| Key | Type | Default |
+|-----|------|---------|
+| `upstream_handshake.protocolVersion` | string | `"2025-03-26"` |
+| `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
+| `upstream_handshake.clientVersion` | string | `"dev"` |
+| `upstream_handshake.capabilities` | table | `{}` |
+
+If `clientVersion` is omitted, the proxy auto-resolves it from the Xcode `IDEChat*Version` entry matching `clientName` when available.
 
 ### Adapter: `xcode-mcp-proxy`
 
@@ -155,7 +169,9 @@ Note: when using `--upstream-processes` > 1, fixing the session id via `--sessio
 
 #### Environment Variables
 
-- `XCODE_MCP_PROXY_ENDPOINT` (override upstream URL; `--url` takes precedence)
+| Variable | Description |
+|----------|-------------|
+| `XCODE_MCP_PROXY_ENDPOINT` | Override upstream URL; `--url` takes precedence |
 
 ## Troubleshooting
 

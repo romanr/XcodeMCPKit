@@ -3610,11 +3610,9 @@ private func makeConfig(
         listenPort: 0,
         upstreamCommand: "xcrun",
         upstreamArgs: ["mcpbridge"],
-        xcodePID: nil,
         upstreamSessionID: nil,
         maxBodyBytes: maxBodyBytes,
-        requestTimeout: requestTimeout,
-        eagerInitialize: false
+        requestTimeout: requestTimeout
     )
 }
 

@@ -119,27 +119,25 @@ extension RuntimeCoordinator {
             initializeGate.resetCachedInitializeResult()
         }
 
-        if config.eagerInitialize {
-            if upstreamIndex == 0 {
-                if shouldResetGlobalInit || !globalInit.hadGlobalInit {
-                    startEagerInitializePrimary()
-                } else {
-                    startUpstreamWarmInitialize(upstreamIndex: 0)
-                }
-            } else if globalInit.hadGlobalInit {
-                if shouldResetGlobalInit {
-                    let primaryInitInFlight = upstreamSelectionPolicy.primaryInitInFlight()
-                    if primaryInitInFlight {
-                        initializeGate
-                            .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
-                    } else {
-                        initializeGate
-                            .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(false)
-                        startEagerInitializePrimary()
-                    }
-                }
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+        if upstreamIndex == 0 {
+            if shouldResetGlobalInit || !globalInit.hadGlobalInit {
+                startEagerInitializePrimary()
+            } else {
+                startUpstreamWarmInitialize(upstreamIndex: 0)
             }
+        } else if globalInit.hadGlobalInit {
+            if shouldResetGlobalInit {
+                let primaryInitInFlight = upstreamSelectionPolicy.primaryInitInFlight()
+                if primaryInitInFlight {
+                    initializeGate
+                        .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
+                } else {
+                    initializeGate
+                        .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(false)
+                    startEagerInitializePrimary()
+                }
+            }
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }
 

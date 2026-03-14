@@ -35,6 +35,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
+        .package(url: "https://github.com/dduan/TOMLDecoder.git", from: "0.4.3"),
     ],
     targets: [
         .target(
@@ -51,6 +52,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "TOMLDecoder", package: "TOMLDecoder"),
             ],
             path: "Sources/ProxyCore",
             swiftSettings: strictSwiftSettings

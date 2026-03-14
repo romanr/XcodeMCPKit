@@ -1,8 +1,10 @@
 import Foundation
+import XcodeMCPProxy
 
 package struct ProxyCLIAdapterScan {
     package var showHelp = false
     package var usesRemovedURLHelper = false
+    package var removedFlagMessage: String?
     package var hasExplicitURL = false
     package var hasStdioFlag = false
     package var serverOnlyFlag: String?
@@ -14,8 +16,7 @@ package struct ProxyCLIServerScan {
     package var hasListenFlag = false
     package var hasHostFlag = false
     package var hasPortFlag = false
-    package var hasXcodePIDFlag = false
-    package var hasLazyInitFlag = false
+    package var hasConfigFlag = false
     package var hasRefreshCodeIssuesModeFlag = false
     package var forceRestart = false
     package var dryRun = false
@@ -27,6 +28,7 @@ package struct ProxyCLIInstallScan {
 
 package enum ProxyCLIInvocationScanner {
     private static let serverOnlyFlags: Set<String> = [
+        "--config",
         "--listen",
         "--host",
         "--port",
@@ -35,13 +37,12 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-args",
         "--upstream-arg",
         "--upstream-processes",
-        "--xcode-pid",
         "--session-id",
         "--refresh-code-issues-mode",
-        "--lazy-init",
     ]
 
     private static let serverOnlyValueFlags: Set<String> = [
+        "--config",
         "--listen",
         "--host",
         "--port",
@@ -50,12 +51,12 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-args",
         "--upstream-arg",
         "--upstream-processes",
-        "--xcode-pid",
         "--session-id",
         "--refresh-code-issues-mode",
     ]
 
     private static let serverForwardedValueFlags: Set<String> = [
+        "--config",
         "--listen",
         "--host",
         "--port",
@@ -63,7 +64,6 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-args",
         "--upstream-arg",
         "--upstream-processes",
-        "--xcode-pid",
         "--session-id",
         "--max-body-bytes",
         "--request-timeout",
@@ -94,6 +94,16 @@ package enum ProxyCLIInvocationScanner {
             case "--stdio":
                 scan.hasStdioFlag = true
                 cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
+            case "--lazy-init":
+                if scan.removedFlagMessage == nil {
+                    scan.removedFlagMessage = CLIParser.removedLazyInitMessage
+                }
+                cursor.advance()
+            case "--xcode-pid":
+                if scan.removedFlagMessage == nil {
+                    scan.removedFlagMessage = CLIParser.removedXcodePIDMessage
+                }
+                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
             case "--request-timeout":
                 cursor.advancePastCurrentAndOptionalValue(where: shouldConsumeRequestTimeoutValue)
             case let flag where serverOnlyFlags.contains(flag):
@@ -138,19 +148,18 @@ package enum ProxyCLIInvocationScanner {
                 throw ProxyServerCommandError.message(
                     "--url is not supported in server mode (use xcode-mcp-proxy)"
                 )
+            case "--xcode-pid":
+                throw ProxyServerCommandError.message(CLIParser.removedXcodePIDMessage)
             case "--lazy-init":
-                scan.hasLazyInitFlag = true
-                scan.forwardedArgs.append(arg)
-                cursor.advance()
-                continue
+                throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
             case "--listen":
                 scan.hasListenFlag = true
             case "--host":
                 scan.hasHostFlag = true
             case "--port":
                 scan.hasPortFlag = true
-            case "--xcode-pid":
-                scan.hasXcodePIDFlag = true
+            case "--config":
+                scan.hasConfigFlag = true
             case "--refresh-code-issues-mode":
                 scan.hasRefreshCodeIssuesModeFlag = true
             default:

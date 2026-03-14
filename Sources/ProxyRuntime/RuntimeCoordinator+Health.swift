@@ -306,7 +306,7 @@ extension RuntimeCoordinator {
         guard shouldClear else { return }
         responseCorrelationStore.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
-        guard upstreamIndex == 0, config.eagerInitialize else { return }
+        guard upstreamIndex == 0 else { return }
         let shouldRetryEagerInit = initializeGate.consumeRetryAfterWarmInitFailureIfNeeded()
         if shouldRetryEagerInit {
             startEagerInitializePrimary()

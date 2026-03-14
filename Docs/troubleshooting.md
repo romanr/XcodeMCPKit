@@ -82,8 +82,5 @@ When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagn
 - If a client bursts too many queued refreshes for the same tab in `upstream` mode, the proxy may return `refresh queue overloaded` instead of letting the queue grow without bound.
 - If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
 
-## Xcode dialog does not appear
-Make sure `--lazy-init` is not set (when enabled, the dialog appears on the first request instead of at startup).
-
 ## `session not found`
 Ensure the client is using the same session.

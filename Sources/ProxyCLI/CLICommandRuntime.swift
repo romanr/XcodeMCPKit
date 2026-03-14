@@ -25,6 +25,11 @@ package struct CLICommandRuntime {
             return 1
         }
 
+        if let removedFlagMessage = invocation.removedFlagMessage {
+            logSink.error(removedFlagMessage)
+            return 1
+        }
+
         if invocation.serverOnlyFlag != nil {
             logSink.error(
                 "This option is only supported by xcode-mcp-proxy-server (proxy server)."

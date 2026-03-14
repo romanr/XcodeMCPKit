@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import ProxyCLI
+import XcodeMCPProxy
 
 @Suite
 struct CLICommandTests {
@@ -80,6 +81,63 @@ struct CLICommandTests {
             "This option is only supported by xcode-mcp-proxy-server (proxy server).",
             "Run: xcode-mcp-proxy-server --help",
         ])
+    }
+
+    @Test func cliCommandRejectsConfigFlag() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { output.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--config", "/tmp/proxy-config.toml"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [
+            "This option is only supported by xcode-mcp-proxy-server (proxy server).",
+            "Run: xcode-mcp-proxy-server --help",
+        ])
+    }
+
+    @Test func cliCommandRejectsRemovedLazyInitFlag() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { output.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { _, _, _, _ in RecordingCLIAdapter() },
+                input: .standardInput,
+                output: .standardOutput
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--lazy-init"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [CLIParser.removedLazyInitMessage])
     }
 
     @Test func cliCommandBuildsAdapterFromResolvedEnvironmentURL() async throws {

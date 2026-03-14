@@ -116,16 +116,6 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 - max body size: `1048576` bytes
 - initialization: eager at startup
 - discovery: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
-#### 環境変数
-
-- `MCP_XCODE_PID`（`--xcode-pid` の代替）
-- `MCP_XCODE_SESSION_ID`（Xcode MCP セッション ID を固定。通常は不要）
-- `MCP_XCODE_REFRESH_CODE_ISSUES_MODE`（`proxy` または `upstream`。`XcodeRefreshCodeIssuesInFile` の実装モードを切り替え）
-- `MCP_LOG_LEVEL`（ログレベル: trace|debug|info|notice|warning|error|critical）
-
-ログは stderr に出力されます。
-
-Note: `--upstream-processes` > 1 を使う場合、`--session-id` / `MCP_XCODE_SESSION_ID` でセッション ID を固定すると、Xcode の許可ダイアログを減らせる場合があります。
 
 #### オプション
 
@@ -136,12 +126,39 @@ Note: `--upstream-processes` > 1 を使う場合、`--session-id` / `MCP_XCODE_S
 | `--upstream-arg value` | `mcpbridge` 引数を1つ追加 |
 | `--upstream-processes n` | upstream `mcpbridge` を `n` プロセス起動（default: 1, max: 10） |
 | `--xcode-pid pid` | 対象 Xcode の PID |
-| `--session-id id` | Xcode MCP セッション ID（通常は不要） |
+| `--session-id id` | 明示的な Xcode MCP セッション ID |
 | `--max-body-bytes n` | 最大ボディサイズ |
-| `--request-timeout seconds` | リクエストタイムアウト（`0` で無制限） |
+| `--request-timeout seconds` | リクエストタイムアウト（`0` で通常リクエストは無制限、`initialize` はハンドシェイク保護のため有界タイムアウトを維持） |
+| `--config path` | upstream へ送る handshake を上書きする proxy config TOML のパス |
 | `--refresh-code-issues-mode proxy|upstream` | `XcodeRefreshCodeIssuesInFile` を proxy 側の navigator issues 経由（既定）で返すか、Xcode の live diagnostics へ直通するかを切り替え |
-| `--lazy-init` | 初回リクエストまで初期化を遅延 |
 | `--force-restart` | listen ポートが使用中の場合、既存の `xcode-mcp-proxy-server` を終了して起動し直す |
+
+#### 環境変数
+
+| 変数 | 説明 |
+|------|------|
+| `LISTEN` | listen アドレス。例: `127.0.0.1:8765` |
+| `HOST` | listen ホスト。`LISTEN` 未指定時に `PORT` と組み合わせて使用 |
+| `PORT` | listen ポート。`LISTEN` 未指定時に `HOST` と組み合わせて使用 |
+| `XCODE_PID` | Xcode PID |
+| `MCP_XCODE_PID` | Xcode PID のフォールバック |
+| `MCP_XCODE_SESSION_ID` | 任意の明示的 upstream session ID |
+| `MCP_XCODE_CONFIG` | proxy config TOML のパス。`--config` が優先 |
+| `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` または `upstream` |
+| `MCP_LOG_LEVEL` | ログレベル: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` |
+
+ログは stderr に出力されます。
+
+#### Proxy Config
+
+| キー | 型 | 既定値 |
+|------|----|--------|
+| `upstream_handshake.protocolVersion` | string | `"2025-03-26"` |
+| `upstream_handshake.clientName` | string | `"Codex"` |
+| `upstream_handshake.clientVersion` | string | `auto` |
+| `upstream_handshake.capabilities` | table | `{}` |
+
+`clientVersion` を省略した場合、`clientName` に対応する Xcode の `IDEChat*Version` があれば、その version を自動で使います。
 
 ### アダプタ: `xcode-mcp-proxy`
 
@@ -154,7 +171,9 @@ Note: `--upstream-processes` > 1 を使う場合、`--session-id` / `MCP_XCODE_S
 
 #### 環境変数
 
-- `XCODE_MCP_PROXY_ENDPOINT`（上流 URL を上書き。`--url` が優先）
+| 変数 | 説明 |
+|------|------|
+| `XCODE_MCP_PROXY_ENDPOINT` | 上流 URL を上書き。`--url` が優先 |
 
 ## トラブルシューティング
 

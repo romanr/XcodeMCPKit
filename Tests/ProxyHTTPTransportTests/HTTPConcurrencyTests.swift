@@ -207,7 +207,6 @@ private struct TestHTTPServer {
             upstreamSessionID: nil,
             maxBodyBytes: 1_048_576,
             requestTimeout: 5,
-            eagerInitialize: false,
             refreshCodeIssuesMode: .upstream
         )
         let upstream = providedUpstream ?? EchoUpstreamClient()

@@ -85,14 +85,14 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamClient]
     package let toolsListCache = ToolsListCache()
+    package let initializeParamsOverride: [String: JSONValue]?
 
     package let upstreamSelectionPolicy: UpstreamSelectionPolicy
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
-        let sharedSessionID = config.upstreamSessionID ?? UUID().uuidString
         let upstreams = Self.makeDefaultUpstreams(
-            config: config, sharedSessionID: sharedSessionID, count: count)
+            config: config, sharedSessionID: config.upstreamSessionID, count: count)
         self.init(config: config, eventLoop: eventLoop, upstreams: upstreams)
     }
 
@@ -105,6 +105,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.responseCorrelationStore = ResponseCorrelationStore(upstreamCount: upstreams.count)
         self.upstreamSelectionPolicy = UpstreamSelectionPolicy(upstreamCount: upstreams.count)
+        self.initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
+            configPath: config.configPath,
+            logger: ProxyLogging.make("config")
+        )
 
         var tasks: [Task<Void, Never>] = []
         tasks.reserveCapacity(upstreams.count)
@@ -135,9 +139,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             taskBox = tasks
         }
 
-        if config.eagerInitialize {
-            startEagerInitializePrimary()
-        }
+        startEagerInitializePrimary()
     }
 
     package func session(id: String) -> SessionContext {
@@ -392,11 +394,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         if shouldSend {
-            var initRequest = requestObject
             let upstreamID = responseCorrelationStore.assignInitialize(upstreamIndex: 0)
             initializeGate.setPrimaryInitUpstreamID(upstreamID)
             markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
-            initRequest["id"] = upstreamID
+            let initRequest = makeInternalInitializeRequest(id: upstreamID)
             if let data = try? JSONSerialization.data(withJSONObject: initRequest, options: []) {
                 sendUpstream(data, upstreamIndex: 0)
             } else {

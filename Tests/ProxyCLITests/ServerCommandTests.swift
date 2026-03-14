@@ -34,18 +34,18 @@ struct ServerCommandTests {
             hasListenFlag: false,
             hasHostFlag: false,
             hasPortFlag: false,
+            hasConfigFlag: false,
             hasXcodePIDFlag: false,
-            hasLazyInitFlag: false,
             hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )
 
-        XcodeMCPProxyServerCommand.applyDefaults(
+        try XcodeMCPProxyServerCommand.applyDefaults(
             from: [
                 "HOST": "127.0.0.1",
                 "PORT": "9999",
-                "LAZY_INIT": "1",
+                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
             ],
             to: &options,
@@ -55,9 +55,91 @@ struct ServerCommandTests {
 
         #expect(options.forwardedArgs == [
             "--listen", "127.0.0.1:9999",
+            "--config", "/tmp/proxy-config.toml",
             "--xcode-pid", "4242",
-            "--lazy-init",
             "--refresh-code-issues-mode", "upstream",
+        ])
+    }
+
+    @Test func serverCommandExplicitConfigOverridesEnvironment() throws {
+        var options = ProxyServerOptions(
+            forwardedArgs: ["--config", "/tmp/explicit.toml"],
+            showHelp: false,
+            hasListenFlag: false,
+            hasHostFlag: false,
+            hasPortFlag: false,
+            hasConfigFlag: true,
+            hasXcodePIDFlag: false,
+            hasRefreshCodeIssuesModeFlag: false,
+            forceRestart: false,
+            dryRun: false
+        )
+
+        try XcodeMCPProxyServerCommand.applyDefaults(
+            from: [
+                "MCP_XCODE_CONFIG": "/tmp/environment.toml",
+            ],
+            to: &options,
+            resolveXcodePID: { nil },
+            stderr: { _ in }
+        )
+
+        #expect(options.forwardedArgs.contains("--config"))
+        #expect(options.forwardedArgs.contains("/tmp/explicit.toml"))
+        #expect(options.forwardedArgs.contains("/tmp/environment.toml") == false)
+    }
+
+    @Test func serverCommandRejectsRemovedLazyInitEnvironment() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { output.append($0) },
+                resolveXcodePID: { "5678" },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in RecordingProxyServer() },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--dry-run"],
+            environment: ["LAZY_INIT": "true"]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [
+            "error: \(CLIParser.removedLazyInitMessage)",
+            "run with --help for usage",
+        ])
+    }
+
+    @Test func serverCommandRejectsRemovedLazyInitFlagBeforeDryRun() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { output.append($0) },
+                resolveXcodePID: { "5678" },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in RecordingProxyServer() },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--lazy-init", "--dry-run"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(output.snapshot() == [
+            "error: \(CLIParser.removedLazyInitMessage)",
+            "run with --help for usage",
         ])
     }
 
@@ -205,17 +287,18 @@ struct ServerCommandTests {
         let exitCode = await command.run(
             args: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: [
+                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "HOST": "127.0.0.1",
                 "PORT": "9999",
-                "LAZY_INIT": "true",
             ]
         )
 
         #expect(exitCode == 0)
         let line = try #require(output.snapshot().first)
         #expect(line.contains("--listen 127.0.0.1:9999"))
+        #expect(line.contains("--config /tmp/proxy-config.toml"))
         #expect(line.contains("--xcode-pid 5678"))
-        #expect(line.contains("--lazy-init"))
+        #expect(line.contains("--lazy-init") == false)
     }
 
     @Test func serverCommandTreatsHelpOnlyAsTopLevelFlag() async throws {

@@ -15,12 +15,12 @@ package struct ProxyServerCommandRuntime {
                 dependencies.stdout(XcodeMCPProxyServerCommand.serverUsage())
                 return 0
             }
-        XcodeMCPProxyServerCommand.applyDefaults(
-            from: environment,
-            to: &options,
-            resolveXcodePID: dependencies.resolveXcodePID,
-            stderr: dependencies.stderr
-        )
+            try XcodeMCPProxyServerCommand.applyDefaults(
+                from: environment,
+                to: &options,
+                resolveXcodePID: dependencies.resolveXcodePID,
+                stderr: dependencies.stderr
+            )
 
             let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])
             if isDryRun {

@@ -10,8 +10,8 @@ extension XcodeMCPProxyServerCommand {
             hasListenFlag: scan.hasListenFlag,
             hasHostFlag: scan.hasHostFlag,
             hasPortFlag: scan.hasPortFlag,
+            hasConfigFlag: scan.hasConfigFlag,
             hasXcodePIDFlag: scan.hasXcodePIDFlag,
-            hasLazyInitFlag: scan.hasLazyInitFlag,
             hasRefreshCodeIssuesModeFlag: scan.hasRefreshCodeIssuesModeFlag,
             forceRestart: scan.forceRestart,
             dryRun: scan.dryRun
@@ -23,7 +23,7 @@ extension XcodeMCPProxyServerCommand {
         to options: inout ProxyServerOptions,
         resolveXcodePID: () -> String?,
         stderr: (String) -> Void
-    ) {
+    ) throws {
         if !options.hasListenFlag && !options.hasHostFlag && !options.hasPortFlag {
             if let listen = nonEmpty(environment["LISTEN"]) {
                 options.forwardedArgs += ["--listen", listen]
@@ -44,6 +44,12 @@ extension XcodeMCPProxyServerCommand {
             options.forwardedArgs += ["--port", "8765"]
         }
 
+        if !options.hasConfigFlag,
+           let configPath = nonEmpty(environment[CLIParser.configPathEnv])
+        {
+            options.forwardedArgs += ["--config", configPath]
+        }
+
         if !options.hasXcodePIDFlag {
             if let explicit = nonEmpty(environment["XCODE_PID"]) ?? nonEmpty(environment["MCP_XCODE_PID"]) {
                 options.forwardedArgs += ["--xcode-pid", explicit]
@@ -54,8 +60,8 @@ extension XcodeMCPProxyServerCommand {
             }
         }
 
-        if !options.hasLazyInitFlag, isTruthy(environment["LAZY_INIT"]) {
-            options.forwardedArgs.append("--lazy-init")
+        if isTruthy(environment["LAZY_INIT"]) {
+            throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
         }
 
         if !options.hasRefreshCodeIssuesModeFlag,
@@ -74,10 +80,10 @@ extension XcodeMCPProxyServerCommand {
           --listen host:port
           --host host
           --port port
+          --config path
           --upstream-processes n
           --xcode-pid pid
           --refresh-code-issues-mode proxy|upstream
-          --lazy-init
           --force-restart
           --dry-run
           -h, --help
@@ -86,6 +92,7 @@ extension XcodeMCPProxyServerCommand {
           - Starts the HTTP/SSE proxy server (and spawns xcrun mcpbridge as upstream processes).
           - Use xcode-mcp-proxy as a STDIO adapter for Codex / Claude Code.
           - Default listen: localhost:8765 (override via --listen / --host / --port or env LISTEN/HOST/PORT).
+          - Initialize config path: --config or env \(CLIParser.configPathEnv)
           - Xcode PID is detected automatically when not specified.
           - When the listen port is already in use, rerun with --force-restart to terminate an existing xcode-mcp-proxy-server.
         """

@@ -7,9 +7,11 @@ package enum MCPMethodDispatcher {
         "resources/list",
         "resources/templates/list",
     ]
+    private static let initializeFallbackTimeoutSeconds: TimeInterval = 60
 
     package static func timeoutForInitialize(defaultSeconds: TimeInterval) -> TimeAmount? {
-        timeout(defaultSeconds: defaultSeconds, capSeconds: 60)
+        let effectiveDefault = defaultSeconds > 0 ? defaultSeconds : initializeFallbackTimeoutSeconds
+        return timeout(defaultSeconds: effectiveDefault, capSeconds: initializeFallbackTimeoutSeconds)
     }
 
     package static func timeoutForMethod(

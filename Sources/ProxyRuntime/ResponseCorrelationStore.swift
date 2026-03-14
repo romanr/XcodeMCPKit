@@ -5,14 +5,18 @@ import ProxyCore
 extension RuntimeCoordinator {
     static func makeDefaultUpstreams(
         config: ProxyConfig,
-        sharedSessionID: String,
+        sharedSessionID: String?,
         count: Int
     ) -> [UpstreamProcess] {
         var environment = ProcessInfo.processInfo.environment
         if let pid = config.xcodePID {
             environment["MCP_XCODE_PID"] = String(pid)
         }
-        environment["MCP_XCODE_SESSION_ID"] = sharedSessionID
+        if let sharedSessionID, !sharedSessionID.isEmpty {
+            environment["MCP_XCODE_SESSION_ID"] = sharedSessionID
+        } else {
+            environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
+        }
         let upstreamConfig = UpstreamProcess.Config(
             command: config.upstreamCommand,
             args: config.upstreamArgs,

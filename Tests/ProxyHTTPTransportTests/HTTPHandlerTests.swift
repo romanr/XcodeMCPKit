@@ -3613,8 +3613,7 @@ private func makeConfig(
         xcodePID: nil,
         upstreamSessionID: nil,
         maxBodyBytes: maxBodyBytes,
-        requestTimeout: requestTimeout,
-        eagerInitialize: false
+        requestTimeout: requestTimeout
     )
 }
 

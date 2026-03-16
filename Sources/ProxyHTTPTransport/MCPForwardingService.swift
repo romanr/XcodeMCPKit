@@ -226,11 +226,10 @@ package struct MCPForwardingService: Sendable {
                 descriptor: descriptor,
                 on: eventLoop
             ) { selectedUpstreamIndex in
-                let resolvedUpstreamIndex = upstreamIndexOverride ?? selectedUpstreamIndex
                 self.sessionManager.activateRequestLease(
                     leaseID,
                     requestIDKey: nil,
-                    upstreamIndex: resolvedUpstreamIndex,
+                    upstreamIndex: selectedUpstreamIndex,
                     timeout: nil
                 )
                 let parsedRequestJSON: Any
@@ -248,7 +247,7 @@ package struct MCPForwardingService: Sendable {
                         bodyData: bodyData,
                         parsedRequestJSON: parsedRequestJSON,
                         sessionID: sessionID,
-                        upstreamIndexOverride: resolvedUpstreamIndex
+                        upstreamIndexOverride: selectedUpstreamIndex
                     ) else {
                         return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                     }
@@ -300,7 +299,7 @@ package struct MCPForwardingService: Sendable {
             sessionManager.failRequestLease(
                 leaseID,
                 terminalState: .failed,
-                reason: .invalidUpstreamResponse
+                reason: .upstreamUnavailable
             )
             return .unavailable
         }

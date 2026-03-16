@@ -3260,6 +3260,47 @@ struct HTTPHandlerTests {
         }
         await server.shutdown()
     }
+
+    @Test func forwardingServiceInternalToolUsesScheduledUpstreamWhenOverrideDiffers()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 0.2)
+        let eventLoop = EmbeddedEventLoop()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListNavigatorIssues")
+                return .immediate(
+                    try makeToolSuccessResponse(id: originalID, text: "{\"issues\":[]}")
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+
+        let forwardingService = MCPForwardingService(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListNavigatorIssues",
+            arguments: ["tabIdentifier": "windowtab-1"],
+            sessionID: "session-mismatch",
+            eventLoop: eventLoop,
+            upstreamIndexOverride: 0
+        )
+        switch result {
+        case .success:
+            break
+        case .timeout:
+            Issue.record("expected the scheduled upstream dispatch to succeed")
+        case .unavailable:
+            Issue.record("expected the scheduled upstream to be usable")
+        }
+        #expect(sessionManager.sentToolRequests() == ["XcodeListNavigatorIssues@1"])
+    }
 }
 
 private enum HTTPTestError: Error {

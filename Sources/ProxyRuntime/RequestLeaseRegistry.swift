@@ -16,6 +16,7 @@ package enum RequestLeaseReleaseReason: String, Codable, Sendable {
     case completed
     case timedOut
     case invalidUpstreamResponse
+    case upstreamUnavailable
     case upstreamExit
     case upstreamOverloaded
     case stdoutProtocolViolation

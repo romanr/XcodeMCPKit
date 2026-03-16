@@ -87,10 +87,6 @@ extension RuntimeCoordinator {
                 responseCorrelationStore.remove(upstreamIndex: 0, upstreamID: upstreamID)
             }
             for item in globalInit.pending {
-                clearInitializeUpstreamIndex(
-                    sessionID: item.sessionID,
-                    onlyIfGeneration: item.sessionGeneration
-                )
                 item.eventLoop.execute {
                     item.promise.fail(TimeoutError())
                 }
@@ -99,15 +95,12 @@ extension RuntimeCoordinator {
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
         responseCorrelationStore.reset(upstreamIndex: upstreamIndex)
-
-        let clearedPins = sessionStore.clearPinnedSessions(forUpstreamIndex: upstreamIndex)
-        if clearedPins > 0 {
-            logger.debug(
-                "Cleared pinned sessions for exited upstream",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"), "cleared": .string("\(clearedPins)"),
-                ])
-        }
+        releaseLeases(
+            requestLeaseRegistry.abandonActiveLeases(
+                upstreamIndex: upstreamIndex,
+                reason: .upstreamExit
+            )
+        )
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
@@ -190,20 +183,90 @@ extension RuntimeCoordinator {
     }
 
     package func debugSnapshot() -> ProxyDebugSnapshot {
+        debugSnapshot(includeSensitiveDebugPayloads: false)
+    }
+
+    package func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
         let initSnapshot = initializeGate.snapshot()
         let toolsSnapshot = toolsListCache.snapshot()
         let upstreamStates = upstreamSelectionPolicy.statesSnapshot()
-        let requestQueues = sessionStore.requestQueueSnapshots()
+        let leaseSnapshots = requestLeaseRegistry.debugSnapshots()
+        let sessionSnapshots = requestLeaseRegistry.sessionDebugSnapshots(
+            allSessionIDs: sessionStore.sessionIDs()
+        )
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: toolsSnapshot.cachedResult != nil,
             warmupInFlight: toolsSnapshot.warmupInFlight,
             upstreamStates: upstreamStates,
-            requestQueues: requestQueues,
+            sessionSnapshots: sessionSnapshots,
+            leaseSnapshots: leaseSnapshots,
             redactedText: Self.redactedDebugText,
+            includeSensitiveDebugPayloads: includeSensitiveDebugPayloads,
             healthFormatter: upstreamSelectionPolicy.debugHealthStateString
         )
+    }
+
+    package func createRequestLease(
+        descriptor: SessionPipelineRequestDescriptor
+    ) -> RequestLeaseID {
+        requestLeaseRegistry.createLease(descriptor: descriptor)
+    }
+
+    package func activateRequestLease(
+        _ leaseID: RequestLeaseID,
+        requestIDKey: String?,
+        upstreamIndex: Int?,
+        timeout: TimeAmount?
+    ) {
+        let timeoutAt = timeout.map {
+            Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
+        }
+        requestLeaseRegistry.activateLease(
+            leaseID,
+            requestIDKey: requestIDKey,
+            upstreamIndex: upstreamIndex,
+            timeoutAt: timeoutAt
+        )
+    }
+
+    package func completeRequestLease(_ leaseID: RequestLeaseID) {
+        releaseLeases([requestLeaseRegistry.completeLease(leaseID)].compactMap { $0 })
+    }
+
+    package func failRequestLease(
+        _ leaseID: RequestLeaseID,
+        terminalState: RequestLeaseState,
+        reason: RequestLeaseReleaseReason
+    ) {
+        releaseLeases(
+            [requestLeaseRegistry.failLease(leaseID, terminalState: terminalState, reason: reason)]
+                .compactMap { $0 }
+        )
+    }
+
+    package func handleRequestLeaseTimeout(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    ) {
+        if let first = requestIDKeys.first {
+            onRequestTimeout(
+                sessionID: sessionID,
+                requestIDKey: first,
+                upstreamIndex: upstreamIndex
+            )
+            for requestIDKey in requestIDKeys.dropFirst() {
+                removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        }
+        releaseLeases([requestLeaseRegistry.timeoutLease(leaseID)].compactMap { $0 })
     }
 
     func testStateSnapshot() -> TestSnapshot {
@@ -230,19 +293,11 @@ extension RuntimeCoordinator {
     }
 
     func testSetInitializeRoutingState(
-        sessionID: String,
-        upstreamIndex: Int,
-        preferOnNextPin: Bool,
-        didReceiveInitializeUpstreamMessage: Bool = false
-    ) {
-        setInitializeUpstreamIndexIfNeeded(
-            sessionID: sessionID,
-            upstreamIndex: upstreamIndex,
-            preferOnNextPin: preferOnNextPin
-        )
-        guard didReceiveInitializeUpstreamMessage else { return }
-        sessionStore.markDidReceiveInitializeUpstreamMessage(for: sessionID)
-    }
+        sessionID _: String,
+        upstreamIndex _: Int,
+        preferOnNextPin _: Bool,
+        didReceiveInitializeUpstreamMessage _: Bool = false
+    ) {}
 
     func handleOverloadedUpstreamSend(
         originalRequestData: Data,
@@ -374,7 +429,12 @@ extension RuntimeCoordinator {
             return
         }
 
-        let routedTargets = sessionStore.routedTargets(forUpstreamIndex: upstreamIndex)
+        let routedTargets: [SessionContext]
+        if upstreamIndex == 0 {
+            routedTargets = initializeGate.pendingSessionIDs().map { session(id: $0) }
+        } else {
+            routedTargets = []
+        }
 
         if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
@@ -392,14 +452,24 @@ extension RuntimeCoordinator {
                 "bytes": .string("\(data.count)"),
             ]
         )
+        debugRecorder.recordDroppedUnmappedNotification(upstreamIndex: upstreamIndex)
     }
 
     func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
         debugRecorder.recordStderr(message, upstreamIndex: upstreamIndex)
     }
 
-    func handleUpstreamRecovery(_ recovery: StdioFramerRecovery, upstreamIndex: Int) {
-        debugRecorder.recordRecovery(recovery, upstreamIndex: upstreamIndex)
+    func handleUpstreamProtocolViolation(
+        _ protocolViolation: StdioFramerProtocolViolation,
+        upstreamIndex: Int
+    ) {
+        debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
+        releaseLeases(
+            requestLeaseRegistry.abandonActiveLeases(
+                upstreamIndex: upstreamIndex,
+                reason: .stdoutProtocolViolation
+            )
+        )
     }
 
     func handleBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {
@@ -417,5 +487,9 @@ extension RuntimeCoordinator {
             data: data,
             redactedText: Self.redactedDebugText
         )
+    }
+
+    private func releaseLeases(_ actions: [RequestLeaseReleaseAction]) {
+        _ = actions
     }
 }

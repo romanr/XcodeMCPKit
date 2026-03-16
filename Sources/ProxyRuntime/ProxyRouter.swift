@@ -6,6 +6,7 @@ package final class ProxyRouter: Sendable {
     private struct Pending: Sendable {
         var promise: EventLoopPromise<ByteBuffer>
         var timeout: Scheduled<Void>?
+        var onTimeout: (@Sendable () -> Void)?
     }
 
     private struct State: Sendable {
@@ -35,7 +36,8 @@ package final class ProxyRouter: Sendable {
     package func registerRequest(
         idKey: String,
         on eventLoop: EventLoop,
-        timeout: TimeAmount? = nil
+        timeout: TimeAmount? = nil,
+        onTimeout: (@Sendable () -> Void)? = nil
     ) -> EventLoopFuture<ByteBuffer> {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         let effectiveTimeout = timeout ?? requestTimeout
@@ -46,14 +48,19 @@ package final class ProxyRouter: Sendable {
             }
         }
         state.withLockedValue { state in
-            state.pendingByID[idKey] = Pending(promise: promise, timeout: timeout)
+            state.pendingByID[idKey] = Pending(
+                promise: promise,
+                timeout: timeout,
+                onTimeout: onTimeout
+            )
         }
         return promise.futureResult
     }
 
     package func registerBatch(
         on eventLoop: EventLoop,
-        timeout: TimeAmount? = nil
+        timeout: TimeAmount? = nil,
+        onTimeout: (@Sendable () -> Void)? = nil
     ) -> EventLoopFuture<ByteBuffer> {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         let effectiveTimeout = timeout ?? requestTimeout
@@ -64,7 +71,13 @@ package final class ProxyRouter: Sendable {
             }
         }
         state.withLockedValue { state in
-            state.pendingBatches.append(Pending(promise: promise, timeout: timeout))
+            state.pendingBatches.append(
+                Pending(
+                    promise: promise,
+                    timeout: timeout,
+                    onTimeout: onTimeout
+                )
+            )
         }
         return promise.futureResult
     }
@@ -108,6 +121,7 @@ package final class ProxyRouter: Sendable {
         let pending = state.withLockedValue { state in
             state.pendingByID.removeValue(forKey: idKey)
         }
+        pending?.onTimeout?()
         pending?.promise.fail(TimeoutError())
     }
 
@@ -115,6 +129,7 @@ package final class ProxyRouter: Sendable {
         let pending = state.withLockedValue { state in
             state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
         }
+        pending?.onTimeout?()
         pending?.promise.fail(TimeoutError())
     }
 

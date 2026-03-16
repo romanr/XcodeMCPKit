@@ -13,6 +13,7 @@ package struct MCPForwardingService: Sendable {
     package struct StartedRequest: Sendable {
         package let transform: RequestTransform
         package let upstreamIndex: Int
+        package let requestTimeout: TimeAmount?
         package let future: EventLoopFuture<ByteBuffer>
     }
 
@@ -34,19 +35,13 @@ package struct MCPForwardingService: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        shouldPinUpstreamOverride: Bool? = nil,
         upstreamIndexOverride: Int? = nil
     ) throws -> PreparedRequest? {
         let upstreamIndex: Int
         if let upstreamIndexOverride {
             upstreamIndex = upstreamIndexOverride
         } else {
-            let shouldPinUpstream =
-                shouldPinUpstreamOverride ?? MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
-            guard let chosen = sessionManager.chooseUpstreamIndex(
-                sessionID: sessionID,
-                shouldPin: shouldPinUpstream
-            ) else {
+            guard let chosen = sessionManager.chooseUpstreamIndex() else {
                 return nil
             }
             upstreamIndex = chosen
@@ -70,7 +65,9 @@ package struct MCPForwardingService: Sendable {
         _ prepared: PreparedRequest,
         session: SessionContext,
         on eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount? = nil
+        requestTimeoutOverride: TimeAmount? = nil,
+        leaseID: RequestLeaseID? = nil,
+        onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
         let requestTimeout =
             requestTimeoutOverride
@@ -80,16 +77,30 @@ package struct MCPForwardingService: Sendable {
             )
         let future: EventLoopFuture<ByteBuffer>
         if prepared.transform.isBatch {
-            future = session.router.registerBatch(on: eventLoop, timeout: requestTimeout)
+            future = session.router.registerBatch(
+                on: eventLoop,
+                timeout: requestTimeout,
+                onTimeout: onTimeout
+            )
         } else if let idKey = prepared.transform.idKey {
             future = session.router.registerRequest(
                 idKey: idKey,
                 on: eventLoop,
-                timeout: requestTimeout
+                timeout: requestTimeout,
+                onTimeout: onTimeout
             )
         } else {
             struct MissingRequestIDError: Error {}
             throw MissingRequestIDError()
+        }
+
+        if let leaseID {
+            sessionManager.activateRequestLease(
+                leaseID,
+                requestIDKey: prepared.transform.responseIDs.first?.key,
+                upstreamIndex: prepared.upstreamIndex,
+                timeout: requestTimeout
+            )
         }
 
         sessionManager.sendUpstream(
@@ -99,6 +110,7 @@ package struct MCPForwardingService: Sendable {
         return StartedRequest(
             transform: prepared.transform,
             upstreamIndex: prepared.upstreamIndex,
+            requestTimeout: requestTimeout,
             future: future
         )
     }
@@ -201,7 +213,6 @@ package struct MCPForwardingService: Sendable {
                 bodyData: bodyData,
                 parsedRequestJSON: requestObject,
                 sessionID: sessionID,
-                shouldPinUpstreamOverride: false,
                 upstreamIndexOverride: upstreamIndexOverride
             ) else {
                 return .unavailable

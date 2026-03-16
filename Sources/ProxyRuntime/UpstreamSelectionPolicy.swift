@@ -20,6 +20,7 @@ package final class UpstreamSelectionPolicy: Sendable {
         package var healthProbeGeneration: UInt64 = 0
         package var consecutiveToolsListFailures: Int = 0
         package var lastToolsListSuccessUptimeNs: UInt64?
+        package var requestPickCount: Int = 0
     }
 
     private struct State: Sendable {
@@ -127,6 +128,7 @@ package final class UpstreamSelectionPolicy: Sendable {
                 )
                 switch health {
                 case .healthy:
+                    state.upstreamStates[candidate].requestPickCount += 1
                     return candidate
                 case .degraded:
                     if degradedCandidate == nil {
@@ -135,6 +137,9 @@ package final class UpstreamSelectionPolicy: Sendable {
                 case .quarantined:
                     continue
                 }
+            }
+            if let degradedCandidate {
+                state.upstreamStates[degradedCandidate].requestPickCount += 1
             }
             return degradedCandidate
         }
@@ -321,6 +326,7 @@ package final class UpstreamSelectionPolicy: Sendable {
             state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
             state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
             state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nil
+            state.upstreamStates[upstreamIndex].requestPickCount = 0
             return timeout
         }
     }

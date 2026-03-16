@@ -63,7 +63,7 @@ struct UpstreamProcessTests {
                     switch event {
                     case .stderr(let message):
                         return message
-                    case .message, .stdoutRecovery, .stdoutBufferSize, .exit:
+                    case .message, .stdoutProtocolViolation, .stdoutBufferSize, .exit:
                         continue
                     }
                 }
@@ -92,7 +92,7 @@ struct UpstreamProcessTests {
                     switch event {
                     case .stderr(let message):
                         return message
-                    case .message, .stdoutRecovery, .stdoutBufferSize, .exit:
+                    case .message, .stdoutProtocolViolation, .stdoutBufferSize, .exit:
                         continue
                     }
                 }
@@ -124,7 +124,7 @@ struct UpstreamProcessTests {
                         if sizes.contains(where: { $0 > 0 }), sizes.contains(0) {
                             return sizes
                         }
-                    case .message, .stderr, .stdoutRecovery, .exit:
+                    case .message, .stderr, .stdoutProtocolViolation, .exit:
                         continue
                     }
                 }
@@ -155,6 +155,50 @@ struct UpstreamProcessTests {
 
             #expect(sizes.contains(where: { $0 > 0 }))
             #expect(sizes.contains(0))
+        }
+    }
+
+    @Test func upstreamProcessTreatsInvalidStdoutAsFatalProtocolViolation() async throws {
+        let config = UpstreamProcess.Config(
+            command: "/bin/sh",
+            args: ["-c", "printf 'Content-Length: abc\\r\\n\\r\\n{}'; sleep 5"],
+            environment: ProcessInfo.processInfo.environment,
+            restartInitialDelay: 1,
+            restartMaxDelay: 1,
+            maxQueuedWriteBytes: 1024
+        )
+        try await withUpstreamProcess(config: config) { upstream in
+            let events = try await waitWithTimeout(
+                "invalid stdout should emit a protocol violation and exit",
+                timeout: .seconds(3)
+            ) {
+                var sawViolation = false
+                var sawExit = false
+                var bufferedSizes: [Int] = []
+
+                for await event in upstream.events {
+                    switch event {
+                    case .stdoutProtocolViolation(let violation):
+                        sawViolation = true
+                        #expect(violation.reason == .invalidContentLengthHeader)
+                    case .stdoutBufferSize(let size):
+                        bufferedSizes.append(size)
+                    case .exit:
+                        sawExit = true
+                    case .message, .stderr:
+                        continue
+                    }
+
+                    if sawViolation, sawExit {
+                        return bufferedSizes
+                    }
+                }
+
+                return bufferedSizes
+            }
+
+            #expect(events.contains(where: { $0 > 0 }))
+            #expect(events.contains(0))
         }
     }
 }

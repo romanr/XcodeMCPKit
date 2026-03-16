@@ -9,7 +9,6 @@ package final class SessionContext: Sendable {
     package let id: String
     package let router: ProxyRouter
     package let notificationHub: NotificationHub
-    package let requestSequencer: SessionRequestSequencer
 
     package init(id: String, config: ProxyConfig) {
         self.id = id
@@ -23,7 +22,6 @@ package final class SessionContext: Sendable {
                 notificationHub?.broadcast(data)
             }
         )
-        self.requestSequencer = SessionRequestSequencer(sessionID: id)
     }
 }
 
@@ -42,14 +40,39 @@ package protocol RuntimeCoordinating: Sendable {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
-    func chooseInitializeUpstreamIndex(sessionID: String) -> Int?
-    func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int?
+    func chooseUpstreamIndex() -> Int?
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func sendUpstream(_ data: Data, upstreamIndex: Int)
     func debugSnapshot() -> ProxyDebugSnapshot
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
+    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID
+    func activateRequestLease(
+        _ leaseID: RequestLeaseID,
+        requestIDKey: String?,
+        upstreamIndex: Int?,
+        timeout: TimeAmount?
+    )
+    func completeRequestLease(_ leaseID: RequestLeaseID)
+    func failRequestLease(
+        _ leaseID: RequestLeaseID,
+        terminalState: RequestLeaseState,
+        reason: RequestLeaseReleaseReason
+    )
+    func handleRequestLeaseTimeout(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    )
+}
+
+extension RuntimeCoordinating {
+    func debugSnapshot() -> ProxyDebugSnapshot {
+        debugSnapshot(includeSensitiveDebugPayloads: false)
+    }
 }
 
 package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
@@ -81,6 +104,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let initializeGate = InitializeGate()
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
     package let debugRecorder: ProxyDebugRecorder
+    package let requestLeaseRegistry: RequestLeaseRegistry
     package let eventLoop: EventLoop
     package let responseCorrelationStore: ResponseCorrelationStore
     package let config: ProxyConfig
@@ -105,6 +129,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.upstreams = upstreams
         self.sessionStore = SessionStore(config: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
+        self.requestLeaseRegistry = RequestLeaseRegistry()
         self.responseCorrelationStore = ResponseCorrelationStore(upstreamCount: upstreams.count)
         self.upstreamSelectionPolicy = UpstreamSelectionPolicy(upstreamCount: upstreams.count)
         self.initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
@@ -123,8 +148,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
                     case .stderr(let message):
                         self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
-                    case .stdoutRecovery(let recovery):
-                        self.handleUpstreamRecovery(recovery, upstreamIndex: upstreamIndex)
+                    case .stdoutProtocolViolation(let protocolViolation):
+                        self.handleUpstreamProtocolViolation(
+                            protocolViolation,
+                            upstreamIndex: upstreamIndex
+                        )
                     case .stdoutBufferSize(let size):
                         self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
                     case .exit(let status):
@@ -213,49 +241,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int? {
+    package func chooseUpstreamIndex() -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
         var probesToStart: [HealthProbeRequest] = []
         probesToStart.reserveCapacity(2)
-
-        var pinned = sessionStore.pinnedUpstreamIndex(for: sessionID)
-        if let pinnedIndex = pinned {
-            let result = upstreamSelectionPolicy.evaluateUsableInitialized(
-                index: pinnedIndex,
-                nowUptimeNs: nowUptimeNs
-            )
-            probesToStart.append(contentsOf: result.1)
-            let isUsable = result.0
-            if isUsable {
-                return pinnedIndex
-            }
-
-            sessionStore.clearRoutingState(for: sessionID)
-            pinned = nil
-        }
-
-        let preferredInitializeUpstreamIndex = sessionStore.preferredInitializeUpstreamIndex(for: sessionID)
-
-        if shouldPin, let preferredInitializeUpstreamIndex {
-            let result = upstreamSelectionPolicy.evaluateUsableInitialized(
-                index: preferredInitializeUpstreamIndex,
-                nowUptimeNs: nowUptimeNs
-            )
-            probesToStart.append(contentsOf: result.1)
-            let isUsable = result.0
-            if isUsable {
-                for probe in probesToStart {
-                    probeUpstreamHealth(
-                        upstreamIndex: probe.upstreamIndex,
-                        probeGeneration: probe.probeGeneration
-                    )
-                }
-                sessionStore.pinSession(sessionID, to: preferredInitializeUpstreamIndex)
-                return preferredInitializeUpstreamIndex
-            }
-
-            sessionStore.clearInitializeHintIfUnpinned(for: sessionID)
-        }
 
         let chooseResult = upstreamSelectionPolicy.chooseBestInitializedUpstream(nowUptimeNs: nowUptimeNs)
         let chosen = chooseResult.0
@@ -272,64 +261,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return nil
         }
 
-        if pinned == nil, shouldPin {
-            sessionStore.pinSession(sessionID, to: chosen)
-        }
         return chosen
     }
 
-    package func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        var probesToStart: [HealthProbeRequest] = []
-        probesToStart.reserveCapacity(1)
-
-        let hintedUpstreamIndex = sessionStore.hintedUpstreamIndex(for: sessionID)
-
-        if let hintedUpstreamIndex {
-            let result = upstreamSelectionPolicy.evaluateUsableInitialized(
-                index: hintedUpstreamIndex,
-                nowUptimeNs: nowUptimeNs
-            )
-            probesToStart.append(contentsOf: result.1)
-            let isUsable = result.0
-
-            for probe in probesToStart {
-                probeUpstreamHealth(
-                    upstreamIndex: probe.upstreamIndex,
-                    probeGeneration: probe.probeGeneration
-                )
-            }
-
-            if isUsable {
-                return hintedUpstreamIndex
-            }
-
-            sessionStore.clearInitializeHintIfUnpinned(for: sessionID)
-        }
-
-        return chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
-    }
-
-    func setInitializeUpstreamIndexIfNeeded(
-        sessionID: String,
-        upstreamIndex: Int,
-        preferOnNextPin: Bool
-    ) {
-        sessionStore.setInitializeUpstreamIfNeeded(
-            sessionID: sessionID,
-            upstreamIndex: upstreamIndex,
-            preferOnNextPin: preferOnNextPin
-        )
-    }
-
-    func clearInitializeUpstreamIndex(
-        sessionID: String,
-        onlyIfGeneration sessionGeneration: UInt64? = nil
-    ) {
-        sessionStore.clearInitializeUpstreamIndex(
-            sessionID: sessionID,
-            onlyIfGeneration: sessionGeneration
-        )
+    func chooseUpstreamIndex(sessionID _: String, shouldPin _: Bool) -> Int? {
+        chooseUpstreamIndex()
     }
 
     func sessionStillMatchesPendingInitialize(
@@ -368,14 +304,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if let cachedResult {
             _ = session(id: sessionID)
-            if let upstreamIndex = chooseInitializeUpstreamIndex(sessionID: sessionID) {
-                let shouldPreferOnNextPin = upstreamSelectionPolicy.initializedHealthyishCount() > 1
-                setInitializeUpstreamIndexIfNeeded(
-                    sessionID: sessionID,
-                    upstreamIndex: upstreamIndex,
-                    preferOnNextPin: shouldPreferOnNextPin
-                )
-            }
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
@@ -388,11 +316,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if pendingPromise != nil {
             _ = session(id: sessionID)
-            setInitializeUpstreamIndexIfNeeded(
-                sessionID: sessionID,
-                upstreamIndex: 0,
-                preferOnNextPin: false
-            )
         }
 
         if shouldSend {

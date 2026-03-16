@@ -83,17 +83,9 @@ public actor StdioAdapter {
     }
 
     private func handleInput(_ data: Data) {
+        if stopped { return }
+
         let result = framer.append(data)
-        for recovery in result.recoveries {
-            logger.warning(
-                "Recovered STDIO input stream corruption",
-                metadata: [
-                    "kind": "\(recovery.kind.rawValue)",
-                    "dropped_prefix_bytes": "\(recovery.droppedPrefixBytes)",
-                    "candidate_offset": "\(recovery.candidateOffset.map(String.init) ?? "none")",
-                ]
-            )
-        }
         for message in result.messages {
             let requestID = UUID()
             let task = Task { [weak self] in
@@ -102,6 +94,20 @@ public actor StdioAdapter {
             }
             requestTasks[requestID] = task
         }
+
+        guard let protocolViolation = result.protocolViolation else {
+            return
+        }
+
+        logger.error(
+            "Fatal STDIO input protocol violation",
+            metadata: [
+                "reason": "\(protocolViolation.reason.rawValue)",
+                "buffered_bytes": "\(protocolViolation.bufferedByteCount)",
+                "preview": "\(protocolViolation.preview)",
+            ]
+        )
+        stopLocked(cancelReadTask: true)
     }
 
     private func runRequestTask(id: UUID, data: Data) async {
@@ -258,6 +264,10 @@ public actor StdioAdapter {
     }
 
     private func stop(cancelReadTask: Bool) async {
+        stopLocked(cancelReadTask: cancelReadTask)
+    }
+
+    private func stopLocked(cancelReadTask: Bool) {
         if cancelReadTask {
             readTask?.cancel()
         }

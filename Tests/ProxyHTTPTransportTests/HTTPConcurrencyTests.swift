@@ -75,18 +75,10 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 1
-                }
-            )
-            try? await Task.sleep(for: .milliseconds(150))
-            #expect(await upstream.nonInitializeRequestCount() == 1)
-
-            await upstream.respondNext()
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
                     await upstream.nonInitializeRequestCount() == 2
                 }
             )
+            await upstream.respondNext()
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -182,28 +174,18 @@ struct HTTPConcurrencyTests {
                 sessionID: sessionID,
                 payload: toolListPayload(id: 300)
             )
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 1
-                }
-            )
-
             async let second = postJSON(
                 url: url,
                 sessionID: sessionID,
                 payload: toolListPayload(id: 301)
             )
 
-            try? await Task.sleep(for: .milliseconds(80))
-            #expect(await upstream.nonInitializeRequestCount() == 1)
-
-            await upstream.respondNext()
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
                     await upstream.nonInitializeRequestCount() == 2
                 }
             )
-            try? await Task.sleep(for: .milliseconds(120))
+            await upstream.respondNext()
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -211,6 +193,85 @@ struct HTTPConcurrencyTests {
             #expect(firstResult.0.statusCode == 200)
             #expect(secondResult.0.statusCode == 200)
             #expect((secondResult.1["id"] as? NSNumber)?.intValue == 301)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpTimedOutExecuteSnippetReleasesSessionAndStartsNextQueuedRequest() async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(
+            upstream: upstream,
+            requestTimeout: 0.15
+        )
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolCallPayload(
+                    id: 700,
+                    name: "ExecuteSnippet",
+                    arguments: [
+                        "tabIdentifier": "windowtab-timeout",
+                        "sourceFilePath": "App.swift",
+                        "codeSnippet": "print(\"first\")",
+                        "timeout": 20,
+                    ]
+                )
+            )
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == ["tools/call:ExecuteSnippet"]
+                }
+            )
+
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 701)
+            )
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == [
+                        "tools/call:ExecuteSnippet",
+                        "tools/list",
+                    ]
+                }
+            )
+
+            await upstream.discardNextResponse()
+            await upstream.respondNext()
+
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect((firstResult.1["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
+            #expect(secondResult.0.statusCode == 200)
+            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 701)
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
+                        return snapshot.activeCorrelatedRequestCount == 0
+                    }
+                    return false
+                }
+            )
         } catch {
             await server.shutdown()
             throw error
@@ -240,32 +301,79 @@ struct HTTPConcurrencyTests {
                 sessionID: sessionID,
                 payload: toolListPayload(id: 400)
             )
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 1
-                }
-            )
-
             async let notification = postStatusOnly(
                 url: url,
                 sessionID: sessionID,
                 payload: notificationPayload(method: "notifications/test-progress")
             )
 
-            try? await Task.sleep(for: .milliseconds(150))
-            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
-
-            await upstream.respondNext()
-            let notificationResponse = try await notification
-            #expect(notificationResponse.statusCode == 202)
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == ["tools/list", "notifications/test-progress"]
+                    await upstream.nonInitializeRequestCount() == 2
+                }
+            )
+            let notificationResponse = try await notification
+            #expect(notificationResponse.statusCode == 202)
+            await upstream.respondNext()
+            let firstResult = try await first
+            #expect(firstResult.0.statusCode == 200)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDebugSnapshotReportsSessionPipelineState() async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 600)
+            )
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 601)
+            )
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
+                        return snapshot.activeCorrelatedRequestCount == 2
+                    }
+                    return false
                 }
             )
 
-            let firstResult = try await first
-            #expect(firstResult.0.statusCode == 200)
+            await upstream.respondNext()
+            await upstream.respondNext()
+            _ = try await first
+            _ = try await second
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
+                        return snapshot.activeCorrelatedRequestCount == 0
+                    }
+                    return false
+                }
+            )
         } catch {
             await server.shutdown()
             throw error
@@ -317,21 +425,13 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == ["tools/call:DocumentationSearch"]
-                }
-            )
-            try? await Task.sleep(for: .milliseconds(150))
-            #expect(await upstream.nonInitializeRequestCount() == 1)
-
-            await upstream.respondNext()
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
                     await upstream.nonInitializeLabels() == [
                         "tools/call:DocumentationSearch",
                         "tools/call:DocumentationSearch",
                     ]
                 }
             )
+            await upstream.respondNext()
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -627,6 +727,11 @@ private actor ControlledUpstreamClient: UpstreamClient {
         let request = sentRequests.removeFirst()
         guard let responseData = request.responseData else { return }
         continuation.yield(.message(responseData))
+    }
+
+    func discardNextResponse() {
+        guard !sentRequests.isEmpty else { return }
+        _ = sentRequests.removeFirst()
     }
 
     private func handle(_ object: [String: Any]) async {

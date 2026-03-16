@@ -10,7 +10,8 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let warmupInFlight: Bool
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
-    package let sessions: [SessionRequestQueueDebugSnapshot]
+    package let sessions: [SessionDebugSnapshot]
+    package let leases: [RequestLeaseDebugSnapshot]
     package let refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
 
     package init(
@@ -24,6 +25,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.upstreams = base.upstreams
         self.recentTraffic = base.recentTraffic
         self.sessions = base.sessions
+        self.leases = base.leases
         self.refreshCodeIssues = refreshCodeIssues
     }
 }
@@ -48,13 +50,15 @@ package final class HTTPControlService: Sendable {
         self.refreshCodeIssuesDebugState = refreshCodeIssuesDebugState
     }
 
-    package func debugSnapshotData() -> Data? {
+    package func debugSnapshotData(includeSensitiveDebugPayloads: Bool = false) -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return try? encoder.encode(
             HTTPDebugSnapshot(
-                base: runtimeCoordinator.debugSnapshot(),
+                base: runtimeCoordinator.debugSnapshot(
+                    includeSensitiveDebugPayloads: includeSensitiveDebugPayloads
+                ),
                 refreshCodeIssues: refreshCodeIssuesDebugState?.snapshot()
             )
         )

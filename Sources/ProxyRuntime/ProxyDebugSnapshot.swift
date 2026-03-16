@@ -38,11 +38,17 @@ package struct ProxyUpstreamDebugSnapshot: Codable, Sendable {
     package let recentStderr: [ProxyDebugEvent]
     package let lastDecodeError: ProxyDebugEvent?
     package let lastBridgeError: ProxyDebugEvent?
-    package let resyncCount: Int
-    package let lastResyncAt: Date?
-    package let lastResyncDroppedBytes: Int?
-    package let lastResyncPreview: String?
+    package let protocolViolationCount: Int
+    package let lastProtocolViolationAt: Date?
+    package let lastProtocolViolationReason: String?
+    package let lastProtocolViolationBufferedBytes: Int?
+    package let lastProtocolViolationPreview: String?
+    package let lastProtocolViolationPreviewHex: String?
+    package let lastProtocolViolationLeadingByteHex: String?
     package let bufferedStdoutBytes: Int
+    package let requestPickCount: Int
+    package let activeCorrelatedRequestCount: Int
+    package let droppedUnmappedNotificationCount: Int
 
     package init(
         upstreamIndex: Int,
@@ -56,11 +62,17 @@ package struct ProxyUpstreamDebugSnapshot: Codable, Sendable {
         recentStderr: [ProxyDebugEvent],
         lastDecodeError: ProxyDebugEvent?,
         lastBridgeError: ProxyDebugEvent?,
-        resyncCount: Int,
-        lastResyncAt: Date?,
-        lastResyncDroppedBytes: Int?,
-        lastResyncPreview: String?,
-        bufferedStdoutBytes: Int
+        protocolViolationCount: Int,
+        lastProtocolViolationAt: Date?,
+        lastProtocolViolationReason: String?,
+        lastProtocolViolationBufferedBytes: Int?,
+        lastProtocolViolationPreview: String?,
+        lastProtocolViolationPreviewHex: String?,
+        lastProtocolViolationLeadingByteHex: String?,
+        bufferedStdoutBytes: Int,
+        requestPickCount: Int = 0,
+        activeCorrelatedRequestCount: Int = 0,
+        droppedUnmappedNotificationCount: Int = 0
     ) {
         self.upstreamIndex = upstreamIndex
         self.isInitialized = isInitialized
@@ -73,11 +85,17 @@ package struct ProxyUpstreamDebugSnapshot: Codable, Sendable {
         self.recentStderr = recentStderr
         self.lastDecodeError = lastDecodeError
         self.lastBridgeError = lastBridgeError
-        self.resyncCount = resyncCount
-        self.lastResyncAt = lastResyncAt
-        self.lastResyncDroppedBytes = lastResyncDroppedBytes
-        self.lastResyncPreview = lastResyncPreview
+        self.protocolViolationCount = protocolViolationCount
+        self.lastProtocolViolationAt = lastProtocolViolationAt
+        self.lastProtocolViolationReason = lastProtocolViolationReason
+        self.lastProtocolViolationBufferedBytes = lastProtocolViolationBufferedBytes
+        self.lastProtocolViolationPreview = lastProtocolViolationPreview
+        self.lastProtocolViolationPreviewHex = lastProtocolViolationPreviewHex
+        self.lastProtocolViolationLeadingByteHex = lastProtocolViolationLeadingByteHex
         self.bufferedStdoutBytes = bufferedStdoutBytes
+        self.requestPickCount = requestPickCount
+        self.activeCorrelatedRequestCount = activeCorrelatedRequestCount
+        self.droppedUnmappedNotificationCount = droppedUnmappedNotificationCount
     }
 }
 
@@ -88,7 +106,8 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
     package let warmupInFlight: Bool
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
-    package let sessions: [SessionRequestQueueDebugSnapshot]
+    package let sessions: [SessionDebugSnapshot]
+    package let leases: [RequestLeaseDebugSnapshot]
 
     package init(
         generatedAt: Date,
@@ -97,7 +116,8 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
         warmupInFlight: Bool,
         upstreams: [ProxyUpstreamDebugSnapshot],
         recentTraffic: [ProxyDebugTrafficEvent],
-        sessions: [SessionRequestQueueDebugSnapshot]
+        sessions: [SessionDebugSnapshot],
+        leases: [RequestLeaseDebugSnapshot]
     ) {
         self.generatedAt = generatedAt
         self.proxyInitialized = proxyInitialized
@@ -106,5 +126,6 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
         self.upstreams = upstreams
         self.recentTraffic = recentTraffic
         self.sessions = sessions
+        self.leases = leases
     }
 }

@@ -78,7 +78,7 @@ struct RuntimeCoordinatorTests {
         #expect(id2 == 2)
     }
 
-    @Test func sessionManagerPinsInitializeSessionBeforeUnmappedNotificationsArrive() async throws {
+    @Test func sessionManagerDropsUnmappedNotificationsAfterInitializeCompletes() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -114,9 +114,11 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(notification))
 
         _ = try await future.get()
-        let received = try await nextBufferedNotifications(from: session.router)
-        #expect(received.count == 1)
-        #expect(received.first == notification)
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                session.router.drainBufferedNotifications().isEmpty
+            }
+        )
     }
 
     @Test func sessionManagerRoutesUnmappedNotificationsDuringInitializeHandshake() async throws {
@@ -160,7 +162,7 @@ struct RuntimeCoordinatorTests {
         _ = try await future.get()
     }
 
-    @Test func sessionManagerPinsCachedInitializeSessionBeforeUnmappedNotificationsArrive() async throws {
+    @Test func sessionManagerDropsUnmappedNotificationsForCachedInitializeSessions() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -202,9 +204,11 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(notification))
 
         _ = try await cachedFuture.get()
-        let received = try await nextBufferedNotifications(from: session.router)
-        #expect(received.count == 1)
-        #expect(received.first == notification)
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                session.router.drainBufferedNotifications().isEmpty
+            }
+        )
     }
 
     @Test func sessionManagerDoesNotRecreateRemovedSessionWhenInitializeCompletes() async throws {
@@ -281,7 +285,7 @@ struct RuntimeCoordinatorTests {
         )
     }
 
-    @Test func sessionManagerPinsFirstRequestToCachedInitializeUpstreamAfterNotification() async throws {
+    @Test func sessionManagerDoesNotRouteUnmappedNotificationsToCachedInitializeSessions() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -335,12 +339,11 @@ struct RuntimeCoordinatorTests {
         await upstream0.yield(.message(notification0))
         await upstream1.yield(.message(notification1))
 
-        let received = try await nextBufferedNotifications(from: session.router)
-        #expect(received.count == 1)
-        let routedUpstream = try #require(received.first).elementsEqual(notification0) ? 0 : 1
-
-        let pinned = try #require(manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
-        #expect(pinned == routedUpstream)
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                session.router.drainBufferedNotifications().isEmpty
+            }
+        )
     }
 
     @Test func sessionManagerTimeoutResetsInitState() async throws {
@@ -443,9 +446,6 @@ struct RuntimeCoordinatorTests {
 
         let replacementSnapshotAfterTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterTimeout.generation == replacementSnapshotBeforeTimeout.generation)
-        #expect(replacementSnapshotAfterTimeout.initializeUpstreamIndex == 0)
-        #expect(replacementSnapshotAfterTimeout.preferInitializeUpstreamOnNextPin)
-        #expect(replacementSnapshotAfterTimeout.didReceiveInitializeUpstreamMessage)
     }
 
     @Test func sessionManagerInitializeErrorDoesNotClearRecreatedSessionInitializeRoutingState()
@@ -504,9 +504,6 @@ struct RuntimeCoordinatorTests {
 
         let replacementSnapshotAfterError = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterError.generation == replacementSnapshotBeforeError.generation)
-        #expect(replacementSnapshotAfterError.initializeUpstreamIndex == 0)
-        #expect(replacementSnapshotAfterError.preferInitializeUpstreamOnNextPin)
-        #expect(replacementSnapshotAfterError.didReceiveInitializeUpstreamMessage)
     }
 
     @Test func sessionManagerEagerInitializeRestartsAfterExit() async throws {
@@ -1062,7 +1059,7 @@ struct RuntimeCoordinatorTests {
         #expect(methods1.filter { $0 == "tools/list" }.count == 1)
     }
 
-    @Test func sessionManagerRoutesUnmappedNotificationsToPinnedSessionsOnly() async throws {
+    @Test func sessionManagerDropsUnmappedNotificationsAfterInitializeRoutingEnds() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -1087,17 +1084,10 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        // Create two sessions and pin them to different upstreams.
         let sessionIDA = "session-A"
         let sessionIDB = "session-B"
         let sessionA = manager.session(id: sessionIDA)
         let sessionB = manager.session(id: sessionIDB)
-
-        let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
-        let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
-        #expect(upstreamIndexA != upstreamIndexB)
 
         // Ensure we're starting from a clean buffer state.
         _ = sessionA.router.drainBufferedNotifications()
@@ -1113,15 +1103,12 @@ struct RuntimeCoordinatorTests {
         )
 
         await yieldMessage(notification, to: upstream0)
-
-        let pinnedTo0 = upstreamIndexA == 0 ? sessionA : sessionB
-        let notPinnedTo0 = upstreamIndexA == 0 ? sessionB : sessionA
-
-        let receivedPinned = try await nextBufferedNotifications(from: pinnedTo0.router)
-        let receivedOther = notPinnedTo0.router.drainBufferedNotifications()
-        #expect(receivedPinned.count == 1)
-        #expect(receivedPinned.first == notification)
-        #expect(receivedOther.isEmpty)
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                sessionA.router.drainBufferedNotifications().isEmpty
+                    && sessionB.router.drainBufferedNotifications().isEmpty
+            }
+        )
     }
 
     @Test func sessionManagerDropsUnmappedNotificationsWhenNoPinnedTargetsExist()
@@ -1240,13 +1227,11 @@ struct RuntimeCoordinatorTests {
                 "callTool request for 'DocumentationSearch' failed: Error Domain=IDEIntelligenceMessaging.BridgeError Code=1"
             ))
         await upstream.yield(
-            .stdoutRecovery(
-                StdioFramerRecovery(
-                    kind: .resync,
-                    droppedPrefixBytes: 1024,
-                    candidateOffset: 1024,
-                    previewBeforeDrop: "...broken",
-                    previewRecoveredMessage: "{\"id\":301,\"jsonrpc\":\"2.0\"}"
+            .stdoutProtocolViolation(
+                StdioFramerProtocolViolation(
+                    reason: .invalidJSON,
+                    bufferedByteCount: 1024,
+                    preview: "...broken"
                 )
             )
         )
@@ -1255,7 +1240,7 @@ struct RuntimeCoordinatorTests {
             await waitUntil(timeout: .seconds(2)) {
                 let snapshot = manager.debugSnapshot()
                 return snapshot.upstreams[0].bufferedStdoutBytes == 2048
-                    && snapshot.upstreams[0].resyncCount == 1
+                    && snapshot.upstreams[0].protocolViolationCount == 1
                     && snapshot.upstreams[0].recentStderr.count == 2
             }
         )
@@ -1264,9 +1249,12 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.upstreams.count == 1)
         #expect(snapshot.upstreams[0].lastDecodeError?.message == "<redacted>")
         #expect(snapshot.upstreams[0].lastBridgeError?.message == "<redacted>")
-        #expect(snapshot.upstreams[0].resyncCount == 1)
-        #expect(snapshot.upstreams[0].lastResyncDroppedBytes == 1024)
-        #expect(snapshot.upstreams[0].lastResyncPreview == "<redacted>")
+        #expect(snapshot.upstreams[0].protocolViolationCount == 1)
+        #expect(snapshot.upstreams[0].lastProtocolViolationReason == "invalidJSON")
+        #expect(snapshot.upstreams[0].lastProtocolViolationBufferedBytes == 1024)
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreview == "<redacted>")
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreviewHex == "<redacted>")
+        #expect(snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == nil)
         #expect(snapshot.upstreams[0].bufferedStdoutBytes == 2048)
         #expect(snapshot.recentTraffic.contains { $0.direction == "outbound" && $0.bytes > 0 })
         #expect(
@@ -1286,8 +1274,10 @@ struct RuntimeCoordinatorTests {
                 return snapshot.upstreams[0].recentStderr.isEmpty
                     && snapshot.upstreams[0].lastDecodeError == nil
                     && snapshot.upstreams[0].lastBridgeError == nil
-                    && snapshot.upstreams[0].resyncCount == 0
-                    && snapshot.upstreams[0].lastResyncPreview == nil
+                    && snapshot.upstreams[0].protocolViolationCount == 0
+                    && snapshot.upstreams[0].lastProtocolViolationPreview == nil
+                    && snapshot.upstreams[0].lastProtocolViolationPreviewHex == nil
+                    && snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == nil
                     && snapshot.upstreams[0].bufferedStdoutBytes == 0
             }
         )
@@ -1296,8 +1286,10 @@ struct RuntimeCoordinatorTests {
         #expect(clearedSnapshot.upstreams[0].recentStderr.isEmpty)
         #expect(clearedSnapshot.upstreams[0].lastDecodeError == nil)
         #expect(clearedSnapshot.upstreams[0].lastBridgeError == nil)
-        #expect(clearedSnapshot.upstreams[0].resyncCount == 0)
-        #expect(clearedSnapshot.upstreams[0].lastResyncPreview == nil)
+        #expect(clearedSnapshot.upstreams[0].protocolViolationCount == 0)
+        #expect(clearedSnapshot.upstreams[0].lastProtocolViolationPreview == nil)
+        #expect(clearedSnapshot.upstreams[0].lastProtocolViolationPreviewHex == nil)
+        #expect(clearedSnapshot.upstreams[0].lastProtocolViolationLeadingByteHex == nil)
         #expect(clearedSnapshot.upstreams[0].bufferedStdoutBytes == 0)
     }
 
@@ -1417,9 +1409,6 @@ struct RuntimeCoordinatorTests {
             manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
         #expect(upstreamIndexA != upstreamIndexB)
 
-        let pinnedTo1SessionID = upstreamIndexA == 1 ? sessionIDA : sessionIDB
-        #expect(manager.chooseUpstreamIndex(sessionID: pinnedTo1SessionID, shouldPin: true) == 1)
-
         await upstream1.yield(.exit(1))
         #expect(
             await waitUntil(timeout: .seconds(2)) {
@@ -1428,7 +1417,7 @@ struct RuntimeCoordinatorTests {
         )
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: pinnedTo1SessionID, shouldPin: true))
+            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
         #expect(repinned == 0)
     }
 

@@ -214,25 +214,6 @@ package actor UpstreamProcess: UpstreamClient {
 
     private func handleStdoutData(_ data: Data) {
         let result = framer.append(data)
-        for recovery in result.recoveries {
-            logger.warning(
-                "Recovered upstream stdout stream corruption",
-                metadata: [
-                    "kind": .string(recovery.kind.rawValue),
-                    "dropped_prefix_bytes": .string("\(recovery.droppedPrefixBytes)"),
-                    "candidate_offset": .string(recovery.candidateOffset.map(String.init) ?? "none"),
-                    "preview_before_drop": .string(recovery.previewBeforeDrop),
-                    "preview_recovered": .string(recovery.previewRecoveredMessage ?? ""),
-                ]
-            )
-            continuation.yield(.stdoutRecovery(recovery))
-        }
-
-        if lastReportedBufferedStdoutBytes != result.bufferedByteCount {
-            lastReportedBufferedStdoutBytes = result.bufferedByteCount
-            continuation.yield(.stdoutBufferSize(result.bufferedByteCount))
-        }
-
         for message in result.messages {
             guard isValidJSONPayload(message) else {
                 if let text = String(data: message, encoding: .utf8) {
@@ -247,6 +228,28 @@ package actor UpstreamProcess: UpstreamClient {
                 continue
             }
             continuation.yield(.message(message))
+        }
+
+        if lastReportedBufferedStdoutBytes != result.bufferedByteCount {
+            lastReportedBufferedStdoutBytes = result.bufferedByteCount
+            continuation.yield(.stdoutBufferSize(result.bufferedByteCount))
+        }
+
+        guard let protocolViolation = result.protocolViolation else {
+            return
+        }
+
+        logger.error(
+            "Fatal upstream stdout protocol violation",
+            metadata: [
+                "reason": .string(protocolViolation.reason.rawValue),
+                "buffered_bytes": .string("\(protocolViolation.bufferedByteCount)"),
+                "preview": .string(protocolViolation.preview),
+            ]
+        )
+        continuation.yield(.stdoutProtocolViolation(protocolViolation))
+        Task { [weak self] in
+            await self?.requestRestart()
         }
     }
 

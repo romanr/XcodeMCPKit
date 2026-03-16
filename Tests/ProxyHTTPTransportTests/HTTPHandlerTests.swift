@@ -50,6 +50,35 @@ struct HTTPHandlerTests {
         #expect(snapshot.proxyInitialized == false)
         #expect(snapshot.upstreams.count == 1)
         #expect(snapshot.upstreams[0].upstreamIndex == 0)
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreview == nil)
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreviewHex == nil)
+        #expect(snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == nil)
+    }
+
+    @Test func httpDebugUpstreamsCanIncludeSensitivePayloadsOnExplicitOptIn() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .GET,
+            uri: "/debug/upstreams?includeSensitive=1"
+        )
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(ProxyDebugSnapshot.self, from: Data(response.body.utf8))
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreview == "raw-preview")
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreviewHex == "61 62")
+        #expect(snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == "61")
     }
 
     @Test func httpDebugUpstreamsReturnsNotFoundWhenListenerIsNotLoopback() async throws {
@@ -299,7 +328,6 @@ struct HTTPHandlerTests {
         let responseID = (responseObject?["id"] as? NSNumber)?.intValue
         #expect(responseID == 1)
         #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
@@ -888,8 +916,7 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
@@ -963,8 +990,7 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
@@ -2033,7 +2059,7 @@ struct HTTPHandlerTests {
                 "XcodeListWindows",
                 "XcodeListNavigatorIssues",
             ])
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
             #expect(sessionManager.sentToolRequests() == [
                 "XcodeListWindows@1",
                 "XcodeListNavigatorIssues@1",
@@ -2258,7 +2284,7 @@ struct HTTPHandlerTests {
                 "XcodeListWindows",
                 "XcodeRefreshCodeIssuesInFile",
             ])
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             await server.shutdown()
             throw error
@@ -2350,7 +2376,7 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
                 "XcodeRefreshCodeIssuesInFile",
             ])
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             await server.shutdown()
             throw error
@@ -3186,7 +3212,7 @@ struct HTTPHandlerTests {
             ])
             #expect(sessionManager.requestSuccessNotificationCount() == 0)
             #expect(sessionManager.requestTimeoutNotificationCount() == 1)
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             await server.shutdown()
             throw error
@@ -3227,8 +3253,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     private struct ChooseUpstreamCall: Sendable {
-        let sessionID: String
-        let shouldPin: Bool
+        let sessionID: String?
     }
 
     private struct SentRequest: Sendable {
@@ -3268,6 +3293,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
+    private let requestLeaseRegistry = RequestLeaseRegistry()
 
     init(
         config: ProxyConfig,
@@ -3356,7 +3382,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { state in
             state.initialized = true
         }
-        _ = chooseUpstreamIndex(sessionID: sessionID, shouldPin: true)
+        _ = chooseUpstreamIndex()
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalID.value.foundationObject,
@@ -3370,20 +3396,16 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
-    func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int? {
+    func chooseUpstreamIndex() -> Int? {
         state.withLockedValue { state in
             state.chooseUpstreamCalls.append(
-                ChooseUpstreamCall(sessionID: sessionID, shouldPin: shouldPin)
+                ChooseUpstreamCall(sessionID: nil)
             )
             if state.availableUpstreamIndices.isEmpty == false {
                 return state.availableUpstreamIndices.removeFirst()
             }
             return state.availableUpstreamIndex
         }
-    }
-
-    func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
-        chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
     }
 
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex _: Int) -> Int64 {
@@ -3493,6 +3515,70 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func debugSnapshot() -> ProxyDebugSnapshot {
+        debugSnapshot(includeSensitiveDebugPayloads: false)
+    }
+
+    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID {
+        requestLeaseRegistry.createLease(descriptor: descriptor)
+    }
+
+    func activateRequestLease(
+        _ leaseID: RequestLeaseID,
+        requestIDKey: String?,
+        upstreamIndex: Int?,
+        timeout: TimeAmount?
+    ) {
+        requestLeaseRegistry.activateLease(
+            leaseID,
+            requestIDKey: requestIDKey,
+            upstreamIndex: upstreamIndex,
+            timeoutAt: timeout.map {
+                Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
+            }
+        )
+    }
+
+    func completeRequestLease(_ leaseID: RequestLeaseID) {
+        _ = requestLeaseRegistry.completeLease(leaseID)
+    }
+
+    func failRequestLease(
+        _ leaseID: RequestLeaseID,
+        terminalState: RequestLeaseState,
+        reason: RequestLeaseReleaseReason
+    ) {
+        _ = requestLeaseRegistry.failLease(
+            leaseID,
+            terminalState: terminalState,
+            reason: reason
+        )
+    }
+
+    func handleRequestLeaseTimeout(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    ) {
+        _ = leaseID
+        if let first = requestIDKeys.first {
+            onRequestTimeout(
+                sessionID: sessionID,
+                requestIDKey: first,
+                upstreamIndex: upstreamIndex
+            )
+            for requestIDKey in requestIDKeys.dropFirst() {
+                removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        }
+        _ = requestLeaseRegistry.timeoutLease(leaseID)
+    }
+
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
         ProxyDebugSnapshot(
             generatedAt: Date(timeIntervalSince1970: 0),
             proxyInitialized: isInitialized(),
@@ -3511,15 +3597,19 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
                     recentStderr: [],
                     lastDecodeError: nil,
                     lastBridgeError: nil,
-                    resyncCount: 0,
-                    lastResyncAt: nil,
-                    lastResyncDroppedBytes: nil,
-                    lastResyncPreview: nil,
+                    protocolViolationCount: 0,
+                    lastProtocolViolationAt: nil,
+                    lastProtocolViolationReason: nil,
+                    lastProtocolViolationBufferedBytes: nil,
+                    lastProtocolViolationPreview: includeSensitiveDebugPayloads ? "raw-preview" : nil,
+                    lastProtocolViolationPreviewHex: includeSensitiveDebugPayloads ? "61 62" : nil,
+                    lastProtocolViolationLeadingByteHex: includeSensitiveDebugPayloads ? "61" : nil,
                     bufferedStdoutBytes: 0
                 )
             ],
             recentTraffic: [],
-            sessions: []
+            sessions: [],
+            leases: requestLeaseRegistry.debugSnapshots()
         )
     }
 
@@ -3551,11 +3641,11 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func lastChooseUpstreamShouldPin() -> Bool {
-        state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
+        false
     }
 
     func chooseUpstreamShouldPinValues() -> [Bool] {
-        state.withLockedValue { $0.chooseUpstreamCalls.map(\.shouldPin) }
+        []
     }
 
     func refreshToolsListCallCount() -> Int {

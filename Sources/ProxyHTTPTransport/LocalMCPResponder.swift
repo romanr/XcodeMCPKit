@@ -109,16 +109,11 @@ package struct LocalMCPResponder {
                 guard let params = object["params"] else { return false }
                 return !(params is NSNull)
             }()
-            let pinnedUpstreamIndex = sessionManager.chooseUpstreamIndex(
-                sessionID: headerSessionID,
-                shouldPin: true
-            )
             logger.debug(
                 "tools/list cache hit",
                 metadata: [
                     "session": .string(headerSessionID),
                     "has_params": .string(hasParams ? "true" : "false"),
-                    "pinned_upstream": .string(pinnedUpstreamIndex.map(String.init) ?? "none"),
                 ]
             )
             let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(

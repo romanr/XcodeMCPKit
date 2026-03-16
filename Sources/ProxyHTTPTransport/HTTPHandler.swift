@@ -187,7 +187,12 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard let data = controlService.debugSnapshotData() else {
+        let includeSensitiveDebugPayloads = Self.shouldIncludeSensitiveDebugPayloads(
+            from: head.uri
+        )
+        guard let data = controlService.debugSnapshotData(
+            includeSensitiveDebugPayloads: includeSensitiveDebugPayloads
+        ) else {
             sendPlain(
                 on: context.channel,
                 status: .internalServerError,
@@ -206,6 +211,15 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             sessionID: nil,
             requestLog: requestLog
         )
+    }
+
+    private static func shouldIncludeSensitiveDebugPayloads(from uri: String) -> Bool {
+        guard let components = URLComponents(string: uri) else { return false }
+        return components.queryItems?.contains(where: { item in
+            guard item.name == "includeSensitive" else { return false }
+            guard let value = item.value?.lowercased() else { return false }
+            return value == "1" || value == "true" || value == "yes"
+        }) == true
     }
 
     private func handleSSE(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {

@@ -275,4 +275,10 @@ package final class InitializeGate: Sendable {
             )
         }
     }
+
+    package func pendingSessionIDs() -> [String] {
+        state.withLockedValue { state in
+            Array(Set(state.initPending.map(\.sessionID))).sorted()
+        }
+    }
 }

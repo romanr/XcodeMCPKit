@@ -50,16 +50,6 @@ extension RuntimeCoordinator {
         update.timeout?.cancel()
 
         for item in update.pending {
-            if sessionStillMatchesPendingInitialize(
-                sessionID: item.sessionID,
-                sessionGeneration: item.sessionGeneration
-            ) {
-                setInitializeUpstreamIndexIfNeeded(
-                    sessionID: item.sessionID,
-                    upstreamIndex: upstreamIndex,
-                    preferOnNextPin: false
-                )
-            }
             if let buffer = encodeInitializeResponse(originalID: item.originalID, result: result) {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)
@@ -121,10 +111,6 @@ extension RuntimeCoordinator {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
-            clearInitializeUpstreamIndex(
-                sessionID: item.sessionID,
-                onlyIfGeneration: item.sessionGeneration
-            )
             if let buffer = encodeInitializeErrorResponse(
                 originalID: item.originalID, errorObject: errorObject)
             {
@@ -180,10 +166,6 @@ extension RuntimeCoordinator {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
-            clearInitializeUpstreamIndex(
-                sessionID: item.sessionID,
-                onlyIfGeneration: item.sessionGeneration
-            )
             item.eventLoop.execute {
                 item.promise.fail(error)
             }

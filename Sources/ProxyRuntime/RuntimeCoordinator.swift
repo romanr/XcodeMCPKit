@@ -326,7 +326,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         let hasHealthyUpstream = upstreamSelectionPolicy.initializedHealthyishCount() > 0
-        let recoveryInFlight = upstreamSelectionPolicy.anyRecoveryInFlight()
+        var recoveryInFlight = upstreamSelectionPolicy.anyRecoveryInFlight()
+        if hasHealthyUpstream == false, recoveryInFlight == false,
+            initializeGate.consumeRetryAfterWarmInitFailureRegardlessOfCachedInit()
+        {
+            startPrimaryEagerRetry()
+            recoveryInFlight = upstreamSelectionPolicy.anyRecoveryInFlight()
+        }
         guard hasHealthyUpstream || recoveryInFlight else {
             _ = chooseUpstreamIndex()
             return eventLoop.makeFailedFuture(UpstreamSlotAcquisitionError.unavailable)
@@ -341,6 +347,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             },
             failUnavailable: {
                 promise.fail(UpstreamSlotAcquisitionError.unavailable)
+            },
+            failCancelled: {
+                promise.fail(CancellationError())
             }
         )
         return promise.futureResult

@@ -20,10 +20,10 @@ package final class InitializeGate: Sendable {
         package let isShuttingDown: Bool
     }
 
-    package struct SuccessResult: Sendable {
-        package let pending: [PendingInitialize]
+    package struct SuccessPreparation: Sendable {
         package let timeout: Scheduled<Void>?
         package let shouldWarmSecondary: Bool
+        package let cachedResult: JSONValue?
     }
 
     package struct FailureResult: Sendable {
@@ -78,6 +78,10 @@ package final class InitializeGate: Sendable {
 
     package func isInitialized() -> Bool {
         state.withLockedValue { $0.initResult != nil }
+    }
+
+    package func cachedInitializeResult() -> JSONValue? {
+        state.withLockedValue { $0.initResult }
     }
 
     package func beginEagerInitializePrimary() -> (
@@ -158,28 +162,69 @@ package final class InitializeGate: Sendable {
         }
     }
 
-    package func completePrimaryInitializeSuccess(result: JSONValue) -> SuccessResult? {
+    package func preparePrimaryInitializeSuccess() -> SuccessPreparation? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
+            let timeout = state.initTimeout
+            state.initTimeout = nil
+            let shouldWarmSecondary = !state.didWarmSecondary
+            let cachedResult = state.initResult
+            return SuccessPreparation(
+                timeout: timeout,
+                shouldWarmSecondary: shouldWarmSecondary,
+                cachedResult: cachedResult
+            )
+        }
+    }
+
+    package func storeInitializeResultIfNeeded(_ result: JSONValue) {
+        state.withLockedValue { state in
             if state.initResult == nil {
                 state.initResult = result
             }
+        }
+    }
+
+    package func finishPrimaryInitializeSuccess() -> [PendingInitialize]? {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown else { return nil }
             state.initInFlight = false
             state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
-            let timeout = state.initTimeout
-            state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
             state.primaryInitUpstreamID = nil
-            let shouldWarmSecondary = !state.didWarmSecondary
-            if shouldWarmSecondary {
-                state.didWarmSecondary = true
-            }
-            return SuccessResult(
-                pending: pending,
-                timeout: timeout,
-                shouldWarmSecondary: shouldWarmSecondary
-            )
+            return pending
+        }
+    }
+
+    package func finishPrimaryInitializeUsingCachedResult() -> (pending: [PendingInitialize], result: JSONValue)? {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown, let result = state.initResult else { return nil }
+            state.initInFlight = false
+            let pending = state.initPending
+            state.initPending.removeAll()
+            state.primaryInitUpstreamID = nil
+            return (pending, result)
+        }
+    }
+
+    package func reopenPrimaryInitializeForRetry() {
+        state.withLockedValue { state in
+            state.initInFlight = false
+            state.primaryInitUpstreamID = nil
+        }
+    }
+
+    package func markSecondaryWarmupStarted() {
+        state.withLockedValue { state in
+            state.didWarmSecondary = true
+        }
+    }
+
+    package func restorePendingInitializes(_ pending: [PendingInitialize]) {
+        guard pending.isEmpty == false else { return }
+        state.withLockedValue { state in
+            state.initPending.insert(contentsOf: pending, at: 0)
         }
     }
 
@@ -245,6 +290,12 @@ package final class InitializeGate: Sendable {
         }
     }
 
+    package func restoreCachedInitializeResultForTests(_ result: JSONValue) {
+        state.withLockedValue { state in
+            state.initResult = result
+        }
+    }
+
     package func resetForDebug() -> (pending: [PendingInitialize], timeout: Scheduled<Void>?) {
         state.withLockedValue { state in
             let result = (pending: state.initPending, timeout: state.initTimeout)
@@ -271,6 +322,16 @@ package final class InitializeGate: Sendable {
             let shouldRetry =
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
                 && state.initResult == nil
+            if shouldRetry {
+                state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+            }
+            return shouldRetry
+        }
+    }
+
+    package func consumeRetryAfterWarmInitFailureRegardlessOfCachedInit() -> Bool {
+        state.withLockedValue { state in
+            let shouldRetry = state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
             if shouldRetry {
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }

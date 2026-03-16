@@ -295,6 +295,8 @@ package struct MCPForwardingService: Sendable {
                     )
                 }
             }.get()
+        } catch is CancellationError {
+            return .timeout
         } catch {
             sessionManager.failRequestLease(
                 leaseID,

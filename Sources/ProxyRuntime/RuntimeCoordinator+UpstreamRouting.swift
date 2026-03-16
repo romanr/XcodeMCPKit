@@ -6,6 +6,12 @@ extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
         guard upstreamSelectionPolicy.initializedHealthyishCount() == 0 else { return }
         guard upstreamSelectionPolicy.anyRecoveryInFlight() == false else { return }
+        if initializeGate.consumeRetryAfterWarmInitFailureRegardlessOfCachedInit() {
+            startPrimaryEagerRetry()
+            if upstreamSelectionPolicy.anyRecoveryInFlight() {
+                return
+            }
+        }
         upstreamSlotScheduler.failQueuedRequests()
     }
 

@@ -39,21 +39,56 @@ extension RuntimeCoordinator {
             return
         }
 
-        sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
-            self?.markUpstreamInitialized(upstreamIndex: upstreamIndex)
-            self?.upstreamSlotScheduler.wake()
-        }
-
         if upstreamIndex != 0 {
+            sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
+                self?.markUpstreamInitialized(upstreamIndex: upstreamIndex)
+                self?.upstreamSlotScheduler.wake()
+            }
             return
         }
 
-        let update = initializeGate.completePrimaryInitializeSuccess(result: result)
+        let update = initializeGate.preparePrimaryInitializeSuccess()
         guard let update else { return }
         update.timeout?.cancel()
 
-        for item in update.pending {
-            if let buffer = encodeInitializeResponse(originalID: item.originalID, result: result) {
+        sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
+            guard let self else { return }
+            self.initializeGate.storeInitializeResultIfNeeded(result)
+            guard let pending = self.initializeGate.finishPrimaryInitializeSuccess() else { return }
+            self.markUpstreamInitialized(upstreamIndex: upstreamIndex)
+            self.upstreamSlotScheduler.wake()
+            if update.shouldWarmSecondary {
+                self.initializeGate.markSecondaryWarmupStarted()
+                self.warmUpSecondaryUpstreams()
+            }
+            self.refreshToolsListIfNeeded()
+            self.completePendingInitializes(pending, result: result)
+        } onRejected: { [weak self] in
+            guard let self else { return }
+            if upstreamIndex == 0,
+                self.hasUsableInitializedSecondaryUpstreams(),
+                let completion = self.initializeGate.finishPrimaryInitializeUsingCachedResult()
+            {
+                self.completePendingInitializes(completion.pending, result: completion.result)
+                self.eventLoop.execute { [weak self] in
+                    self?.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+                }
+                return
+            }
+            self.initializeGate.reopenPrimaryInitializeForRetry()
+            self.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func completePendingInitializes(
+        _ pending: [InitializeGate.PendingInitialize],
+        result: JSONValue
+    ) {
+        for item in pending {
+            if let buffer = encodeInitializeResponse(
+                originalID: item.originalID,
+                result: result
+            ) {
                 item.eventLoop.execute {
                     item.promise.succeed(buffer)
                 }
@@ -63,12 +98,6 @@ extension RuntimeCoordinator {
                 }
             }
         }
-
-        if update.shouldWarmSecondary {
-            warmUpSecondaryUpstreams()
-        }
-
-        refreshToolsListIfNeeded()
     }
 
     func encodeInitializeResponse(originalID: RPCID, result: JSONValue) -> ByteBuffer? {
@@ -135,7 +164,8 @@ extension RuntimeCoordinator {
 
     func sendInitializedNotificationIfNeeded(
         upstreamIndex: Int,
-        onAccepted: @escaping @Sendable () -> Void = {}
+        onAccepted: @escaping @Sendable () -> Void = {},
+        onRejected: @escaping @Sendable () -> Void = {}
     ) {
         let shouldSend = upstreamSelectionPolicy.shouldSendInitializedNotification(
             upstreamIndex: upstreamIndex
@@ -167,14 +197,20 @@ extension RuntimeCoordinator {
                 onAccepted()
                 return
             }
-            self.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+            onRejected()
         }
     }
 
     func handleInitializedNotificationSendOverload(upstreamIndex: Int) {
         clearUpstreamState(upstreamIndex: upstreamIndex)
         if upstreamIndex == 0 {
-            startEagerInitializePrimary()
+            if hasUsableInitializedSecondaryUpstreams() {
+                initializeGate.setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            } else {
+                resetSecondaryUpstreamsForPrimaryRetry()
+                startPrimaryEagerRetry()
+            }
         } else {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
@@ -225,8 +261,16 @@ extension RuntimeCoordinator {
     }
 
     func clearUpstreamState(upstreamIndex: Int) {
-        let timeout = upstreamSelectionPolicy.clearUpstreamState(upstreamIndex: upstreamIndex)
-        timeout?.cancel()
+        guard let cleared = upstreamSelectionPolicy.clearUpstreamState(upstreamIndex: upstreamIndex) else {
+            return
+        }
+        cleared.timeout?.cancel()
+        if let initUpstreamID = cleared.initUpstreamID {
+            responseCorrelationStore.remove(
+                upstreamIndex: upstreamIndex,
+                upstreamID: initUpstreamID
+            )
+        }
         debugRecorder.resetUpstream(upstreamIndex)
     }
 
@@ -239,6 +283,32 @@ extension RuntimeCoordinator {
         guard upstreams.count > 1 else { return }
         for upstreamIndex in 1..<upstreams.count {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func resetSecondaryUpstreamsForPrimaryRetry() {
+        guard upstreams.count > 1 else { return }
+        for upstreamIndex in 1..<upstreams.count {
+            clearUpstreamState(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func startPrimaryEagerRetry() {
+        clearUpstreamState(upstreamIndex: 0)
+        initializeGate.resetCachedInitializeResult()
+        toolsListCache.reset()
+        startEagerInitializePrimary()
+    }
+
+    func hasUsableInitializedSecondaryUpstreams() -> Bool {
+        upstreamSelectionPolicy.statesSnapshot().dropFirst().contains { upstream in
+            guard upstream.isInitialized else { return false }
+            switch upstream.healthState {
+            case .healthy, .degraded:
+                return true
+            case .quarantined:
+                return false
+            }
         }
     }
 

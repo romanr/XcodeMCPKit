@@ -24,6 +24,7 @@ package final class UpstreamSlotScheduler: Sendable {
         let eventLoop: EventLoop
         let start: @Sendable (Int) -> Void
         let failUnavailable: @Sendable () -> Void
+        let failCancelled: @Sendable () -> Void
     }
 
     private struct State: Sendable {
@@ -60,14 +61,16 @@ package final class UpstreamSlotScheduler: Sendable {
         descriptor: SessionPipelineRequestDescriptor,
         on eventLoop: EventLoop,
         starter: @escaping @Sendable (Int) -> Void,
-        failUnavailable: @escaping @Sendable () -> Void
+        failUnavailable: @escaping @Sendable () -> Void,
+        failCancelled: @escaping @Sendable () -> Void
     ) {
         let request = PendingRequest(
             leaseID: leaseID,
             descriptor: descriptor,
             eventLoop: eventLoop,
             start: starter,
-            failUnavailable: failUnavailable
+            failUnavailable: failUnavailable,
+            failCancelled: failCancelled
         )
 
         state.withLockedValue { state in
@@ -116,20 +119,22 @@ package final class UpstreamSlotScheduler: Sendable {
     }
 
     package func cancelQueuedRequest(leaseID: RequestLeaseID) {
-        let removed = state.withLockedValue { state -> Bool in
+        let removed = state.withLockedValue { state -> PendingRequest? in
             guard let index = state.pendingRequests.firstIndex(where: { $0.leaseID == leaseID }) else {
-                return false
+                return nil
             }
-            state.pendingRequests.remove(at: index)
-            return true
+            return state.pendingRequests.remove(at: index)
         }
-        guard removed else { return }
+        guard let removed else { return }
         logger.debug(
             "Cancelled queued request before upstream dispatch",
             metadata: [
                 "lease_id": .string(leaseID.uuidString),
             ]
         )
+        removed.eventLoop.execute {
+            removed.failCancelled()
+        }
     }
 
     package func debugSnapshot() -> UpstreamSlotSchedulerDebugSnapshot {

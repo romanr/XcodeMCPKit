@@ -369,10 +369,14 @@ package final class UpstreamSelectionPolicy: Sendable {
         }
     }
 
-    package func clearUpstreamState(upstreamIndex: Int) -> Scheduled<Void>? {
+    package func clearUpstreamState(upstreamIndex: Int) -> (
+        timeout: Scheduled<Void>?,
+        initUpstreamID: Int64?
+    )? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             let timeout = state.upstreamStates[upstreamIndex].initTimeout
+            let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
             state.upstreamStates[upstreamIndex].initTimeout = nil
             state.upstreamStates[upstreamIndex].isInitialized = false
             state.upstreamStates[upstreamIndex].initInFlight = false
@@ -385,7 +389,7 @@ package final class UpstreamSelectionPolicy: Sendable {
             state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
             state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nil
             state.upstreamStates[upstreamIndex].requestPickCount = 0
-            return timeout
+            return (timeout, initUpstreamID)
         }
     }
 

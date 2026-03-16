@@ -284,7 +284,10 @@ package final class HTTPPostService: Sendable {
                 upstreamIndex: upstreamIndex,
                 cancellationHandle: cancellationHandle
             )
-        }.flatMapError { _ in
+        }.flatMapError { error in
+            if error is CancellationError {
+                return eventLoop.makeFailedFuture(error)
+            }
             cancellationHandle.markCompleted()
             self.sessionManager.failRequestLease(
                 leaseID,

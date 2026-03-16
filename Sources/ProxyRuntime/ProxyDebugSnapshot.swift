@@ -88,6 +88,7 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
     package let warmupInFlight: Bool
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
+    package let sessions: [SessionRequestQueueDebugSnapshot]
 
     package init(
         generatedAt: Date,
@@ -95,7 +96,8 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
         cachedToolsListAvailable: Bool,
         warmupInFlight: Bool,
         upstreams: [ProxyUpstreamDebugSnapshot],
-        recentTraffic: [ProxyDebugTrafficEvent]
+        recentTraffic: [ProxyDebugTrafficEvent],
+        sessions: [SessionRequestQueueDebugSnapshot]
     ) {
         self.generatedAt = generatedAt
         self.proxyInitialized = proxyInitialized
@@ -103,5 +105,6 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
         self.warmupInFlight = warmupInFlight
         self.upstreams = upstreams
         self.recentTraffic = recentTraffic
+        self.sessions = sessions
     }
 }

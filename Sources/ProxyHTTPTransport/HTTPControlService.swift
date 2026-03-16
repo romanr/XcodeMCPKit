@@ -10,6 +10,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let warmupInFlight: Bool
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
+    package let sessions: [SessionRequestQueueDebugSnapshot]
     package let refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
 
     package init(
@@ -22,6 +23,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.warmupInFlight = base.warmupInFlight
         self.upstreams = base.upstreams
         self.recentTraffic = base.recentTraffic
+        self.sessions = base.sessions
         self.refreshCodeIssues = refreshCodeIssues
     }
 }

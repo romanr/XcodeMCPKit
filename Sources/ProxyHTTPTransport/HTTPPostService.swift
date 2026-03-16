@@ -141,23 +141,72 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        let session = sessionManager.session(id: sessionID)
+        let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
+        let requestLabel = Self.requestLabel(from: parsedRequestJSON)
+        let completion: @Sendable (HTTPPostResolution) -> Void = { resolution in
+            promise.succeed(resolution)
+            session.requestSequencer.finishCurrentRequest()
+        }
+
+        session.requestSequencer.acquire(label: requestLabel, on: eventLoop).whenSuccess { _ in
+            self.handleQueuedUpstreamRequest(
+                bodyData: bodyData,
+                sessionID: sessionID,
+                headerSessionID: headerSessionID,
+                requestIDs: requestIDs,
+                requestIsBatch: requestIsBatch,
+                prefersEventStream: prefersEventStream,
+                eventLoop: eventLoop,
+                session: session,
+                completion: completion
+            )
+        }
+        return promise.futureResult
+    }
+
+    private func handleQueuedUpstreamRequest(
+        bodyData: Data,
+        sessionID: String,
+        headerSessionID: String?,
+        requestIDs: [RPCID],
+        requestIsBatch: Bool,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        session: SessionContext,
+        completion: @escaping @Sendable (HTTPPostResolution) -> Void
+    ) {
+        let parsedRequestJSON: Any
+        do {
+            parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
+        } catch {
+            completion(.mcpError(
+                id: nil,
+                ids: [],
+                code: -32700,
+                message: "invalid json",
+                forceBatchArray: false,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream
+            ))
+            return
+        }
+
         let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
         if let refreshRequest, requestIDs.isEmpty == false {
             if headerSessionID == nil {
-                return eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: requestIDs,
-                        code: -32000,
-                        message: "expected initialize request",
-                        forceBatchArray: requestIsBatch,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                )
+                completion(.mcpError(
+                    id: nil,
+                    ids: requestIDs,
+                    code: -32000,
+                    message: "expected initialize request",
+                    forceBatchArray: requestIsBatch,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                ))
+                return
             }
 
-            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
             Task { [self] in
                 let attemptResult = await forwardRefreshCodeIssuesRequest(
                     refreshRequest,
@@ -168,7 +217,7 @@ package final class HTTPPostService: Sendable {
                     eventLoop: eventLoop
                 )
                 eventLoop.execute {
-                    promise.succeed(
+                    completion(
                         self.makeResolution(
                             from: attemptResult,
                             sessionID: sessionID,
@@ -177,7 +226,7 @@ package final class HTTPPostService: Sendable {
                     )
                 }
             }
-            return promise.futureResult
+            return
         }
 
         let prepared: MCPForwardingService.PreparedRequest
@@ -188,39 +237,36 @@ package final class HTTPPostService: Sendable {
                 sessionID: sessionID
             ) else {
                 if requestIDs.isEmpty {
-                    return eventLoop.makeSucceededFuture(
-                        .plain(
-                            status: .serviceUnavailable,
-                            body: "upstream unavailable",
-                            sessionID: sessionID
-                        )
-                    )
+                    completion(.plain(
+                        status: .serviceUnavailable,
+                        body: "upstream unavailable",
+                        sessionID: sessionID
+                    ))
+                    return
                 }
-                return eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: requestIDs,
-                        code: -32001,
-                        message: "upstream unavailable",
-                        forceBatchArray: requestIsBatch,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                )
+                completion(.mcpError(
+                    id: nil,
+                    ids: requestIDs,
+                    code: -32001,
+                    message: "upstream unavailable",
+                    forceBatchArray: requestIsBatch,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                ))
+                return
             }
             prepared = candidate
         } catch {
-            return eventLoop.makeSucceededFuture(
-                .mcpError(
-                    id: nil,
-                    ids: [],
-                    code: -32700,
-                    message: "invalid json",
-                    forceBatchArray: false,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                )
-            )
+            completion(.mcpError(
+                id: nil,
+                ids: [],
+                code: -32700,
+                message: "invalid json",
+                forceBatchArray: false,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream
+            ))
+            return
         }
 
         if prepared.transform.method == "tools/list" {
@@ -243,29 +289,25 @@ package final class HTTPPostService: Sendable {
                 || !prepared.transform.expectsResponse
             {
                 if prepared.transform.responseIDs.isEmpty {
-                    return eventLoop.makeSucceededFuture(
-                        .plain(
-                            status: .unprocessableEntity,
-                            body: "expected initialize request",
-                            sessionID: sessionID
-                        )
-                    )
+                    completion(.plain(
+                        status: .unprocessableEntity,
+                        body: "expected initialize request",
+                        sessionID: sessionID
+                    ))
+                    return
                 }
-                return eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: prepared.transform.responseIDs,
-                        code: -32000,
-                        message: "expected initialize request",
-                        forceBatchArray: prepared.transform.isBatch,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                )
+                completion(.mcpError(
+                    id: nil,
+                    ids: prepared.transform.responseIDs,
+                    code: -32000,
+                    message: "expected initialize request",
+                    forceBatchArray: prepared.transform.isBatch,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                ))
+                return
             }
         }
-
-        let session = sessionManager.session(id: sessionID)
 
         if prepared.transform.expectsResponse {
             let started: MCPForwardingService.StartedRequest
@@ -276,20 +318,18 @@ package final class HTTPPostService: Sendable {
                     on: eventLoop
                 )
             } catch {
-                return eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: [],
-                        code: -32600,
-                        message: "missing id",
-                        forceBatchArray: false,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                )
+                completion(.mcpError(
+                    id: nil,
+                    ids: [],
+                    code: -32600,
+                    message: "missing id",
+                    forceBatchArray: false,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                ))
+                return
             }
 
-            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
             started.future.whenComplete { result in
                 let resolution = self.forwardingService.resolveResponse(
                     result,
@@ -298,7 +338,7 @@ package final class HTTPPostService: Sendable {
                 )
                 switch resolution {
                 case .success(let responseData):
-                    promise.succeed(
+                    completion(
                         .responseData(
                             data: responseData,
                             sessionID: sessionID,
@@ -306,7 +346,7 @@ package final class HTTPPostService: Sendable {
                         )
                     )
                 case .invalidUpstreamResponse:
-                    promise.succeed(
+                    completion(
                         .plain(
                             status: .badGateway,
                             body: "invalid upstream response",
@@ -314,7 +354,7 @@ package final class HTTPPostService: Sendable {
                         )
                     )
                 case .timeout:
-                    promise.succeed(
+                    completion(
                         .mcpError(
                             id: nil,
                             ids: started.transform.responseIDs,
@@ -327,22 +367,19 @@ package final class HTTPPostService: Sendable {
                     )
                 }
             }
-            return promise.futureResult
+            return
         }
 
         if prepared.transform.method == "notifications/initialized" && sessionManager.isInitialized() {
-            return eventLoop.makeSucceededFuture(
-                .empty(status: .accepted, sessionID: sessionID)
-            )
+            completion(.empty(status: .accepted, sessionID: sessionID))
+            return
         }
 
         sessionManager.sendUpstream(
             prepared.transform.upstreamData,
             upstreamIndex: prepared.upstreamIndex
         )
-        return eventLoop.makeSucceededFuture(
-            .empty(status: .accepted, sessionID: sessionID)
-        )
+        completion(.empty(status: .accepted, sessionID: sessionID))
     }
 
     private func resolveLocalHandling(
@@ -548,6 +585,23 @@ package final class HTTPPostService: Sendable {
         case .invalidUpstreamResponse:
             return .invalidUpstreamResponse
         }
+    }
+
+    private static func requestLabel(from requestJSON: Any) -> String {
+        if let object = requestJSON as? [String: Any] {
+            let method = (object["method"] as? String) ?? "unknown"
+            if method == "tools/call",
+                let params = object["params"] as? [String: Any],
+                let name = params["name"] as? String
+            {
+                return "\(method):\(name)"
+            }
+            return method
+        }
+        if let array = requestJSON as? [Any] {
+            return "batch[\(array.count)]"
+        }
+        return "unknown"
     }
 
     private func forwardRefreshCodeIssuesRequest(

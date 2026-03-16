@@ -9,6 +9,7 @@ package final class SessionContext: Sendable {
     package let id: String
     package let router: ProxyRouter
     package let notificationHub: NotificationHub
+    package let requestSequencer: SessionRequestSequencer
 
     package init(id: String, config: ProxyConfig) {
         self.id = id
@@ -22,6 +23,7 @@ package final class SessionContext: Sendable {
                 notificationHub?.broadcast(data)
             }
         )
+        self.requestSequencer = SessionRequestSequencer(sessionID: id)
     }
 }
 

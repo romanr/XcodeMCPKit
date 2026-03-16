@@ -104,6 +104,7 @@ package final class ProxyDebugRecorder: Sendable {
         cachedToolsListAvailable: Bool,
         warmupInFlight: Bool,
         upstreamStates: [UpstreamSelectionPolicy.UpstreamState],
+        requestQueues: [SessionRequestQueueDebugSnapshot],
         redactedText: String,
         healthFormatter: (UpstreamHealthState) -> String
     ) -> ProxyDebugSnapshot {
@@ -153,7 +154,8 @@ package final class ProxyDebugRecorder: Sendable {
                     bytes: $0.bytes,
                     preview: redactedText
                 )
-            }
+            },
+            sessions: requestQueues
         )
     }
 }

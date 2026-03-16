@@ -197,6 +197,15 @@ package final class SessionStore: Sendable {
         }
     }
 
+    package func requestQueueSnapshots() -> [SessionRequestQueueDebugSnapshot] {
+        state.withLockedValue { state in
+            state.sessions
+                .values
+                .map { $0.context.requestSequencer.debugSnapshot() }
+                .sorted { $0.sessionID < $1.sessionID }
+        }
+    }
+
     func testSnapshot(id: String) -> RuntimeCoordinator.TestSnapshot.Session? {
         state.withLockedValue { state in
             guard let record = state.sessions[id] else { return nil }

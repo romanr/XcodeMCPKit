@@ -3518,7 +3518,8 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
                     bufferedStdoutBytes: 0
                 )
             ],
-            recentTraffic: []
+            recentTraffic: [],
+            sessions: []
         )
     }
 

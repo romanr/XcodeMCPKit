@@ -193,12 +193,14 @@ extension RuntimeCoordinator {
         let initSnapshot = initializeGate.snapshot()
         let toolsSnapshot = toolsListCache.snapshot()
         let upstreamStates = upstreamSelectionPolicy.statesSnapshot()
+        let requestQueues = sessionStore.requestQueueSnapshots()
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: toolsSnapshot.cachedResult != nil,
             warmupInFlight: toolsSnapshot.warmupInFlight,
             upstreamStates: upstreamStates,
+            requestQueues: requestQueues,
             redactedText: Self.redactedDebugText,
             healthFormatter: upstreamSelectionPolicy.debugHealthStateString
         )

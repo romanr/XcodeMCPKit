@@ -44,7 +44,8 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpConcurrentRequestsShareSession() async throws {
-        let server = try TestHTTPServer.start()
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
         let url = server.url
 
         do {
@@ -59,36 +60,42 @@ struct HTTPConcurrencyTests {
             }
             let initID = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
             #expect(initID == 1)
+            await upstream.clearRecordedRequests()
 
-            let count = 20
-            let responseIDs = try await withThrowingTaskGroup(of: Int.self) { group in
-                for index in 0..<count {
-                    group.addTask {
-                        let payload: [String: Any] = [
-                            "jsonrpc": "2.0",
-                            "id": index + 100,
-                            "method": "tools/list",
-                        ]
-                        let (response, body) = try await postJSON(
-                            url: url,
-                            sessionID: sessionID,
-                            payload: payload
-                        )
-                        guard response.statusCode == 200 else {
-                            throw ConcurrencyTestError.invalidResponse
-                        }
-                        return (body["id"] as? NSNumber)?.intValue ?? -1
-                    }
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 100)
+            )
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 101)
+            )
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 1
                 }
+            )
+            try? await Task.sleep(for: .milliseconds(150))
+            #expect(await upstream.nonInitializeRequestCount() == 1)
 
-                var ids: [Int] = []
-                for try await responseID in group {
-                    ids.append(responseID)
+            await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 2
                 }
-                return ids
-            }
+            )
+            await upstream.respondNext()
 
-            #expect(Set(responseIDs).count == count)
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
+            #expect((firstResult.1["id"] as? NSNumber)?.intValue == 100)
+            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 101)
+            #expect(await upstream.nonInitializeLabels() == ["tools/list", "tools/list"])
         } catch {
             await server.shutdown()
             throw error
@@ -96,7 +103,249 @@ struct HTTPConcurrencyTests {
         await server.shutdown()
     }
 
-    @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFive() async throws {
+    @Test func httpConcurrentRequestsCanOverlapAcrossSessions() async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        let url = server.url
+
+        do {
+            let (initializeResponseA, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            let (initializeResponseB, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 2)
+            )
+            guard let sessionA = initializeResponseA.value(forHTTPHeaderField: "Mcp-Session-Id"),
+                let sessionB = initializeResponseB.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionA,
+                payload: toolListPayload(id: 200)
+            )
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionB,
+                payload: toolListPayload(id: 201)
+            )
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 2
+                }
+            )
+
+            await upstream.respondNext()
+            await upstream.respondNext()
+
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(
+            upstream: upstream,
+            requestTimeout: 0.15
+        )
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 300)
+            )
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 1
+                }
+            )
+
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 301)
+            )
+
+            try? await Task.sleep(for: .milliseconds(80))
+            #expect(await upstream.nonInitializeRequestCount() == 1)
+
+            await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 2
+                }
+            )
+            try? await Task.sleep(for: .milliseconds(120))
+            await upstream.respondNext()
+
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
+            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 301)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpQueuedNotificationDoesNotOvertakeEarlierSessionRequest() async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 400)
+            )
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 1
+                }
+            )
+
+            async let notification = postStatusOnly(
+                url: url,
+                sessionID: sessionID,
+                payload: notificationPayload(method: "notifications/test-progress")
+            )
+
+            try? await Task.sleep(for: .milliseconds(150))
+            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
+
+            await upstream.respondNext()
+            let notificationResponse = try await notification
+            #expect(notificationResponse.statusCode == 202)
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == ["tools/list", "notifications/test-progress"]
+                }
+            )
+
+            let firstResult = try await first
+            #expect(firstResult.0.statusCode == 200)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDocumentationSearchRequestsSerializeWithinSession() async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolCallPayload(
+                    id: 500,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "Transaction.updates",
+                        "frameworks": ["StoreKit"],
+                    ]
+                )
+            )
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolCallPayload(
+                    id: 501,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "currentEntitlements",
+                        "frameworks": ["StoreKit"],
+                    ]
+                )
+            )
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == ["tools/call:DocumentationSearch"]
+                }
+            )
+            try? await Task.sleep(for: .milliseconds(150))
+            #expect(await upstream.nonInitializeRequestCount() == 1)
+
+            await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == [
+                        "tools/call:DocumentationSearch",
+                        "tools/call:DocumentationSearch",
+                    ]
+                }
+            )
+            await upstream.respondNext()
+
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFiveOrDeadlockInternalCalls() async throws {
         let server = try TestHTTPServer.start(upstream: RefreshSensitiveUpstreamClient())
         let url = server.url
 
@@ -194,7 +443,8 @@ private struct TestHTTPServer {
     let upstream: any UpstreamClient
 
     static func start(
-        upstream providedUpstream: (any UpstreamClient)? = nil
+        upstream providedUpstream: (any UpstreamClient)? = nil,
+        requestTimeout: TimeInterval = 5
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
@@ -205,7 +455,7 @@ private struct TestHTTPServer {
             upstreamArgs: ["mcpbridge"],
             upstreamSessionID: nil,
             maxBodyBytes: 1_048_576,
-            requestTimeout: 5,
+            requestTimeout: requestTimeout,
             refreshCodeIssuesMode: .upstream
         )
         let upstream = providedUpstream ?? EchoUpstreamClient()
@@ -315,6 +565,113 @@ private actor EchoUpstreamClient: UpstreamClient {
             "result": result,
         ]
         return try? JSONSerialization.data(withJSONObject: response, options: [])
+    }
+}
+
+private actor ControlledUpstreamClient: UpstreamClient {
+    struct SentRequest: Sendable {
+        let label: String
+        let responseData: Data?
+    }
+
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private var sentRequests: [SentRequest] = []
+    private var requestHistory: [String] = []
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return .accepted
+        }
+
+        if let object = json as? [String: Any] {
+            await handle(object)
+        } else if let array = json as? [Any] {
+            for item in array {
+                guard let object = item as? [String: Any] else { continue }
+                await handle(object)
+            }
+        }
+        return .accepted
+    }
+
+    func nonInitializeRequestCount() -> Int {
+        requestHistory.count
+    }
+
+    func nonInitializeLabels() -> [String] {
+        requestHistory
+    }
+
+    func clearRecordedRequests() {
+        sentRequests.removeAll()
+        requestHistory.removeAll()
+    }
+
+    func respondNext() {
+        guard !sentRequests.isEmpty else { return }
+        let request = sentRequests.removeFirst()
+        guard let responseData = request.responseData else { return }
+        continuation.yield(.message(responseData))
+    }
+
+    private func handle(_ object: [String: Any]) async {
+        let method = (object["method"] as? String) ?? "unknown"
+        guard method != "initialize" else {
+            if let id = object["id"] {
+                continuation.yield(.message(makeInitializeResponse(id: id)))
+            }
+            return
+        }
+
+        let label = requestLabel(from: object)
+        let responseData = makeSuccessResponse(id: object["id"])
+        sentRequests.append(SentRequest(label: label, responseData: responseData))
+        requestHistory.append(label)
+    }
+
+    private func requestLabel(from object: [String: Any]) -> String {
+        let method = (object["method"] as? String) ?? "unknown"
+        if method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let name = params["name"] as? String
+        {
+            return "\(method):\(name)"
+        }
+        return method
+    }
+
+    private func makeInitializeResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["capabilities": [String: Any]()],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeSuccessResponse(id: Any?) -> Data? {
+        guard let id else { return nil }
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [:],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
 }
 
@@ -477,6 +834,22 @@ private func toolCallPayload(
     ]
 }
 
+private func toolListPayload(id: Int) -> [String: Any] {
+    [
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/list",
+    ]
+}
+
+private func notificationPayload(method: String) -> [String: Any] {
+    [
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": [String: Any](),
+    ]
+}
+
 private func postJSON(
     url: URL,
     sessionID: String?,
@@ -500,4 +873,45 @@ private func postJSON(
         (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
         ?? [:]
     return (httpResponse, object)
+}
+
+private func postStatusOnly(
+    url: URL,
+    sessionID: String?,
+    payload: [String: Any]
+) async throws -> HTTPURLResponse {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    }
+
+    let (_, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw ConcurrencyTestError.invalidResponse
+    }
+    return httpResponse
+}
+
+private func waitUntil(
+    timeout: Duration,
+    interval: Duration = .milliseconds(20),
+    condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    let intervalNanos = interval.components.seconds * 1_000_000_000
+        + Int64(interval.components.attoseconds / 1_000_000_000)
+    let deadline = ContinuousClock.now + timeout
+
+    while ContinuousClock.now < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: UInt64(max(intervalNanos, 1)))
+    }
+
+    return await condition()
 }

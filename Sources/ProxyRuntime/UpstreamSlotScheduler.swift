@@ -23,6 +23,7 @@ package final class UpstreamSlotScheduler: Sendable {
         let descriptor: SessionPipelineRequestDescriptor
         let eventLoop: EventLoop
         let start: @Sendable (Int) -> Void
+        let failUnavailable: @Sendable () -> Void
     }
 
     private struct State: Sendable {
@@ -58,13 +59,15 @@ package final class UpstreamSlotScheduler: Sendable {
         leaseID: RequestLeaseID,
         descriptor: SessionPipelineRequestDescriptor,
         on eventLoop: EventLoop,
-        starter: @escaping @Sendable (Int) -> Void
+        starter: @escaping @Sendable (Int) -> Void,
+        failUnavailable: @escaping @Sendable () -> Void
     ) {
         let request = PendingRequest(
             leaseID: leaseID,
             descriptor: descriptor,
             eventLoop: eventLoop,
-            start: starter
+            start: starter,
+            failUnavailable: failUnavailable
         )
 
         state.withLockedValue { state in
@@ -88,6 +91,28 @@ package final class UpstreamSlotScheduler: Sendable {
             ]
         )
         dispatchQueuedRequestsIfPossible()
+    }
+
+    package func failQueuedRequests() {
+        let failed = state.withLockedValue { state -> [PendingRequest] in
+            let pending = state.pendingRequests
+            state.pendingRequests.removeAll()
+            return pending
+        }
+        guard failed.isEmpty == false else { return }
+
+        for request in failed {
+            logger.debug(
+                "Failing queued request before upstream dispatch",
+                metadata: [
+                    "lease_id": .string(request.leaseID.uuidString),
+                    "label": .string(request.descriptor.label),
+                ]
+            )
+            request.eventLoop.execute {
+                request.failUnavailable()
+            }
+        }
     }
 
     package func cancelQueuedRequest(leaseID: RequestLeaseID) {
@@ -127,6 +152,10 @@ package final class UpstreamSlotScheduler: Sendable {
             state.pendingRequests.removeAll()
             state.activeLeaseIDsByUpstream.removeAll()
         }
+    }
+
+    package func wake() {
+        dispatchQueuedRequestsIfPossible()
     }
 
     private func dispatchQueuedRequestsIfPossible() {

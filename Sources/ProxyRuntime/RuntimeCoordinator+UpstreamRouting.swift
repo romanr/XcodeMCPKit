@@ -3,6 +3,12 @@ import NIO
 import ProxyCore
 
 extension RuntimeCoordinator {
+    func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
+        guard upstreamSelectionPolicy.initializedHealthyishCount() == 0 else { return }
+        guard upstreamSelectionPolicy.anyRecoveryInFlight() == false else { return }
+        upstreamSlotScheduler.failQueuedRequests()
+    }
+
     func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
@@ -539,6 +545,15 @@ extension RuntimeCoordinator {
         upstreamIndex: Int
     ) {
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
+        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let transition = upstreamSelectionPolicy.markProtocolViolation(
+            upstreamIndex: upstreamIndex,
+            nowUptimeNs: nowUptimeNs
+        )
+        transition?.cancelledInitTimeout?.cancel()
+        if upstreamIndex == 0, initializeGate.snapshot().initInFlight {
+            failInitPending(error: TimeoutError())
+        }
         responseCorrelationStore.reset(upstreamIndex: upstreamIndex)
         releaseLeases(
             requestLeaseRegistry.abandonActiveLeases(
@@ -546,6 +561,17 @@ extension RuntimeCoordinator {
                 reason: .stdoutProtocolViolation
             )
         )
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        if let quarantineUntil = transition?.quarantineUntil {
+            logger.warning(
+                "Upstream quarantined after stdout protocol violation",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
+                    "uptime_ns": .string("\(nowUptimeNs)"),
+                ]
+            )
+        }
     }
 
     func handleBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {

@@ -117,6 +117,11 @@ extension RuntimeCoordinator {
             success: success,
             nowUptimeNs: nowUptimeNs
         )
+        if success {
+            upstreamSlotScheduler.wake()
+        } else {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        }
         logger.debug(
             "Upstream health probe completed",
             metadata: [
@@ -287,10 +292,12 @@ extension RuntimeCoordinator {
         guard shouldClear else { return }
         responseCorrelationStore.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
-        guard upstreamIndex == 0 else { return }
-        let shouldRetryEagerInit = initializeGate.consumeRetryAfterWarmInitFailureIfNeeded()
-        if shouldRetryEagerInit {
-            startEagerInitializePrimary()
+        if upstreamIndex == 0 {
+            let shouldRetryEagerInit = initializeGate.consumeRetryAfterWarmInitFailureIfNeeded()
+            if shouldRetryEagerInit {
+                startEagerInitializePrimary()
+            }
         }
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 }

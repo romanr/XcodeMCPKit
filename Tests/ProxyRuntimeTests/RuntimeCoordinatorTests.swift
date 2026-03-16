@@ -760,6 +760,104 @@ struct RuntimeCoordinatorTests {
         #expect((await upstream.sent()).count == 2)
     }
 
+    @Test func sessionManagerSendsInitializedBeforeQueuedRequestAfterWarmInit() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1]
+        )
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let init0ID = try extractUpstreamID(from: init0)
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+
+        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let init1ID = try extractUpstreamID(from: init1)
+
+        let activeDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-active",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
+        let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: activeLeaseID,
+            descriptor: activeDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                activeLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            return activePromise.futureResult
+        }
+        _ = activeFuture
+
+        let queuedRequestData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": NSNumber(value: 99),
+                "method": "tools/list",
+            ],
+            options: []
+        )
+        let queuedDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-queued",
+            label: "tools/list",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let queuedLeaseID = manager.createRequestLease(descriptor: queuedDescriptor)
+        let queuedFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: queuedLeaseID,
+            descriptor: queuedDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                queuedLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            manager.sendUpstream(queuedRequestData, upstreamIndex: selectedUpstreamIndex)
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.debugSnapshot().queuedRequestCount == 1
+        }
+
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
+        _ = try await queuedFuture.get()
+
+        let initializedNotification = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        let queuedRequest = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        #expect(methodName(from: queuedRequest) == "tools/list")
+
+        activePromise.fail(CancellationError())
+    }
+
     @Test func sessionManagerPrimaryExitClearsCachedInitializeResult() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -799,6 +897,104 @@ struct RuntimeCoordinatorTests {
         let upstreamID2 = try extractUpstreamID(from: (await upstream.sent())[2])
         await upstream.yield(.message(try makeInitializeResponse(id: upstreamID2)))
         _ = try await init2.get()
+    }
+
+    @Test func sessionManagerKeepsQueuedRequestsWaitingWhileReinitializeIsInFlight() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let activeDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-active",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
+        let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: activeLeaseID,
+            descriptor: activeDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                activeLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            return activePromise.futureResult
+        }
+        _ = activeFuture
+
+        let queuedRequestData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": NSNumber(value: 199),
+                "method": "tools/list",
+            ],
+            options: []
+        )
+        let queuedDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-queued",
+            label: "tools/list",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let queuedLeaseID = manager.createRequestLease(descriptor: queuedDescriptor)
+        let queuedFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: queuedLeaseID,
+            descriptor: queuedDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                queuedLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            manager.sendUpstream(queuedRequestData, upstreamIndex: selectedUpstreamIndex)
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.debugSnapshot().queuedRequestCount == 1
+        }
+
+        await upstream.yield(.exit(1))
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.testStateSnapshot().upstreams[0].initInFlight
+                && manager.debugSnapshot().queuedRequestCount == 1
+        }
+
+        let reinitRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let reinitUpstreamID = try extractUpstreamID(from: reinitRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: reinitUpstreamID)))
+        _ = try await queuedFuture.get()
+
+        let initializedNotification = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        let queuedRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        #expect(methodName(from: queuedRequest) == "tools/list")
+
+        activePromise.fail(CancellationError())
     }
 
     @Test func sessionManagerSecondaryExitClearsCachedInitializeResultWhenPrimaryAlreadyDown()
@@ -1372,6 +1568,54 @@ struct RuntimeCoordinatorTests {
         #expect(chosen == nil)
     }
 
+    @Test func sessionManagerEnqueueOnUpstreamSlotStartsRecoveryProbeWhenAllUpstreamsAreQuarantined() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 2)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-quarantine-recovery",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop
+        ) { _ in
+            eventLoop.makeSucceededFuture(())
+        }
+
+        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+            try await future.get()
+        }
+
+        let probe = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: probe) == "tools/list")
+    }
+
     @Test func sessionManagerRepinsAfterUpstreamExit() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -1819,6 +2063,191 @@ struct RuntimeCoordinatorTests {
         )
         #expect(nextLease.releaseReason == "completed")
         #expect(successSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+    }
+
+    @Test func sessionManagerProtocolViolationQuarantinesBrokenUpstream() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.handleUpstreamProtocolViolation(
+            StdioFramerProtocolViolation(
+                reason: .invalidJSON,
+                bufferedByteCount: 128,
+                preview: "{broken"
+            ),
+            upstreamIndex: 0
+        )
+
+        let snapshot = manager.testStateSnapshot()
+        let isQuarantined: Bool
+        if case .quarantined = snapshot.upstreams[0].healthState {
+            isQuarantined = true
+        } else {
+            isQuarantined = false
+        }
+        #expect(isQuarantined)
+        #expect(manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil)
+    }
+
+    @Test func sessionManagerProtocolViolationFailsQueuedRequestsWhenNoHealthyUpstreamRemains() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let activeDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-active",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
+        let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: activeLeaseID,
+            descriptor: activeDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                activeLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            return activePromise.futureResult
+        }
+        _ = activeFuture
+
+        let queuedDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-queued",
+            label: "tools/call:ExecuteSnippet",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let queuedLeaseID = manager.createRequestLease(descriptor: queuedDescriptor)
+        let queuedFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: queuedLeaseID,
+            descriptor: queuedDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                queuedLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.debugSnapshot().queuedRequestCount == 1
+        }
+
+        manager.handleUpstreamProtocolViolation(
+            StdioFramerProtocolViolation(
+                reason: .invalidJSON,
+                bufferedByteCount: 128,
+                preview: "{broken"
+            ),
+            upstreamIndex: 0
+        )
+
+        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+            try await queuedFuture.get()
+        }
+        activePromise.fail(CancellationError())
+    }
+
+    @Test func sessionManagerFailsQueuedRequestsWhenHealthProbeRecoveryFails() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.chooseUpstreamIndex()
+
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-probe-failure",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let queuedFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop
+        ) { _ in
+            eventLoop.makeSucceededFuture(())
+        }
+
+        let probeRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let probeUpstreamID = try extractUpstreamID(from: probeRequest)
+        let errorResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: probeUpstreamID),
+            "error": [
+                "code": NSNumber(value: -32000),
+                "message": "probe failed",
+            ],
+        ]
+        await upstream.yield(
+            .message(try JSONSerialization.data(withJSONObject: errorResponse, options: []))
+        )
+
+        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+            try await queuedFuture.get()
+        }
     }
 
     @Test func sessionManagerDebugResetClearsSessionsLeasesAndCache() async throws {

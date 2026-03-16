@@ -7,6 +7,11 @@ package struct HealthProbeRequest: Sendable {
     package let probeGeneration: UInt64
 }
 
+package struct ProtocolViolationTransition: Sendable {
+    package let quarantineUntil: UInt64
+    package let cancelledInitTimeout: Scheduled<Void>?
+}
+
 package final class UpstreamSelectionPolicy: Sendable {
     package struct UpstreamState: Sendable {
         package var isInitialized = false
@@ -67,6 +72,12 @@ package final class UpstreamSelectionPolicy: Sendable {
         state.withLockedValue { state in
             guard !state.upstreamStates.isEmpty else { return false }
             return state.upstreamStates[0].initInFlight
+        }
+    }
+
+    package func anyRecoveryInFlight() -> Bool {
+        state.withLockedValue { state in
+            state.upstreamStates.contains { $0.initInFlight || $0.healthProbeInFlight }
         }
     }
 
@@ -204,6 +215,35 @@ package final class UpstreamSelectionPolicy: Sendable {
         }
     }
 
+    package func markProtocolViolation(
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64
+    ) -> ProtocolViolationTransition? {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            let quarantineUntil = nowUptimeNs &+ 15_000_000_000
+            let cancelledInitTimeout = state.upstreamStates[upstreamIndex].initInFlight
+                ? state.upstreamStates[upstreamIndex].initTimeout
+                : nil
+            if state.upstreamStates[upstreamIndex].initInFlight {
+                state.upstreamStates[upstreamIndex].isInitialized = false
+                state.upstreamStates[upstreamIndex].initInFlight = false
+                state.upstreamStates[upstreamIndex].initTimeout = nil
+                state.upstreamStates[upstreamIndex].initUpstreamID = nil
+                state.upstreamStates[upstreamIndex].didSendInitialized = false
+            }
+            state.upstreamStates[upstreamIndex].healthState = .quarantined(
+                untilUptimeNs: quarantineUntil
+            )
+            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            return ProtocolViolationTransition(
+                quarantineUntil: quarantineUntil,
+                cancelledInitTimeout: cancelledInitTimeout
+            )
+        }
+    }
+
     package func finishHealthProbe(
         upstreamIndex: Int,
         probeGeneration: UInt64,
@@ -247,16 +287,19 @@ package final class UpstreamSelectionPolicy: Sendable {
         }
     }
 
-    package func markDidSendInitializedIfNeeded(upstreamIndex: Int) -> Bool {
+    package func shouldSendInitializedNotification(upstreamIndex: Int) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
                 return false
             }
-            if state.upstreamStates[upstreamIndex].didSendInitialized {
-                return false
-            }
+            return state.upstreamStates[upstreamIndex].didSendInitialized == false
+        }
+    }
+
+    package func markInitializedNotificationSent(upstreamIndex: Int) {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].didSendInitialized = true
-            return true
         }
     }
 

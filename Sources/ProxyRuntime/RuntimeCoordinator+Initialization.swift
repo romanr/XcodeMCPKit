@@ -34,12 +34,15 @@ extension RuntimeCoordinator {
                 }
             } else {
                 clearUpstreamState(upstreamIndex: upstreamIndex)
+                failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             }
             return
         }
 
-        markUpstreamInitialized(upstreamIndex: upstreamIndex)
-        sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex)
+        sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
+            self?.markUpstreamInitialized(upstreamIndex: upstreamIndex)
+            self?.upstreamSlotScheduler.wake()
+        }
 
         if upstreamIndex != 0 {
             return
@@ -127,19 +130,55 @@ extension RuntimeCoordinator {
         if result.shouldRetryEagerInitialize {
             startEagerInitializePrimary()
         }
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
-    func sendInitializedNotificationIfNeeded(upstreamIndex: Int) {
-        let shouldSend = upstreamSelectionPolicy.markDidSendInitializedIfNeeded(upstreamIndex: upstreamIndex)
-        guard shouldSend else { return }
+    func sendInitializedNotificationIfNeeded(
+        upstreamIndex: Int,
+        onAccepted: @escaping @Sendable () -> Void = {}
+    ) {
+        let shouldSend = upstreamSelectionPolicy.shouldSendInitializedNotification(
+            upstreamIndex: upstreamIndex
+        )
+        guard shouldSend else {
+            onAccepted()
+            return
+        }
 
         let notification: [String: Any] = [
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: notification, options: []) {
-            sendUpstream(data, upstreamIndex: upstreamIndex)
+        guard let data = try? JSONSerialization.data(withJSONObject: notification, options: []) else {
+            onAccepted()
+            return
         }
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await self.upstreams[upstreamIndex].send(data)
+            if result == .accepted {
+                self.upstreamSelectionPolicy.markInitializedNotificationSent(upstreamIndex: upstreamIndex)
+                self.recordTraffic(
+                    upstreamIndex: upstreamIndex,
+                    direction: "outbound",
+                    data: data
+                )
+                onAccepted()
+                return
+            }
+            self.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func handleInitializedNotificationSendOverload(upstreamIndex: Int) {
+        clearUpstreamState(upstreamIndex: upstreamIndex)
+        if upstreamIndex == 0 {
+            startEagerInitializePrimary()
+        } else {
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+        }
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
     func scheduleInitTimeout() {
@@ -174,6 +213,7 @@ extension RuntimeCoordinator {
         if result.shouldRetryEagerInitialize {
             startEagerInitializePrimary()
         }
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
     func markUpstreamInitInFlight(upstreamIndex: Int, upstreamID: Int64) {

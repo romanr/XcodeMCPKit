@@ -325,7 +325,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         on eventLoop: EventLoop,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
-        guard upstreamSelectionPolicy.initializedHealthyishCount() > 0 else {
+        let hasHealthyUpstream = upstreamSelectionPolicy.initializedHealthyishCount() > 0
+        let recoveryInFlight = upstreamSelectionPolicy.anyRecoveryInFlight()
+        guard hasHealthyUpstream || recoveryInFlight else {
+            _ = chooseUpstreamIndex()
             return eventLoop.makeFailedFuture(UpstreamSlotAcquisitionError.unavailable)
         }
         let promise = eventLoop.makePromise(of: Output.self)
@@ -335,6 +338,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             on: eventLoop,
             starter: { upstreamIndex in
                 starter(upstreamIndex).cascade(to: promise)
+            },
+            failUnavailable: {
+                promise.fail(UpstreamSlotAcquisitionError.unavailable)
             }
         )
         return promise.futureResult

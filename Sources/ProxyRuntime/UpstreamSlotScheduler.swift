@@ -153,9 +153,24 @@ package final class UpstreamSlotScheduler: Sendable {
     }
 
     package func reset() {
-        state.withLockedValue { state in
+        let cancelled = state.withLockedValue { state -> [PendingRequest] in
+            let pendingRequests = state.pendingRequests
             state.pendingRequests.removeAll()
             state.activeLeaseIDsByUpstream.removeAll()
+            return pendingRequests
+        }
+
+        for request in cancelled {
+            logger.debug(
+                "Cancelled queued request during scheduler reset",
+                metadata: [
+                    "lease_id": .string(request.leaseID.uuidString),
+                    "label": .string(request.descriptor.label),
+                ]
+            )
+            request.eventLoop.execute {
+                request.failCancelled()
+            }
         }
     }
 

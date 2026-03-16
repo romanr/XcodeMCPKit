@@ -521,6 +521,62 @@ struct HTTPConcurrencyTests {
         }
         await server.shutdown()
     }
+
+    @Test func httpConcurrentRefreshCodeIssuesRequestsRespectSingleFlightPerUpstream() async throws {
+        let server = try TestHTTPServer.start(upstream: SingleFlightRefreshUpstreamClient())
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+
+            let responses = try await withThrowingTaskGroup(
+                of: (Int, Bool).self
+            ) { group in
+                for index in 0..<3 {
+                    group.addTask {
+                        let (response, body) = try await postJSON(
+                            url: url,
+                            sessionID: sessionID,
+                            payload: toolCallPayload(
+                                id: index + 300,
+                                name: "XcodeRefreshCodeIssuesInFile",
+                                arguments: [
+                                    "tabIdentifier": "windowtab-refresh-\(index)",
+                                    "filePath": "App\(index).swift",
+                                ]
+                            )
+                        )
+                        let result = body["result"] as? [String: Any]
+                        return (response.statusCode, (result?["isError"] as? Bool) == true)
+                    }
+                }
+
+                var responses: [(Int, Bool)] = []
+                for try await response in group {
+                    responses.append(response)
+                }
+                return responses
+            }
+
+            #expect(responses.count == 3)
+            for (statusCode, isError) in responses {
+                #expect(statusCode == 200)
+                #expect(isError == false)
+            }
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
 }
 
 private enum ConcurrencyTestError: Error {
@@ -919,6 +975,126 @@ private actor RefreshSensitiveUpstreamClient: UpstreamClient {
                         "type": "text",
                         "text":
                             "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)",
+                    ]
+                ],
+                "isError": true,
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+}
+
+private actor SingleFlightRefreshUpstreamClient: UpstreamClient {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private var hasActiveRefresh = false
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return .accepted
+        }
+
+        if let object = json as? [String: Any] {
+            await handle(object)
+            return .accepted
+        }
+
+        if let array = json as? [Any] {
+            for item in array {
+                guard let object = item as? [String: Any] else { continue }
+                await handle(object)
+            }
+        }
+        return .accepted
+    }
+
+    private func handle(_ object: [String: Any]) async {
+        guard let id = object["id"] else { return }
+        let method = object["method"] as? String
+
+        if method == "initialize" {
+            continuation.yield(.message(makeInitializeResponse(id: id)))
+            return
+        }
+
+        guard
+            method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let name = params["name"] as? String,
+            name == "XcodeRefreshCodeIssuesInFile"
+        else {
+            continuation.yield(.message(makeSuccessResponse(id: id)))
+            return
+        }
+
+        if hasActiveRefresh {
+            continuation.yield(.message(makeConcurrentRefreshErrorResponse(id: id)))
+            return
+        }
+
+        hasActiveRefresh = true
+        let responseData = makeSuccessResponse(id: id)
+        Task { [responseData] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            completeRefresh(responseData: responseData)
+        }
+    }
+
+    private func completeRefresh(responseData: Data) {
+        hasActiveRefresh = false
+        continuation.yield(.message(responseData))
+    }
+
+    private func makeInitializeResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "capabilities": [String: Any]()
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeSuccessResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "ok",
+                    ]
+                ]
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeConcurrentRefreshErrorResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "concurrent refresh not allowed",
                     ]
                 ],
                 "isError": true,

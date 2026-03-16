@@ -39,6 +39,11 @@ package struct HTTPPostOperation {
     package let cancellationHandle: HTTPPostCancellationHandle?
 }
 
+private struct RefreshWorkflowExecution {
+    let result: RefreshForwardAttemptResult
+    let usedDirectForwarding: Bool
+}
+
 package enum HTTPPostCancellationSource: String, Sendable {
     case channelInactive
     case responseWriteFailure
@@ -376,24 +381,28 @@ package final class HTTPPostService: Sendable {
 
             let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
             Task { [self] in
-                let attemptResult = await forwardRefreshCodeIssuesRequest(
+                let execution = await forwardRefreshCodeIssuesRequest(
                     refreshRequest,
                     bodyData: bodyData,
                     sessionID: sessionID,
                     requestIDs: requestIDs,
                     requestIsBatch: requestIsBatch,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    leaseID: leaseID,
+                    cancellationHandle: cancellationHandle
                 )
                 eventLoop.execute {
                     cancellationHandle?.markCompleted()
                     promise.succeed(
                         self.makeResolution(
-                            from: attemptResult,
+                            from: execution.result,
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
                     )
-                    self.sessionManager.completeRequestLease(leaseID)
+                    if execution.usedDirectForwarding == false {
+                        self.sessionManager.completeRequestLease(leaseID)
+                    }
                 }
             }
             return promise.futureResult
@@ -798,71 +807,147 @@ package final class HTTPPostService: Sendable {
         requestIDs: [RPCID],
         requestIsBatch: Bool,
         eventLoop: EventLoop,
+        leaseID: RequestLeaseID,
+        cancellationHandle: HTTPPostCancellationHandle?,
         requestTimeoutOverride: TimeAmount? = nil
     ) async -> RefreshForwardAttemptResult {
         let parsedRequestJSON: Any
         do {
             parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
         } catch {
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .invalidUpstreamResponse
+            )
             return .invalidRequest
         }
 
-        let prepared: MCPForwardingService.PreparedRequest
+        let descriptor = Self.topLevelRequestDescriptor(
+            sessionID: sessionID,
+            parsedRequestJSON: parsedRequestJSON,
+            requestIsBatch: requestIsBatch,
+            requestIDs: requestIDs
+        )
+
         do {
-            guard let candidate = try forwardingService.prepareRequest(
-                bodyData: bodyData,
-                parsedRequestJSON: parsedRequestJSON,
-                sessionID: sessionID
-            ) else {
-                return .upstreamUnavailable(
+            let session = sessionManager.session(id: sessionID)
+            let resolution = try await sessionManager.enqueueOnUpstreamSlot(
+                leaseID: leaseID,
+                descriptor: descriptor,
+                on: eventLoop
+            ) { selectedUpstreamIndex in
+                cancellationHandle?.activate(upstreamIndex: selectedUpstreamIndex)
+
+                let parsedAttemptRequestJSON: Any
+                do {
+                    parsedAttemptRequestJSON = try JSONSerialization.jsonObject(
+                        with: bodyData,
+                        options: []
+                    )
+                } catch {
+                    return eventLoop.makeSucceededFuture(
+                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
+                    )
+                }
+
+                let prepared: MCPForwardingService.PreparedRequest
+                do {
+                    guard let candidate = try self.forwardingService.prepareRequest(
+                        bodyData: bodyData,
+                        parsedRequestJSON: parsedAttemptRequestJSON,
+                        sessionID: sessionID,
+                        upstreamIndexOverride: selectedUpstreamIndex
+                    ) else {
+                        return eventLoop.makeSucceededFuture(
+                            MCPForwardingService.ResponseResolution.invalidUpstreamResponse
+                        )
+                    }
+                    prepared = candidate
+                } catch {
+                    return eventLoop.makeSucceededFuture(
+                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
+                    )
+                }
+
+                let started: MCPForwardingService.StartedRequest
+                do {
+                    started = try self.forwardingService.startRequest(
+                        prepared,
+                        session: session,
+                        on: eventLoop,
+                        requestTimeoutOverride: requestTimeoutOverride,
+                        leaseID: leaseID,
+                        onTimeout: {
+                            self.sessionManager.handleRequestLeaseTimeout(
+                                leaseID,
+                                sessionID: sessionID,
+                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
+                                upstreamIndex: prepared.upstreamIndex
+                            )
+                        }
+                    )
+                    cancellationHandle?.bindRouterPendingToken(started.routerPendingToken)
+                } catch {
+                    return eventLoop.makeSucceededFuture(
+                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
+                    )
+                }
+
+                return started.future.map { buffer in
+                    self.forwardingService.resolveResponse(
+                        .success(buffer),
+                        started: started,
+                        sessionID: sessionID,
+                        accountTimeout: false
+                    )
+                }.flatMapErrorThrowing { error in
+                    self.forwardingService.resolveResponse(
+                        .failure(error),
+                        started: started,
+                        sessionID: sessionID,
+                        accountTimeout: false
+                    )
+                }
+            }.get()
+
+            switch resolution {
+            case .success(let responseData):
+                sessionManager.completeRequestLease(leaseID)
+                return .success(responseData)
+            case .timeout:
+                sessionManager.failRequestLease(
+                    leaseID,
+                    terminalState: .timedOut,
+                    reason: .timedOut
+                )
+                return .timeout(
                     responseIDs: requestIDs,
                     isBatch: requestIsBatch
                 )
+            case .invalidUpstreamResponse:
+                sessionManager.failRequestLease(
+                    leaseID,
+                    terminalState: .failed,
+                    reason: .invalidUpstreamResponse
+                )
+                return .invalidUpstreamResponse
             }
-            prepared = candidate
-        } catch {
-            return .invalidRequest
-        }
-
-        let session = sessionManager.session(id: sessionID)
-        let started: MCPForwardingService.StartedRequest
-        do {
-            started = try forwardingService.startRequest(
-                prepared,
-                session: session,
-                on: eventLoop,
-                requestTimeoutOverride: requestTimeoutOverride
-            )
-        } catch {
-            return .invalidRequest
-        }
-
-        let resolution: MCPForwardingService.ResponseResolution
-        do {
-            let buffer = try await started.future.get()
-            resolution = forwardingService.resolveResponse(
-                .success(buffer),
-                started: started,
-                sessionID: sessionID
-            )
-        } catch {
-            resolution = forwardingService.resolveResponse(
-                .failure(error),
-                started: started,
-                sessionID: sessionID
-            )
-        }
-
-        switch resolution {
-        case .success(let responseData):
-            return .success(responseData)
-        case .timeout:
+        } catch is CancellationError {
             return .timeout(
-                responseIDs: started.transform.responseIDs,
-                isBatch: started.transform.isBatch
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
             )
-        case .invalidUpstreamResponse:
-            return .invalidUpstreamResponse
+        } catch {
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .upstreamUnavailable
+            )
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
         }
     }
 
@@ -904,9 +989,12 @@ package final class HTTPPostService: Sendable {
         sessionID: String,
         requestIDs: [RPCID],
         requestIsBatch: Bool,
-        eventLoop: EventLoop
-    ) async -> RefreshForwardAttemptResult {
-        await refreshWorkflow.run(
+        eventLoop: EventLoop,
+        leaseID: RequestLeaseID,
+        cancellationHandle: HTTPPostCancellationHandle?
+    ) async -> RefreshWorkflowExecution {
+        let usedDirectForwarding = NIOLockedValueBox(false)
+        let result = await refreshWorkflow.run(
             refreshRequest: refreshRequest,
             bodyData: bodyData,
             sessionID: sessionID,
@@ -937,15 +1025,22 @@ package final class HTTPPostService: Sendable {
             },
             forwarder: {
                 bodyData, sessionID, requestIDs, requestIsBatch, eventLoop, requestTimeoutOverride in
-                await self.forwardOnce(
+                usedDirectForwarding.withLockedValue { $0 = true }
+                return await self.forwardOnce(
                     bodyData: bodyData,
                     sessionID: sessionID,
                     requestIDs: requestIDs,
                     requestIsBatch: requestIsBatch,
                     eventLoop: eventLoop,
+                    leaseID: leaseID,
+                    cancellationHandle: cancellationHandle,
                     requestTimeoutOverride: requestTimeoutOverride
                 )
             }
+        )
+        return RefreshWorkflowExecution(
+            result: result,
+            usedDirectForwarding: usedDirectForwarding.withLockedValue { $0 }
         )
     }
 

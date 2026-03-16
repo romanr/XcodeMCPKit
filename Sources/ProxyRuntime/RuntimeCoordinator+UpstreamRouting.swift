@@ -516,11 +516,29 @@ extension RuntimeCoordinator {
             return
         }
 
-        let routedTargets: [SessionContext]
+        var routedTargets: [SessionContext] = []
+        var routedSessionIDs = Set<String>()
+
         if upstreamIndex == 0 {
-            routedTargets = initializeGate.pendingSessionIDs().map { session(id: $0) }
-        } else {
-            routedTargets = []
+            for pending in initializeGate.pendingInitializes() {
+                guard sessionStillMatchesPendingInitialize(
+                    sessionID: pending.sessionID,
+                    sessionGeneration: pending.sessionGeneration
+                ),
+                    let target = sessionStore.contextIfPresent(id: pending.sessionID),
+                    routedSessionIDs.insert(target.id).inserted
+                else {
+                    continue
+                }
+                routedTargets.append(target)
+            }
+        }
+
+        for target in sessionStore.activeNotificationTargets() {
+            guard routedSessionIDs.insert(target.id).inserted else {
+                continue
+            }
+            routedTargets.append(target)
         }
 
         if !routedTargets.isEmpty {

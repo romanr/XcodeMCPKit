@@ -246,7 +246,7 @@ package final class HTTPPostService: Sendable {
         )
         let session = sessionManager.session(id: sessionID)
         let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
-        if refreshRequest != nil {
+        if refreshRequest != nil, requestIDs.isEmpty == false {
             return HTTPPostOperation(
                 future: makeTopLevelRequestFuture(
                     bodyData: bodyData,

@@ -47,6 +47,10 @@ package final class SessionStore: Sendable {
         state.withLockedValue { $0.sessions[sessionID]?.generation }
     }
 
+    package func contextIfPresent(id sessionID: String) -> SessionContext? {
+        state.withLockedValue { $0.sessions[sessionID]?.context }
+    }
+
     package func sessionStillMatchesPendingInitialize(
         sessionID: String,
         sessionGeneration: UInt64
@@ -59,6 +63,14 @@ package final class SessionStore: Sendable {
 
     package func sessionIDs() -> [String] {
         state.withLockedValue { Array($0.sessions.keys).sorted() }
+    }
+
+    package func activeNotificationTargets() -> [SessionContext] {
+        state.withLockedValue { state in
+            state.sessions.values.compactMap { record in
+                record.context.notificationHub.hasClients ? record.context : nil
+            }
+        }
     }
 
     package func removeAllSessions() -> [SessionContext] {

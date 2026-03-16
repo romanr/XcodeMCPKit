@@ -5,6 +5,7 @@ import NIOHTTP1
 import Testing
 import ProxyCore
 import ProxyRuntime
+import XcodeMCPTestSupport
 @testable import ProxyHTTPTransport
 import ProxyFeatureXcode
 
@@ -577,6 +578,120 @@ struct HTTPConcurrencyTests {
         }
         await server.shutdown()
     }
+
+    @Test func httpRefreshCodeIssuesNotificationForwardsWithoutInvalidUpstreamOverride()
+        async throws
+    {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+            await upstream.clearRecordedRequests()
+
+            let response = try await postStatusOnly(
+                url: url,
+                sessionID: sessionID,
+                payload: toolCallNotificationPayload(
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-refresh-notification",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 202)
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == ["tools/call:XcodeRefreshCodeIssuesInFile"]
+                }
+            )
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpServerNotificationsReachActiveSSESessions() async throws {
+        let upstream = NotifyingUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        let url = server.url
+
+        do {
+            let (initializeResponse, _) = try await postJSON(
+                url: url,
+                sessionID: nil,
+                payload: initializePayload(id: 1)
+            )
+            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
+            else {
+                throw ConcurrencyTestError.missingSessionID
+            }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+
+            let sseTask = Task<(HTTPURLResponse, String), Error> {
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw ConcurrencyTestError.invalidResponse
+                }
+
+                var iterator = bytes.lines.makeAsyncIterator()
+                while let line = try await iterator.next() {
+                    if line.hasPrefix("data: ") {
+                        return (httpResponse, String(line.dropFirst(6)))
+                    }
+                }
+
+                throw ConcurrencyTestError.invalidResponse
+            }
+            defer { sseTask.cancel() }
+
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    server.sessionManager.session(id: sessionID).notificationHub.hasSseClients
+                }
+            )
+
+            let notificationData = try JSONSerialization.data(
+                withJSONObject: [
+                    "jsonrpc": "2.0",
+                    "method": "notifications/test",
+                    "params": ["value": 42],
+                ],
+                options: []
+            )
+            await upstream.pushNotification(notificationData)
+
+            let (response, line) = try await waitWithTimeout(
+                "waiting for SSE notification",
+                timeout: .seconds(2)
+            ) {
+                try await sseTask.value
+            }
+
+            #expect(response.statusCode == 200)
+            #expect(line == String(decoding: notificationData, as: UTF8.self))
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
 }
 
 private enum ConcurrencyTestError: Error {
@@ -1104,6 +1219,55 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamClient {
     }
 }
 
+private actor NotifyingUpstreamClient: UpstreamClient {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+
+    init() {
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+            let method = object["method"] as? String
+        else {
+            return .accepted
+        }
+
+        if method == "initialize", let id = object["id"] {
+            continuation.yield(.message(makeInitializeResponse(id: id)))
+        }
+
+        return .accepted
+    }
+
+    func pushNotification(_ data: Data) {
+        continuation.yield(.message(data))
+    }
+
+    private func makeInitializeResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "capabilities": [String: Any]()
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+}
+
 private func initializePayload(id: Int) -> [String: Any] {
     [
         "jsonrpc": "2.0",
@@ -1128,6 +1292,20 @@ private func toolCallPayload(
     [
         "jsonrpc": "2.0",
         "id": id,
+        "method": "tools/call",
+        "params": [
+            "name": name,
+            "arguments": arguments,
+        ],
+    ]
+}
+
+private func toolCallNotificationPayload(
+    name: String,
+    arguments: [String: Any]
+) -> [String: Any] {
+    [
+        "jsonrpc": "2.0",
         "method": "tools/call",
         "params": [
             "name": name,

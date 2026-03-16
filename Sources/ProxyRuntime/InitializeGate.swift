@@ -245,6 +245,21 @@ package final class InitializeGate: Sendable {
         }
     }
 
+    package func resetForDebug() -> (pending: [PendingInitialize], timeout: Scheduled<Void>?) {
+        state.withLockedValue { state in
+            let result = (pending: state.initPending, timeout: state.initTimeout)
+            state.initResult = nil
+            state.initPending.removeAll()
+            state.initInFlight = false
+            state.initTimeout = nil
+            state.isShuttingDown = false
+            state.didWarmSecondary = false
+            state.primaryInitUpstreamID = nil
+            state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
+            return result
+        }
+    }
+
     package func setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(_ shouldRetry: Bool) {
         state.withLockedValue { state in
             state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = shouldRetry

@@ -40,3 +40,7 @@ package struct SessionDebugSnapshot: Codable, Sendable {
     package var currentRequestStartedAt: Date? { nil }
     package var pendingRequestCount: Int { 0 }
 }
+
+package enum UpstreamSlotAcquisitionError: Error {
+    case unavailable
+}

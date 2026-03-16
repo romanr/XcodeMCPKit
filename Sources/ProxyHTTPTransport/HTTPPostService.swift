@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIO
+import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import NIOHTTP1
 import ProxyCore
@@ -33,12 +34,84 @@ package enum HTTPPostResolution {
     )
 }
 
+package struct HTTPPostOperation {
+    package let future: EventLoopFuture<HTTPPostResolution>
+    package let cancellationHandle: HTTPPostCancellationHandle?
+}
+
+package enum HTTPPostCancellationSource: String, Sendable {
+    case channelInactive
+    case responseWriteFailure
+}
+
+package final class HTTPPostCancellationHandle: @unchecked Sendable {
+    private struct State: Sendable {
+        var upstreamIndex: Int?
+        var routerPendingToken: UUID?
+        var isTerminal = false
+    }
+
+    package let leaseID: RequestLeaseID
+    package let sessionID: String
+    package let requestIDKeys: [String]
+    private let state = NIOLockedValueBox(State())
+
+    package init(
+        leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String]
+    ) {
+        self.leaseID = leaseID
+        self.sessionID = sessionID
+        self.requestIDKeys = requestIDKeys
+    }
+
+    package func activate(upstreamIndex: Int) {
+        state.withLockedValue { state in
+            guard !state.isTerminal else { return }
+            state.upstreamIndex = upstreamIndex
+        }
+    }
+
+    package func bindRouterPendingToken(_ token: UUID) {
+        state.withLockedValue { state in
+            guard !state.isTerminal else { return }
+            state.routerPendingToken = token
+        }
+    }
+
+    package func markCompleted() {
+        state.withLockedValue { state in
+            state.isTerminal = true
+        }
+    }
+
+    package func cancel(using runtime: any RuntimeCoordinating) {
+        let snapshot = state.withLockedValue { state -> (Int?, UUID?)? in
+            guard !state.isTerminal else { return nil }
+            state.isTerminal = true
+            return (state.upstreamIndex, state.routerPendingToken)
+        }
+        guard let snapshot else { return }
+        if let routerPendingToken = snapshot.1, runtime.hasSession(id: sessionID) {
+            _ = runtime.session(id: sessionID).router.cancelPending(token: routerPendingToken)
+        }
+        runtime.abandonRequestLease(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            upstreamIndex: snapshot.0
+        )
+    }
+}
+
 package final class HTTPPostService: Sendable {
     private let sessionManager: any RuntimeCoordinating
     private let localResponder: LocalMCPResponder
     private let forwardingService: MCPForwardingService
     private let windowQueryService: XcodeWindowQueryService
     private let refreshWorkflow: RefreshCodeIssuesWorkflow
+    private let requestTimeoutSeconds: TimeInterval
     private let logger: Logger
 
     package init(
@@ -49,6 +122,7 @@ package final class HTTPPostService: Sendable {
         refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
         logger: Logger = ProxyLogging.make("http")
     ) {
+        self.requestTimeoutSeconds = config.requestTimeout
         self.sessionManager = sessionManager
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
@@ -77,7 +151,7 @@ package final class HTTPPostService: Sendable {
         headerSessionExists: Bool,
         prefersEventStream: Bool,
         eventLoop: EventLoop
-    ) -> EventLoopFuture<HTTPPostResolution> {
+    ) -> HTTPPostOperation {
         let requestMetadata = MCPErrorResponder.requestMetadata(from: bodyData)
         let requestIDs = requestMetadata.ids
         let requestIsBatch = requestMetadata.isBatch
@@ -91,10 +165,13 @@ package final class HTTPPostService: Sendable {
                 eventLoop: eventLoop
             )
         {
-            return resolveLocalHandling(
-                localHandling,
-                prefersEventStream: prefersEventStream,
-                eventLoop: eventLoop
+            return HTTPPostOperation(
+                future: resolveLocalHandling(
+                    localHandling,
+                    prefersEventStream: prefersEventStream,
+                    eventLoop: eventLoop
+                ),
+                cancellationHandle: nil
             )
         }
 
@@ -106,38 +183,47 @@ package final class HTTPPostService: Sendable {
 
         if sessionManager.isInitialized() == false {
             if requestIDs.isEmpty {
-                return eventLoop.makeSucceededFuture(
-                    .plain(
-                        status: .unprocessableEntity,
-                        body: "expected initialize request",
-                        sessionID: sessionID
-                    )
+                return HTTPPostOperation(
+                    future: eventLoop.makeSucceededFuture(
+                        .plain(
+                            status: .unprocessableEntity,
+                            body: "expected initialize request",
+                            sessionID: sessionID
+                        )
+                    ),
+                    cancellationHandle: nil
                 )
             }
-            return eventLoop.makeSucceededFuture(
-                .mcpError(
-                    id: nil,
-                    ids: requestIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                )
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: requestIDs,
+                        code: -32000,
+                        message: "expected initialize request",
+                        forceBatchArray: requestIsBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                ),
+                cancellationHandle: nil
             )
         }
 
         guard let parsedRequestJSON else {
-            return eventLoop.makeSucceededFuture(
-                .mcpError(
-                    id: nil,
-                    ids: [],
-                    code: -32700,
-                    message: "invalid json",
-                    forceBatchArray: false,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                )
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: [],
+                        code: -32700,
+                        message: "invalid json",
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                ),
+                cancellationHandle: nil
             )
         }
 
@@ -148,17 +234,87 @@ package final class HTTPPostService: Sendable {
             requestIDs: requestIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let session = sessionManager.session(id: sessionID)
-        return makeTopLevelRequestFuture(
-            bodyData: bodyData,
+        let cancellationHandle = HTTPPostCancellationHandle(
+            leaseID: leaseID,
             sessionID: sessionID,
-            headerSessionID: headerSessionID,
-            requestIDs: requestIDs,
-            requestIsBatch: requestIsBatch,
-            prefersEventStream: prefersEventStream,
-            eventLoop: eventLoop,
-            session: session,
-            leaseID: leaseID
+            requestIDKeys: requestIDs.map(\.key)
+        )
+        let session = sessionManager.session(id: sessionID)
+        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
+        if refreshRequest != nil {
+            return HTTPPostOperation(
+                future: makeTopLevelRequestFuture(
+                    bodyData: bodyData,
+                    sessionID: sessionID,
+                    headerSessionID: headerSessionID,
+                    requestIDs: requestIDs,
+                    requestIsBatch: requestIsBatch,
+                    prefersEventStream: prefersEventStream,
+                    eventLoop: eventLoop,
+                    session: session,
+                    leaseID: leaseID,
+                    upstreamIndex: -1,
+                    cancellationHandle: cancellationHandle
+                ),
+                cancellationHandle: cancellationHandle
+            )
+        }
+        let future = sessionManager.enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop
+        ) { upstreamIndex in
+            cancellationHandle.activate(upstreamIndex: upstreamIndex)
+            self.sessionManager.activateRequestLease(
+                leaseID,
+                requestIDKey: nil,
+                upstreamIndex: upstreamIndex,
+                timeout: nil
+            )
+            return self.makeTopLevelRequestFuture(
+                bodyData: bodyData,
+                sessionID: sessionID,
+                headerSessionID: headerSessionID,
+                requestIDs: requestIDs,
+                requestIsBatch: requestIsBatch,
+                prefersEventStream: prefersEventStream,
+                eventLoop: eventLoop,
+                session: session,
+                leaseID: leaseID,
+                upstreamIndex: upstreamIndex,
+                cancellationHandle: cancellationHandle
+            )
+        }.flatMapError { _ in
+            cancellationHandle.markCompleted()
+            self.sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .upstreamOverloaded
+            )
+            if requestIDs.isEmpty {
+                return eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .serviceUnavailable,
+                        body: "upstream unavailable",
+                        sessionID: sessionID
+                    )
+                )
+            }
+            return eventLoop.makeSucceededFuture(
+                .mcpError(
+                    id: nil,
+                    ids: requestIDs,
+                    code: -32001,
+                    message: "upstream unavailable",
+                    forceBatchArray: requestIsBatch,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                )
+            )
+        }
+        return HTTPPostOperation(
+            future: future,
+            cancellationHandle: cancellationHandle
         )
     }
 
@@ -171,7 +327,9 @@ package final class HTTPPostService: Sendable {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         session: SessionContext,
-        leaseID: RequestLeaseID
+        leaseID: RequestLeaseID,
+        upstreamIndex: Int,
+        cancellationHandle: HTTPPostCancellationHandle?
     ) -> EventLoopFuture<HTTPPostResolution> {
         let parsedRequestJSON: Any
         do {
@@ -188,11 +346,13 @@ package final class HTTPPostService: Sendable {
                 prefersEventStream: prefersEventStream
                 ),
                 leaseID: leaseID,
-                eventLoop: eventLoop
+                eventLoop: eventLoop,
+                cancellationHandle: cancellationHandle
             )
         }
 
         let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
+
         if let refreshRequest, requestIDs.isEmpty == false {
             if headerSessionID == nil {
                 return makeImmediateLeaseResolution(
@@ -206,7 +366,8 @@ package final class HTTPPostService: Sendable {
                     prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    cancellationHandle: cancellationHandle
                 )
             }
 
@@ -221,6 +382,7 @@ package final class HTTPPostService: Sendable {
                     eventLoop: eventLoop
                 )
                 eventLoop.execute {
+                    cancellationHandle?.markCompleted()
                     promise.succeed(
                         self.makeResolution(
                             from: attemptResult,
@@ -239,7 +401,8 @@ package final class HTTPPostService: Sendable {
             guard let candidate = try forwardingService.prepareRequest(
                 bodyData: bodyData,
                 parsedRequestJSON: parsedRequestJSON,
-                sessionID: sessionID
+                sessionID: sessionID,
+                upstreamIndexOverride: upstreamIndex
             ) else {
                 if requestIDs.isEmpty {
                     return makeImmediateLeaseResolution(
@@ -249,7 +412,8 @@ package final class HTTPPostService: Sendable {
                         sessionID: sessionID
                         ),
                         leaseID: leaseID,
-                        eventLoop: eventLoop
+                        eventLoop: eventLoop,
+                        cancellationHandle: cancellationHandle
                     )
                 }
                 return makeImmediateLeaseResolution(
@@ -263,7 +427,8 @@ package final class HTTPPostService: Sendable {
                     prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    cancellationHandle: cancellationHandle
                 )
             }
             prepared = candidate
@@ -279,7 +444,8 @@ package final class HTTPPostService: Sendable {
                 prefersEventStream: prefersEventStream
                 ),
                 leaseID: leaseID,
-                eventLoop: eventLoop
+                eventLoop: eventLoop,
+                cancellationHandle: cancellationHandle
             )
         }
 
@@ -310,7 +476,8 @@ package final class HTTPPostService: Sendable {
                         sessionID: sessionID
                         ),
                         leaseID: leaseID,
-                        eventLoop: eventLoop
+                        eventLoop: eventLoop,
+                        cancellationHandle: cancellationHandle
                     )
                 }
                 return makeImmediateLeaseResolution(
@@ -324,7 +491,8 @@ package final class HTTPPostService: Sendable {
                     prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    cancellationHandle: cancellationHandle
                 )
             }
         }
@@ -332,11 +500,29 @@ package final class HTTPPostService: Sendable {
         if prepared.transform.expectsResponse {
             let started: MCPForwardingService.StartedRequest
             do {
+                let requestTimeoutOverride = Self.topLevelRequestTimeoutOverride(
+                    method: prepared.transform.method,
+                    defaultSeconds: requestTimeoutSeconds
+                )
+                logger.debug(
+                    "Starting top-level upstream request",
+                    metadata: [
+                        "lease_id": .string(leaseID.uuidString),
+                        "session": .string(sessionID),
+                        "label": .string(Self.requestLabel(from: parsedRequestJSON)),
+                        "upstream": .string("\(prepared.upstreamIndex)"),
+                        "timeout_ms": .string(
+                            requestTimeoutOverride.map { "\($0.nanoseconds / 1_000_000)" }
+                                ?? "disabled"
+                        ),
+                    ]
+                )
                 started = try forwardingService.startRequest(
                     prepared,
                     session: session,
                     on: eventLoop
                     ,
+                    requestTimeoutOverride: requestTimeoutOverride,
                     leaseID: leaseID,
                     onTimeout: {
                         self.sessionManager.handleRequestLeaseTimeout(
@@ -347,6 +533,7 @@ package final class HTTPPostService: Sendable {
                         )
                     }
                 )
+                cancellationHandle?.bindRouterPendingToken(started.routerPendingToken)
             } catch {
                 return makeImmediateLeaseResolution(
                     .mcpError(
@@ -359,7 +546,8 @@ package final class HTTPPostService: Sendable {
                     prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
-                    eventLoop: eventLoop
+                    eventLoop: eventLoop,
+                    cancellationHandle: cancellationHandle
                 )
             }
 
@@ -373,7 +561,18 @@ package final class HTTPPostService: Sendable {
                 )
                 switch resolution {
                 case .success(let responseData):
+                    cancellationHandle?.markCompleted()
                     self.sessionManager.completeRequestLease(leaseID)
+                    self.logger.debug(
+                        "Finished top-level upstream request",
+                        metadata: [
+                            "lease_id": .string(leaseID.uuidString),
+                            "session": .string(sessionID),
+                            "release_reason": .string("completed"),
+                            "upstream": .string("\(prepared.upstreamIndex)"),
+                            "request_ids": .string(started.transform.responseIDs.map(\.key).joined(separator: ",")),
+                        ]
+                    )
                     promise.succeed(
                         .responseData(
                             data: responseData,
@@ -382,10 +581,21 @@ package final class HTTPPostService: Sendable {
                         )
                     )
                 case .invalidUpstreamResponse:
+                    cancellationHandle?.markCompleted()
                     self.sessionManager.failRequestLease(
                         leaseID,
                         terminalState: .failed,
                         reason: .invalidUpstreamResponse
+                    )
+                    self.logger.debug(
+                        "Finished top-level upstream request",
+                        metadata: [
+                            "lease_id": .string(leaseID.uuidString),
+                            "session": .string(sessionID),
+                            "release_reason": .string("invalidUpstreamResponse"),
+                            "upstream": .string("\(prepared.upstreamIndex)"),
+                            "request_ids": .string(started.transform.responseIDs.map(\.key).joined(separator: ",")),
+                        ]
                     )
                     promise.succeed(
                         .plain(
@@ -395,10 +605,21 @@ package final class HTTPPostService: Sendable {
                         )
                     )
                 case .timeout:
+                    cancellationHandle?.markCompleted()
                     self.sessionManager.failRequestLease(
                         leaseID,
                         terminalState: .timedOut,
                         reason: .timedOut
+                    )
+                    self.logger.debug(
+                        "Finished top-level upstream request",
+                        metadata: [
+                            "lease_id": .string(leaseID.uuidString),
+                            "session": .string(sessionID),
+                            "release_reason": .string("timedOut"),
+                            "upstream": .string("\(prepared.upstreamIndex)"),
+                            "request_ids": .string(started.transform.responseIDs.map(\.key).joined(separator: ",")),
+                        ]
                     )
                     promise.succeed(
                         .mcpError(
@@ -420,7 +641,8 @@ package final class HTTPPostService: Sendable {
             return makeImmediateLeaseResolution(
                 .empty(status: .accepted, sessionID: sessionID),
                 leaseID: leaseID,
-                eventLoop: eventLoop
+                eventLoop: eventLoop,
+                cancellationHandle: cancellationHandle
             )
         }
 
@@ -431,7 +653,8 @@ package final class HTTPPostService: Sendable {
         return makeImmediateLeaseResolution(
             .empty(status: .accepted, sessionID: sessionID),
             leaseID: leaseID,
-            eventLoop: eventLoop
+            eventLoop: eventLoop,
+            cancellationHandle: cancellationHandle
         )
     }
 
@@ -801,9 +1024,34 @@ package final class HTTPPostService: Sendable {
     private func makeImmediateLeaseResolution(
         _ resolution: HTTPPostResolution,
         leaseID: RequestLeaseID,
-        eventLoop: EventLoop
+        eventLoop: EventLoop,
+        cancellationHandle: HTTPPostCancellationHandle?
     ) -> EventLoopFuture<HTTPPostResolution> {
+        cancellationHandle?.markCompleted()
         sessionManager.completeRequestLease(leaseID)
         return eventLoop.makeSucceededFuture(resolution)
+    }
+
+    package func cancel(
+        _ handle: HTTPPostCancellationHandle,
+        source: HTTPPostCancellationSource = .channelInactive
+    ) {
+        logger.debug(
+            "Cancelling top-level upstream request",
+            metadata: [
+                "lease_id": .string(handle.leaseID.uuidString),
+                "session": .string(handle.sessionID),
+                "disconnect_source": .string(source.rawValue),
+                "request_ids": .string(handle.requestIDKeys.joined(separator: ",")),
+            ]
+        )
+        handle.cancel(using: sessionManager)
+    }
+
+    private static func topLevelRequestTimeoutOverride(
+        method: String?,
+        defaultSeconds: TimeInterval
+    ) -> TimeAmount? {
+        MCPMethodDispatcher.timeoutForMethod(method, defaultSeconds: defaultSeconds)
     }
 }

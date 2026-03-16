@@ -106,7 +106,10 @@ package final class UpstreamSelectionPolicy: Sendable {
         return (usable, probes)
     }
 
-    package func chooseBestInitializedUpstream(nowUptimeNs: UInt64) -> (Int?, [HealthProbeRequest]) {
+    package func chooseBestInitializedUpstream(
+        nowUptimeNs: UInt64,
+        occupiedUpstreams: Set<Int>
+    ) -> (Int?, [HealthProbeRequest]) {
         var probes: [HealthProbeRequest] = []
         let chosen = state.withLockedValue { state -> Int? in
             let count = state.upstreamStates.count
@@ -119,6 +122,9 @@ package final class UpstreamSelectionPolicy: Sendable {
             var degradedCandidate: Int?
             for offset in 0..<count {
                 let candidate = (start + offset) % count
+                if occupiedUpstreams.contains(candidate) {
+                    continue
+                }
                 guard state.upstreamStates[candidate].isInitialized else { continue }
                 let health = Self.classifyHealthAndCollectProbeIfNeeded(
                     upstreamIndex: candidate,
@@ -251,6 +257,15 @@ package final class UpstreamSelectionPolicy: Sendable {
             }
             state.upstreamStates[upstreamIndex].didSendInitialized = true
             return true
+        }
+    }
+
+    package func resetForDebug() -> [Scheduled<Void>?] {
+        state.withLockedValue { state in
+            let timeouts = state.upstreamStates.map(\.initTimeout)
+            state.upstreamStates = Array(repeating: UpstreamState(), count: state.upstreamStates.count)
+            state.nextPick = 0
+            return timeouts
         }
     }
 

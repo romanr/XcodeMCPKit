@@ -8,23 +8,17 @@ package actor UpstreamProcess: UpstreamClient {
         package var command: String
         package var args: [String]
         package var environment: [String: String]
-        package var restartInitialDelay: TimeInterval
-        package var restartMaxDelay: TimeInterval
         package var maxQueuedWriteBytes: Int
 
         package init(
             command: String,
             args: [String],
             environment: [String: String],
-            restartInitialDelay: TimeInterval,
-            restartMaxDelay: TimeInterval,
             maxQueuedWriteBytes: Int
         ) {
             self.command = command
             self.args = args
             self.environment = environment
-            self.restartInitialDelay = restartInitialDelay
-            self.restartMaxDelay = restartMaxDelay
             self.maxQueuedWriteBytes = maxQueuedWriteBytes
         }
     }
@@ -40,10 +34,8 @@ package actor UpstreamProcess: UpstreamClient {
     private var stdinPipe = Pipe()
     private var stdoutPipe = Pipe()
     private var stderrPipe = Pipe()
-    private var restartDelay: TimeInterval
     private var framer = StdioFramer()
     private var isStopping = false
-    private var restartTask: Task<Void, Never>?
     private var queuedWriteBytes = 0
     private var writeGeneration: UInt64 = 0
     private var stderrBuffer = ""
@@ -54,7 +46,6 @@ package actor UpstreamProcess: UpstreamClient {
 
     package init(config: Config) {
         self.config = config
-        self.restartDelay = config.restartInitialDelay
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
@@ -69,28 +60,9 @@ package actor UpstreamProcess: UpstreamClient {
 
     package func stop() async {
         isStopping = true
-        restartTask?.cancel()
-        restartTask = nil
         stopLocked()
         terminatingProcess = nil
         continuation.finish()
-    }
-
-    package func requestRestart() async {
-        guard !isStopping else { return }
-        restartTask?.cancel()
-        restartTask = nil
-
-        // If we're already down (or never started), just start immediately.
-        if process == nil {
-            startLocked()
-            return
-        }
-
-        logger.warning("Upstream restart requested")
-        restartDelay = config.restartInitialDelay
-        stopLocked()
-        // The termination handler will emit an .exit event and schedule a restart.
     }
 
     package func send(_ data: Data) async -> UpstreamSendResult {
@@ -190,10 +162,8 @@ package actor UpstreamProcess: UpstreamClient {
         do {
             try process.run()
             self.process = process
-            restartDelay = config.restartInitialDelay
         } catch {
             logger.error("Failed to start upstream process", metadata: ["error": "\(error)"])
-            scheduleRestart()
         }
     }
 
@@ -248,9 +218,6 @@ package actor UpstreamProcess: UpstreamClient {
             ]
         )
         continuation.yield(.stdoutProtocolViolation(protocolViolation))
-        Task { [weak self] in
-            await self?.requestRestart()
-        }
     }
 
     private func resetBufferedStdoutBytesIfNeeded() {
@@ -276,9 +243,6 @@ package actor UpstreamProcess: UpstreamClient {
             return
         }
 
-        // If we're terminating an old process (e.g. via requestRestart) and a replacement process is
-        // already running, suppress the exit event. Otherwise, SessionManager will treat this as an
-        // upstream outage and clear pins/mappings for an upstream that is actually healthy.
         if wasTerminating, process != nil {
             logger.debug("Upstream process exited (superseded)", metadata: ["status": "\(status)"])
             return
@@ -286,10 +250,6 @@ package actor UpstreamProcess: UpstreamClient {
 
         logger.warning("Upstream process exited", metadata: ["status": "\(status)"])
         continuation.yield(.exit(status))
-        // If a replacement process is already running, don't schedule another restart.
-        if process == nil {
-            scheduleRestart()
-        }
     }
 
     private func handleStderrData(_ data: Data) {
@@ -331,24 +291,6 @@ package actor UpstreamProcess: UpstreamClient {
         let message = suffix.isEmpty ? trimmed : trimmed + suffix
         logger.error("Upstream stderr: \(message)")
         continuation.yield(.stderr(message))
-    }
-
-    private func scheduleRestart() {
-        guard !isStopping else { return }
-        let delay = restartDelay
-        restartDelay = min(restartDelay * 2, config.restartMaxDelay)
-        restartTask?.cancel()
-        restartTask = Task { [weak self] in
-            guard let self else { return }
-            let nanos = UInt64(delay * 1_000_000_000)
-            do {
-                try await Task.sleep(nanoseconds: nanos)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            await self.start()
-        }
     }
 
     private func resolveCommand(command: String, args: [String]) -> (URL, [String]) {

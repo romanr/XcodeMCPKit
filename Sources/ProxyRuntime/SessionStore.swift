@@ -61,6 +61,14 @@ package final class SessionStore: Sendable {
         state.withLockedValue { Array($0.sessions.keys).sorted() }
     }
 
+    package func removeAllSessions() -> [SessionContext] {
+        state.withLockedValue { state in
+            let contexts = state.sessions.values.map(\.context)
+            state.sessions.removeAll()
+            return contexts
+        }
+    }
+
     func testSnapshot(id: String) -> RuntimeCoordinator.TestSnapshot.Session? {
         state.withLockedValue { state in
             guard let record = state.sessions[id] else { return nil }

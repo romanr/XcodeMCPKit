@@ -16,6 +16,7 @@ package final class ProxyDebugRecorder: Sendable {
         var lastProtocolViolationLeadingByteHex: String?
         var bufferedStdoutBytes = 0
         var droppedUnmappedNotificationCount = 0
+        var lateResponseDropCount = 0
     }
 
     private struct State: Sendable {
@@ -44,6 +45,13 @@ package final class ProxyDebugRecorder: Sendable {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex] = DebugUpstreamState()
+        }
+    }
+
+    package func resetAll() {
+        state.withLockedValue { state in
+            state.upstreams = Array(repeating: DebugUpstreamState(), count: state.upstreams.count)
+            state.recentTraffic.removeAll()
         }
     }
 
@@ -101,6 +109,13 @@ package final class ProxyDebugRecorder: Sendable {
         }
     }
 
+    package func recordLateResponse(upstreamIndex: Int) {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            state.upstreams[upstreamIndex].lateResponseDropCount += 1
+        }
+    }
+
     package func recordTraffic(upstreamIndex: Int, direction: String, data: Data, redactedText: String) {
         let event = ProxyDebugTrafficEvent(
             timestamp: Date(),
@@ -124,6 +139,7 @@ package final class ProxyDebugRecorder: Sendable {
         upstreamStates: [UpstreamSelectionPolicy.UpstreamState],
         sessionSnapshots: [SessionDebugSnapshot],
         leaseSnapshots: [RequestLeaseDebugSnapshot],
+        queuedRequestCount: Int,
         redactedText: String,
         includeSensitiveDebugPayloads: Bool,
         healthFormatter: (UpstreamHealthState) -> String
@@ -170,9 +186,11 @@ package final class ProxyDebugRecorder: Sendable {
                     ? debug.lastProtocolViolationLeadingByteHex
                     : debug.lastProtocolViolationLeadingByteHex.map { _ in redactedText },
                 bufferedStdoutBytes: debug.bufferedStdoutBytes,
+                capacity: 1,
                 requestPickCount: upstream.requestPickCount,
                 activeCorrelatedRequestCount: activeCountsByUpstream[index] ?? 0,
-                droppedUnmappedNotificationCount: debug.droppedUnmappedNotificationCount
+                droppedUnmappedNotificationCount: debug.droppedUnmappedNotificationCount,
+                lateResponseDropCount: debug.lateResponseDropCount
             )
         }
 
@@ -192,7 +210,8 @@ package final class ProxyDebugRecorder: Sendable {
                 )
             },
             sessions: sessionSnapshots,
-            leases: leaseSnapshots
+            leases: leaseSnapshots,
+            queuedRequestCount: queuedRequestCount
         )
     }
 }

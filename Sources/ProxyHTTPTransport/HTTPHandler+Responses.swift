@@ -9,11 +9,11 @@ extension HTTPHandler {
         on channel: Channel,
         keepAlive: Bool,
         requestLog: RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         switch resolution {
         case .responseData(let data, let sessionID, let prefersEventStream):
             if prefersEventStream {
-                sendSingleSSE(
+                return sendSingleSSE(
                     on: channel,
                     data: data,
                     keepAlive: keepAlive,
@@ -23,7 +23,7 @@ extension HTTPHandler {
             } else {
                 var buffer = channel.allocator.buffer(capacity: data.count)
                 buffer.writeBytes(data)
-                sendJSON(
+                return sendJSON(
                     on: channel,
                     buffer: buffer,
                     keepAlive: keepAlive,
@@ -41,7 +41,7 @@ extension HTTPHandler {
             let prefersEventStream
         ):
             if ids.isEmpty {
-                sendMCPError(
+                return sendMCPError(
                     on: channel,
                     id: id,
                     code: code,
@@ -52,7 +52,7 @@ extension HTTPHandler {
                     requestLog: requestLog
                 )
             } else {
-                sendMCPError(
+                return sendMCPError(
                     on: channel,
                     ids: ids,
                     code: code,
@@ -65,7 +65,7 @@ extension HTTPHandler {
                 )
             }
         case .plain(let status, let body, let sessionID):
-            sendPlain(
+            return sendPlain(
                 on: channel,
                 status: status,
                 body: body,
@@ -74,7 +74,7 @@ extension HTTPHandler {
                 requestLog: requestLog
             )
         case .empty(let status, let sessionID):
-            sendEmpty(
+            return sendEmpty(
                 on: channel,
                 status: status,
                 keepAlive: keepAlive,
@@ -84,7 +84,7 @@ extension HTTPHandler {
         }
     }
 
-    func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {
+    func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
         responseWriter.sendSingleSSE(
             on: channel,
             data: data,
@@ -94,7 +94,7 @@ extension HTTPHandler {
         )
     }
 
-    func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {
+    func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
         responseWriter.sendJSON(
             on: channel,
             buffer: buffer,
@@ -110,7 +110,7 @@ extension HTTPHandler {
         keepAlive: Bool,
         sessionID: String?,
         requestLog: RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         responseWriter.sendJSONData(
             on: channel,
             data: data,
@@ -127,7 +127,7 @@ extension HTTPHandler {
         keepAlive: Bool,
         sessionID: String?,
         requestLog: RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         responseWriter.sendPlain(
             on: channel,
             status: status,
@@ -138,7 +138,7 @@ extension HTTPHandler {
         )
     }
 
-    func sendEmpty(on channel: Channel, status: HTTPResponseStatus, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) {
+    func sendEmpty(on channel: Channel, status: HTTPResponseStatus, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
         responseWriter.sendEmpty(
             on: channel,
             status: status,
@@ -157,7 +157,7 @@ extension HTTPHandler {
         keepAlive: Bool,
         sessionID: String,
         requestLog: RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         responseWriter.sendMCPError(
             on: channel,
             id: id,
@@ -180,7 +180,7 @@ extension HTTPHandler {
         keepAlive: Bool,
         sessionID: String,
         requestLog: RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         responseWriter.sendMCPError(
             on: channel,
             ids: ids,

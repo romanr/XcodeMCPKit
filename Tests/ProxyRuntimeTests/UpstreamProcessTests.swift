@@ -11,8 +11,6 @@ struct UpstreamProcessTests {
             command: "/bin/cat",
             args: [],
             environment: ProcessInfo.processInfo.environment,
-            restartInitialDelay: 1,
-            restartMaxDelay: 1,
             maxQueuedWriteBytes: 550_000
         )
         try await withUpstreamProcess(config: config) { upstream in
@@ -50,8 +48,6 @@ struct UpstreamProcessTests {
             command: "/bin/sh",
             args: ["-c", "printf 'fatal stderr' >&2"],
             environment: ProcessInfo.processInfo.environment,
-            restartInitialDelay: 1,
-            restartMaxDelay: 1,
             maxQueuedWriteBytes: 1024
         )
         try await withUpstreamProcess(config: config) { upstream in
@@ -79,8 +75,6 @@ struct UpstreamProcessTests {
             command: "/bin/sh",
             args: ["-c", "head -c 20000 /dev/zero | tr '\\0' 'x' >&2; sleep 1"],
             environment: ProcessInfo.processInfo.environment,
-            restartInitialDelay: 1,
-            restartMaxDelay: 1,
             maxQueuedWriteBytes: 1024
         )
         try await withUpstreamProcess(config: config) { upstream in
@@ -103,59 +97,63 @@ struct UpstreamProcessTests {
         }
     }
 
-    @Test func upstreamProcessEmitsBufferedStdoutResetWhenRestarting() async throws {
+    @Test func upstreamProcessEmitsBufferedStdoutResetWhenStopping() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/cat",
             args: [],
             environment: ProcessInfo.processInfo.environment,
-            restartInitialDelay: 1,
-            restartMaxDelay: 1,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
-            let observedSizesRecorder = RecordedValues<Int>()
-            let observedSizes = Task { () -> [Int] in
-                var sizes: [Int] = []
-                for await event in upstream.events {
-                    switch event {
-                    case .stdoutBufferSize(let size):
-                        sizes.append(size)
-                        await observedSizesRecorder.append(size)
-                        if sizes.contains(where: { $0 > 0 }), sizes.contains(0) {
-                            return sizes
-                        }
-                    case .message, .stderr, .stdoutProtocolViolation, .exit:
-                        continue
-                    }
-                }
-                return sizes
+        let upstream = UpstreamProcess(config: config)
+        await upstream.start()
+        defer {
+            Task {
+                await upstream.stop()
             }
-
-            let sendResult = await upstream.send(Data("{".utf8))
-            switch sendResult {
-            case .accepted:
-                break
-            case .overloaded:
-                Issue.record("send should not overload while checking buffered stdout reset")
-            }
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await observedSizesRecorder.snapshot().contains(where: { $0 > 0 })
-                }
-            )
-            await upstream.requestRestart()
-
-            let sizes = try await waitWithTimeout(
-                "buffered stdout should reset to zero after restart",
-                timeout: .seconds(2)
-            ) {
-                await observedSizes.value
-            }
-
-            #expect(sizes.contains(where: { $0 > 0 }))
-            #expect(sizes.contains(0))
         }
+
+        let observedSizesRecorder = RecordedValues<Int>()
+        let observedSizes = Task { () -> [Int] in
+            var sizes: [Int] = []
+            for await event in upstream.events {
+                switch event {
+                case .stdoutBufferSize(let size):
+                    sizes.append(size)
+                    await observedSizesRecorder.append(size)
+                    if sizes.contains(where: { $0 > 0 }), sizes.contains(0) {
+                        return sizes
+                    }
+                case .message, .stderr, .stdoutProtocolViolation, .exit:
+                    continue
+                }
+            }
+            return sizes
+        }
+
+        let sendResult = await upstream.send(Data("{".utf8))
+        switch sendResult {
+        case .accepted:
+            break
+        case .overloaded:
+            Issue.record("send should not overload while checking buffered stdout reset")
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                await observedSizesRecorder.snapshot().contains(where: { $0 > 0 })
+            }
+        )
+        await upstream.stop()
+
+        let sizes = try await waitWithTimeout(
+            "buffered stdout should reset to zero after stop",
+            timeout: .seconds(2)
+        ) {
+            await observedSizes.value
+        }
+
+        #expect(sizes.contains(where: { $0 > 0 }))
+        #expect(sizes.contains(0))
     }
 
     @Test func upstreamProcessTreatsInvalidStdoutAsFatalProtocolViolation() async throws {
@@ -163,17 +161,14 @@ struct UpstreamProcessTests {
             command: "/bin/sh",
             args: ["-c", "printf 'Content-Length: abc\\r\\n\\r\\n{}'; sleep 5"],
             environment: ProcessInfo.processInfo.environment,
-            restartInitialDelay: 1,
-            restartMaxDelay: 1,
             maxQueuedWriteBytes: 1024
         )
         try await withUpstreamProcess(config: config) { upstream in
-            let events = try await waitWithTimeout(
-                "invalid stdout should emit a protocol violation and exit",
+        let events = try await waitWithTimeout(
+                "invalid stdout should emit a protocol violation without auto-restart",
                 timeout: .seconds(3)
             ) {
                 var sawViolation = false
-                var sawExit = false
                 var bufferedSizes: [Int] = []
 
                 for await event in upstream.events {
@@ -183,13 +178,11 @@ struct UpstreamProcessTests {
                         #expect(violation.reason == .invalidContentLengthHeader)
                     case .stdoutBufferSize(let size):
                         bufferedSizes.append(size)
-                    case .exit:
-                        sawExit = true
-                    case .message, .stderr:
+                    case .message, .stderr, .exit:
                         continue
                     }
 
-                    if sawViolation, sawExit {
+                    if sawViolation {
                         return bufferedSizes
                     }
                 }
@@ -198,7 +191,6 @@ struct UpstreamProcessTests {
             }
 
             #expect(events.contains(where: { $0 > 0 }))
-            #expect(events.contains(0))
         }
     }
 }

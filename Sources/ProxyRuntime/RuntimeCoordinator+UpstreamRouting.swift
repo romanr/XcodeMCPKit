@@ -10,39 +10,72 @@ extension RuntimeCoordinator {
         }
 
         if var object = json as? [String: Any],
-            let upstreamID = upstreamID(from: object["id"]),
-            let mapping = responseCorrelationStore.consume(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            let upstreamID = upstreamID(from: object["id"])
         {
-            if mapping.isInitialize {
-                handleInitializeResponse(object, upstreamIndex: upstreamIndex)
-                return
-            }
-            if let sessionID = mapping.sessionID, let originalID = mapping.originalID {
-                object["id"] = originalID.value.foundationObject
-                if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: [])
-                {
-                    recordTraffic(
-                        upstreamIndex: upstreamIndex,
-                        direction: "inbound",
-                        data: rewritten
-                    )
-                    let target = session(id: sessionID)
-                    target.router.handleIncoming(rewritten)
+            if let mapping = responseCorrelationStore.consume(
+                upstreamIndex: upstreamIndex,
+                upstreamID: upstreamID
+            ) {
+                if mapping.isInitialize {
+                    handleInitializeResponse(object, upstreamIndex: upstreamIndex)
                     return
                 }
+                if let sessionID = mapping.sessionID, let originalID = mapping.originalID {
+                    object["id"] = originalID.value.foundationObject
+                    if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: [])
+                    {
+                        recordTraffic(
+                            upstreamIndex: upstreamIndex,
+                            direction: "inbound",
+                            data: rewritten
+                        )
+                        let target = session(id: sessionID)
+                        target.router.handleIncoming(rewritten)
+                        return
+                    }
+                }
+            } else if responseCorrelationStore.consumeReleasedResponseMarker(
+                upstreamIndex: upstreamIndex,
+                upstreamID: upstreamID
+            ) {
+                logger.debug(
+                    "Dropping late upstream response",
+                    metadata: [
+                        "upstream": .string("\(upstreamIndex)"),
+                        "upstream_id": .string("\(upstreamID)"),
+                    ]
+                )
+                debugRecorder.recordLateResponse(upstreamIndex: upstreamIndex)
+                return
             }
         }
 
         if let array = json as? [Any] {
             var sessionID: String?
             var rewrittenAny = false
+            var droppedLateResponse = false
             var transformed: [Any] = []
             for item in array {
-                guard var object = item as? [String: Any],
-                    let upstreamID = upstreamID(from: object["id"]),
-                    let mapping = responseCorrelationStore.consume(
-                        upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-                else {
+                guard var object = item as? [String: Any] else {
+                    transformed.append(item)
+                    continue
+                }
+                guard let upstreamID = upstreamID(from: object["id"]) else {
+                    transformed.append(item)
+                    continue
+                }
+                guard let mapping = responseCorrelationStore.consume(
+                    upstreamIndex: upstreamIndex,
+                    upstreamID: upstreamID
+                ) else {
+                    if responseCorrelationStore.consumeReleasedResponseMarker(
+                        upstreamIndex: upstreamIndex,
+                        upstreamID: upstreamID
+                    ) {
+                        droppedLateResponse = true
+                        debugRecorder.recordLateResponse(upstreamIndex: upstreamIndex)
+                        continue
+                    }
                     transformed.append(item)
                     continue
                 }
@@ -70,6 +103,21 @@ extension RuntimeCoordinator {
                 )
                 let target = session(id: sessionID)
                 target.router.handleIncoming(rewritten)
+                return
+            }
+            if droppedLateResponse, transformed.isEmpty {
+                logger.debug(
+                    "Dropping late upstream batch response",
+                    metadata: [
+                        "upstream": .string("\(upstreamIndex)"),
+                    ]
+                )
+                return
+            }
+            if droppedLateResponse,
+                let rewritten = try? JSONSerialization.data(withJSONObject: transformed, options: [])
+            {
+                routeUnmappedUpstreamMessage(rewritten, upstreamIndex: upstreamIndex)
                 return
             }
         }
@@ -194,6 +242,7 @@ extension RuntimeCoordinator {
         let sessionSnapshots = requestLeaseRegistry.sessionDebugSnapshots(
             allSessionIDs: sessionStore.sessionIDs()
         )
+        let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
@@ -202,6 +251,7 @@ extension RuntimeCoordinator {
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,
+            queuedRequestCount: schedulerSnapshot.queuedRequestCount,
             redactedText: Self.redactedDebugText,
             includeSensitiveDebugPayloads: includeSensitiveDebugPayloads,
             healthFormatter: upstreamSelectionPolicy.debugHealthStateString
@@ -267,6 +317,31 @@ extension RuntimeCoordinator {
             }
         }
         releaseLeases([requestLeaseRegistry.timeoutLease(leaseID)].compactMap { $0 })
+    }
+
+    package func abandonRequestLease(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    ) {
+        if let upstreamIndex {
+            for requestIDKey in requestIDKeys {
+                removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        }
+        upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
+        releaseLeases(
+            [requestLeaseRegistry.failLease(
+                leaseID,
+                terminalState: .abandoned,
+                reason: .clientDisconnected
+            )].compactMap { $0 }
+        )
     }
 
     func testStateSnapshot() -> TestSnapshot {
@@ -464,6 +539,7 @@ extension RuntimeCoordinator {
         upstreamIndex: Int
     ) {
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
+        responseCorrelationStore.reset(upstreamIndex: upstreamIndex)
         releaseLeases(
             requestLeaseRegistry.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
@@ -490,6 +566,13 @@ extension RuntimeCoordinator {
     }
 
     private func releaseLeases(_ actions: [RequestLeaseReleaseAction]) {
-        _ = actions
+        for action in actions {
+            if let upstreamIndex = action.upstreamIndex {
+                upstreamSlotScheduler.releaseUpstreamSlot(
+                    upstreamIndex: upstreamIndex,
+                    leaseID: action.leaseID
+                )
+            }
+        }
     }
 }

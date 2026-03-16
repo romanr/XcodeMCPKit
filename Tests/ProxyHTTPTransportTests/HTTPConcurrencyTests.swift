@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOEmbedded
 import NIOHTTP1
 import Testing
 import ProxyCore
@@ -75,10 +76,15 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
+                    await upstream.nonInitializeRequestCount() == 1
                 }
             )
             await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 2
+                }
+            )
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -131,11 +137,16 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
+                    await upstream.nonInitializeRequestCount() == 1
                 }
             )
 
             await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 2
+                }
+            )
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -182,10 +193,15 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
+                    await upstream.nonInitializeRequestCount() == 1
                 }
             )
             await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeRequestCount() == 2
+                }
+            )
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -309,12 +325,12 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
+                    await upstream.nonInitializeRequestCount() >= 1
                 }
             )
+            await upstream.respondNext()
             let notificationResponse = try await notification
             #expect(notificationResponse.statusCode == 202)
-            await upstream.respondNext()
             let firstResult = try await first
             #expect(firstResult.0.statusCode == 200)
         } catch {
@@ -355,7 +371,7 @@ struct HTTPConcurrencyTests {
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
                     if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
-                        return snapshot.activeCorrelatedRequestCount == 2
+                        return snapshot.activeCorrelatedRequestCount == 1
                     }
                     return false
                 }
@@ -425,13 +441,18 @@ struct HTTPConcurrencyTests {
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
+                    await upstream.nonInitializeLabels() == ["tools/call:DocumentationSearch"]
+                }
+            )
+            await upstream.respondNext()
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
                     await upstream.nonInitializeLabels() == [
                         "tools/call:DocumentationSearch",
                         "tools/call:DocumentationSearch",
                     ]
                 }
             )
-            await upstream.respondNext()
             await upstream.respondNext()
 
             let firstResult = try await first
@@ -960,17 +981,50 @@ private func postJSON(
     sessionID: String?,
     payload: [String: Any]
 ) async throws -> (HTTPURLResponse, [String: Any]) {
+    try await postJSON(
+        url: url,
+        sessionID: sessionID,
+        payload: payload,
+        timeout: nil
+    )
+}
+
+private func postJSON(
+    url: URL,
+    sessionID: String?,
+    payload: [String: Any],
+    timeout: TimeInterval?
+) async throws -> (HTTPURLResponse, [String: Any]) {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let timeout {
+        request.timeoutInterval = timeout
+    }
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
     }
 
-    let (responseData, response) = try await URLSession.shared.data(for: request)
+    let session: URLSession
+    if let timeout {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        session = URLSession(configuration: configuration)
+    } else {
+        session = URLSession.shared
+    }
+
+    defer {
+        if session !== URLSession.shared {
+            session.finishTasksAndInvalidate()
+        }
+    }
+
+    let (responseData, response) = try await session.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse else {
         throw ConcurrencyTestError.invalidResponse
     }
@@ -1000,6 +1054,83 @@ private func postStatusOnly(
         throw ConcurrencyTestError.invalidResponse
     }
     return httpResponse
+}
+
+private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyConfig {
+    ProxyConfig(
+        listenHost: "127.0.0.1",
+        listenPort: 0,
+        upstreamCommand: "xcrun",
+        upstreamArgs: ["mcpbridge"],
+        upstreamSessionID: nil,
+        maxBodyBytes: 1_048_576,
+        requestTimeout: requestTimeout,
+        refreshCodeIssuesMode: .upstream
+    )
+}
+
+private func addEmbeddedHTTPHandler(
+    to channel: EmbeddedChannel,
+    config: ProxyConfig,
+    sessionManager: any RuntimeCoordinating
+) throws {
+    let handler = HTTPHandler(
+        config: config,
+        sessionManager: sessionManager,
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator.makeDefault(
+            requestTimeout: config.requestTimeout
+        ),
+        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver()
+    )
+    try channel.pipeline.addHandler(handler).wait()
+}
+
+private func postEmbeddedJSON(
+    _ payload: [String: Any],
+    sessionID: String?,
+    to channel: EmbeddedChannel
+) throws {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    if let sessionID {
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+    }
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+}
+
+private func collectEmbeddedResponse(
+    from channel: EmbeddedChannel
+) throws -> (head: HTTPResponseHead, body: String) {
+    var responseHead: HTTPResponseHead?
+    var bodyBuffer = channel.allocator.buffer(capacity: 0)
+
+    while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
+        switch part {
+        case .head(let head):
+            responseHead = head
+        case .body(let body):
+            switch body {
+            case .byteBuffer(var buffer):
+                bodyBuffer.writeBuffer(&buffer)
+            case .fileRegion:
+                break
+            }
+        case .end:
+            break
+        }
+    }
+
+    guard let responseHead else {
+        throw ConcurrencyTestError.invalidResponse
+    }
+    let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
+    return (responseHead, body)
 }
 
 private func waitUntil(

@@ -12,6 +12,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let recentTraffic: [ProxyDebugTrafficEvent]
     package let sessions: [SessionDebugSnapshot]
     package let leases: [RequestLeaseDebugSnapshot]
+    package let queuedRequestCount: Int
     package let refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
 
     package init(
@@ -26,6 +27,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.recentTraffic = base.recentTraffic
         self.sessions = base.sessions
         self.leases = base.leases
+        self.queuedRequestCount = base.queuedRequestCount
         self.refreshCodeIssues = refreshCodeIssues
     }
 }
@@ -85,5 +87,10 @@ package final class HTTPControlService: Sendable {
 
     package func hasSession(id sessionID: String) -> Bool {
         runtimeCoordinator.hasSession(id: sessionID)
+    }
+
+    package func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
+        runtimeCoordinator.debugReset()
+        return eventLoop.makeSucceededFuture(())
     }
 }

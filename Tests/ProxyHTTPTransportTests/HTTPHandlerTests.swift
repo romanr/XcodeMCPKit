@@ -99,6 +99,44 @@ struct HTTPHandlerTests {
         #expect(response.body == "not found")
     }
 
+    @Test func httpDebugResetResetsRuntimeOnLoopback() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setCachedToolsListResult(.object(["tools": .array([])]))
+        _ = sessionManager.session(id: "debug-reset-session")
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/debug/reset")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .accepted)
+        #expect(response.body == "reset scheduled")
+        #expect(sessionManager.hasSession(id: "debug-reset-session") == false)
+        #expect(sessionManager.cachedToolsListResult() == nil)
+    }
+
+    @Test func httpDebugResetReturnsNotFoundWhenListenerIsNotLoopback() async throws {
+        var config = makeConfig()
+        config.listenHost = "0.0.0.0"
+
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/debug/reset")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.body == "not found")
+    }
+
     @Test func httpDebugUpstreamsIncludesActiveRefreshCodeIssuesState() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
@@ -2060,10 +2098,13 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
             ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
-            #expect(sessionManager.sentToolRequests() == [
+            #expect(Set(sessionManager.sentToolRequests()) == Set([
+                "XcodeListWindows@0",
+                "XcodeListNavigatorIssues@0",
+            ]) || Set(sessionManager.sentToolRequests()) == Set([
                 "XcodeListWindows@1",
                 "XcodeListNavigatorIssues@1",
-            ])
+            ]))
         } catch {
             await server.shutdown()
             throw error
@@ -3349,6 +3390,16 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         context?.notificationHub.closeAll()
     }
 
+    func debugReset() {
+        state.withLockedValue { state in
+            state.sessions.removeAll()
+            state.cachedToolsList = nil
+            state.pendingResponses.removeAll()
+            state.sentRequests.removeAll()
+            state.upstreamIDMapping.removeAll()
+        }
+    }
+
     func shutdown() {}
 
     func isInitialized() -> Bool {
@@ -3406,6 +3457,20 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             return state.availableUpstreamIndex
         }
+    }
+
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID _: RequestLeaseID,
+        descriptor _: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        guard let upstreamIndex = chooseUpstreamIndex() else {
+            return eventLoop.makeFailedFuture(
+                NSError(domain: "TestRuntimeCoordinator", code: 1)
+            )
+        }
+        return starter(upstreamIndex)
     }
 
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex _: Int) -> Int64 {
@@ -3578,6 +3643,28 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = requestLeaseRegistry.timeoutLease(leaseID)
     }
 
+    func abandonRequestLease(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    ) {
+        if let upstreamIndex {
+            for requestIDKey in requestIDKeys {
+                removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        }
+        _ = requestLeaseRegistry.failLease(
+            leaseID,
+            terminalState: .abandoned,
+            reason: .clientDisconnected
+        )
+    }
+
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
         ProxyDebugSnapshot(
             generatedAt: Date(timeIntervalSince1970: 0),
@@ -3609,8 +3696,13 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             ],
             recentTraffic: [],
             sessions: [],
-            leases: requestLeaseRegistry.debugSnapshots()
+            leases: requestLeaseRegistry.debugSnapshots(),
+            queuedRequestCount: 0
         )
+    }
+
+    func leaseDebugSnapshots() -> [RequestLeaseDebugSnapshot] {
+        requestLeaseRegistry.debugSnapshots()
     }
 
     func sentUpstreamCount() -> Int {

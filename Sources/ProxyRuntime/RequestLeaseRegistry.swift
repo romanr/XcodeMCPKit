@@ -19,6 +19,7 @@ package enum RequestLeaseReleaseReason: String, Codable, Sendable {
     case upstreamExit
     case upstreamOverloaded
     case stdoutProtocolViolation
+    case clientDisconnected
     case lateResponse
 }
 
@@ -65,10 +66,12 @@ package struct RequestLeaseDebugSnapshot: Codable, Sendable {
 package struct RequestLeaseReleaseAction: Sendable {
     package let leaseID: RequestLeaseID
     package let sessionID: String
+    package let upstreamIndex: Int?
 
-    package init(leaseID: RequestLeaseID, sessionID: String) {
+    package init(leaseID: RequestLeaseID, sessionID: String, upstreamIndex: Int?) {
         self.leaseID = leaseID
         self.sessionID = sessionID
+        self.upstreamIndex = upstreamIndex
     }
 }
 
@@ -169,7 +172,8 @@ package final class RequestLeaseRegistry: Sendable {
                 actions.append(
                     RequestLeaseReleaseAction(
                         leaseID: leaseID,
-                        sessionID: record.descriptor.sessionID
+                        sessionID: record.descriptor.sessionID,
+                        upstreamIndex: record.upstreamIndex
                     )
                 )
             }
@@ -202,6 +206,26 @@ package final class RequestLeaseRegistry: Sendable {
                     }
                     return lhs.sessionID < rhs.sessionID
                 }
+        }
+    }
+
+    package func resetAll(reason: RequestLeaseReleaseReason) -> [RequestLeaseReleaseAction] {
+        state.withLockedValue { state in
+            let actions = state.leasesByID.values.compactMap { record -> RequestLeaseReleaseAction? in
+                switch record.state {
+                case .queued, .active:
+                    return RequestLeaseReleaseAction(
+                        leaseID: record.leaseID,
+                        sessionID: record.descriptor.sessionID,
+                        upstreamIndex: record.upstreamIndex
+                    )
+                case .completed, .timedOut, .failed, .abandoned:
+                    return nil
+                }
+            }
+            state.leasesByID.removeAll()
+            state.activeLeaseIDsByUpstream.removeAll()
+            return actions
         }
     }
 
@@ -255,7 +279,8 @@ package final class RequestLeaseRegistry: Sendable {
                 }
                 return RequestLeaseReleaseAction(
                     leaseID: leaseID,
-                    sessionID: record.descriptor.sessionID
+                    sessionID: record.descriptor.sessionID,
+                    upstreamIndex: record.upstreamIndex
                 )
 
             case .completed, .timedOut, .failed, .abandoned:

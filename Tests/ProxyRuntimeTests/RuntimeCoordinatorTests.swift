@@ -1671,6 +1671,192 @@ struct RuntimeCoordinatorTests {
             try await future2.get()
         }
     }
+
+    @Test func sessionManagerAbandonRequestLeaseDropsLateResponseAndReleasesSlot() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let sessionID = "session-disconnect"
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: sessionID,
+            label: "tools/call:ExecuteSnippet",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let originalID = try #require(RPCID(any: NSNumber(value: 1)))
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+
+        manager.activateRequestLease(
+            leaseID,
+            requestIDKey: originalID.key,
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+        manager.abandonRequestLease(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: [originalID.key],
+            upstreamIndex: 0
+        )
+
+        let releaseSnapshot = manager.debugSnapshot()
+        let releasedLease = try #require(
+            releaseSnapshot.leases.first(where: { $0.requestIDKey == originalID.key })
+        )
+        #expect(releasedLease.releaseReason == "clientDisconnected")
+        #expect(releaseSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: upstreamID),
+            "result": [String: Any](),
+        ]
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: response, options: []),
+            upstreamIndex: 0
+        )
+
+        let lateSnapshot = manager.debugSnapshot()
+        let lateLease = try #require(
+            lateSnapshot.leases.first(where: { $0.requestIDKey == originalID.key })
+        )
+        #expect(lateLease.releaseReason == "clientDisconnected")
+    }
+
+    @Test func sessionManagerProtocolViolationReleasesActiveLeaseAndAllowsNextRequest() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let sessionID = "session-protocol-violation"
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: sessionID,
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let originalID = try #require(RPCID(any: NSNumber(value: 41)))
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+
+        manager.activateRequestLease(
+            leaseID,
+            requestIDKey: originalID.key,
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+        manager.handleUpstreamProtocolViolation(
+            StdioFramerProtocolViolation(
+                reason: .invalidJSON,
+                bufferedByteCount: 128,
+                preview: "{broken"
+            ),
+            upstreamIndex: 0
+        )
+
+        let releaseSnapshot = manager.debugSnapshot()
+        let releasedLease = try #require(
+            releaseSnapshot.leases.first(where: { $0.requestIDKey == originalID.key })
+        )
+        #expect(releasedLease.releaseReason == "stdoutProtocolViolation")
+        #expect(releaseSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: upstreamID),
+            "result": [String: Any](),
+        ]
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: response, options: []),
+            upstreamIndex: 0
+        )
+
+        let lateSnapshot = manager.debugSnapshot()
+        let lateLease = try #require(
+            lateSnapshot.leases.first(where: { $0.requestIDKey == originalID.key })
+        )
+        #expect(lateLease.releaseReason == "stdoutProtocolViolation")
+
+        let nextLeaseID = manager.createRequestLease(descriptor: descriptor)
+        let nextOriginalID = try #require(RPCID(any: NSNumber(value: 42)))
+        let nextUpstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: nextOriginalID,
+            upstreamIndex: 0
+        )
+        manager.activateRequestLease(
+            nextLeaseID,
+            requestIDKey: nextOriginalID.key,
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+        _ = nextUpstreamID
+        manager.completeRequestLease(nextLeaseID)
+
+        let successSnapshot = manager.debugSnapshot()
+        let nextLease = try #require(
+            successSnapshot.leases.first(where: { $0.requestIDKey == nextOriginalID.key })
+        )
+        #expect(nextLease.releaseReason == "completed")
+        #expect(successSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+    }
+
+    @Test func sessionManagerDebugResetClearsSessionsLeasesAndCache() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: group.next(), upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        _ = manager.session(id: "session-debug-reset")
+        manager.setCachedToolsListResult(.object(["tools": .array([])]))
+
+        let leaseID = manager.createRequestLease(
+            descriptor: SessionPipelineRequestDescriptor(
+                sessionID: "session-debug-reset",
+                label: "tools/call:DocumentationSearch",
+                isBatch: false,
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            leaseID,
+            requestIDKey: "123",
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+
+        manager.debugReset()
+
+        #expect(manager.hasSession(id: "session-debug-reset") == false)
+        let snapshot = manager.debugSnapshot()
+        #expect(snapshot.cachedToolsListAvailable == false)
+        #expect(snapshot.sessions.isEmpty)
+        #expect(snapshot.leases.isEmpty)
+    }
+
 }
 
 private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {

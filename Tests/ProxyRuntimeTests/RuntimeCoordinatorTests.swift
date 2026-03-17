@@ -209,6 +209,44 @@ struct RuntimeCoordinatorTests {
         #expect(methodName(from: warmInitialize) == "initialize")
     }
 
+    @Test func sessionManagerSecondaryWarmInitRetriesWhenInitializedNotificationSendOverloads()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = ToggleableOverloadUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1]
+        )
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let primaryInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let primaryUpstreamID = try extractUpstreamID(from: primaryInitialize)
+        await upstream0.yield(.message(try makeInitializeResponse(id: primaryUpstreamID)))
+        _ = try await initFuture.get()
+
+        let firstWarmInitialize = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let firstWarmUpstreamID = try extractUpstreamID(from: firstWarmInitialize)
+        await upstream1.overloadNextInitializedNotificationSend()
+        await upstream1.yield(.message(try makeInitializeResponse(id: firstWarmUpstreamID)))
+
+        try await waitForSentCount(upstream1, count: 3, timeoutSeconds: 2)
+        let rejectedInitialized = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        #expect(methodName(from: rejectedInitialized) == "notifications/initialized")
+        let retriedWarmInitialize = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: retriedWarmInitialize) == "initialize")
+    }
+
     @Test func sessionManagerDropsUnmappedNotificationsAfterInitializeCompletes() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -242,9 +280,8 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        await upstream.yield(.message(notification))
-
         _ = try await future.get()
+        await upstream.yield(.message(notification))
         #expect(
             await staysTrue(for: .milliseconds(200)) {
                 session.router.drainBufferedNotifications().isEmpty
@@ -2533,6 +2570,47 @@ struct RuntimeCoordinatorTests {
             lateSnapshot.leases.first(where: { $0.requestIDKey == originalID.key })
         )
         #expect(lateLease.releaseReason == "clientDisconnected")
+    }
+
+    @Test func sessionManagerDoesNotReactivateAbandonedLease() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let leaseID = manager.createRequestLease(
+            descriptor: SessionPipelineRequestDescriptor(
+                sessionID: "session-terminal-lease",
+                label: "tools/call:DocumentationSearch",
+                isBatch: false,
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+
+        manager.abandonRequestLease(
+            leaseID,
+            sessionID: "session-terminal-lease",
+            requestIDKeys: [],
+            upstreamIndex: nil
+        )
+        manager.activateRequestLease(
+            leaseID,
+            requestIDKey: "reactivated",
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+
+        let snapshot = manager.debugSnapshot()
+        let lease = try #require(
+            snapshot.leases.first(where: { $0.leaseID == leaseID.uuidString })
+        )
+        #expect(lease.state == .abandoned)
+        #expect(lease.releaseReason == "clientDisconnected")
+        #expect(snapshot.upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func sessionManagerProtocolViolationReleasesActiveLeaseAndAllowsNextRequest() async throws {

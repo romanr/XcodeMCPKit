@@ -126,6 +126,12 @@ package final class RequestLeaseRegistry: Sendable {
     ) {
         state.withLockedValue { state in
             guard var record = state.leasesByID[leaseID] else { return }
+            switch record.state {
+            case .queued, .active:
+                break
+            case .completed, .timedOut, .failed, .abandoned:
+                return
+            }
             record.requestIDKey = requestIDKey ?? record.requestIDKey
             record.upstreamIndex = upstreamIndex ?? record.upstreamIndex
             record.startedAt = record.startedAt ?? Date()

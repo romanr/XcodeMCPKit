@@ -43,6 +43,8 @@ extension RuntimeCoordinator {
             sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
                 self?.markUpstreamInitialized(upstreamIndex: upstreamIndex)
                 self?.upstreamSlotScheduler.wake()
+            } onRejected: { [weak self] in
+                self?.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
             }
             return
         }

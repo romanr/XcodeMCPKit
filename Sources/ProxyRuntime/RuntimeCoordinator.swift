@@ -138,6 +138,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package init(config: ProxyConfig, eventLoop: EventLoop, upstreams: [any UpstreamClient]) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
+        let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
         self.config = config
         self.eventLoop = eventLoop
         self.upstreams = upstreams
@@ -151,16 +152,27 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             defaultCapacity: 1,
             selectUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] occupied in
                 let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-                return upstreamSelectionPolicy?.chooseBestInitializedUpstream(
+                let chooseResult = upstreamSelectionPolicy?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
                     occupiedUpstreams: occupied
-                ).0
+                )
+                let probesToStart = chooseResult?.1 ?? []
+                if probesToStart.isEmpty == false {
+                    let startProbes = schedulerProbeStarter.withLockedValue { $0 }
+                    startProbes?(probesToStart)
+                }
+                return chooseResult?.0
             }
         )
         self.initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
             configPath: config.configPath,
             logger: ProxyLogging.make("config")
         )
+        schedulerProbeStarter.withLockedValue { startProbes in
+            startProbes = { [weak self] probes in
+                self?.startHealthProbes(probes)
+            }
+        }
 
         var tasks: [Task<Void, Never>] = []
         tasks.reserveCapacity(upstreams.count)
@@ -294,8 +306,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func chooseUpstreamIndex() -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        var probesToStart: [HealthProbeRequest] = []
-        probesToStart.reserveCapacity(2)
         let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
 
         let chooseResult = upstreamSelectionPolicy.chooseBestInitializedUpstream(
@@ -303,20 +313,22 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             occupiedUpstreams: occupiedUpstreams
         )
         let chosen = chooseResult.0
-        probesToStart.append(contentsOf: chooseResult.1)
-
-        for probe in probesToStart {
-            probeUpstreamHealth(
-                upstreamIndex: probe.upstreamIndex,
-                probeGeneration: probe.probeGeneration
-            )
-        }
+        startHealthProbes(chooseResult.1)
 
         guard let chosen else {
             return nil
         }
 
         return chosen
+    }
+
+    private func startHealthProbes(_ probes: [HealthProbeRequest]) {
+        for probe in probes {
+            probeUpstreamHealth(
+                upstreamIndex: probe.upstreamIndex,
+                probeGeneration: probe.probeGeneration
+            )
+        }
     }
 
     package func enqueueOnUpstreamSlot<Output: Sendable>(

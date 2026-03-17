@@ -267,7 +267,8 @@ package final class HTTPPostService: Sendable {
         let future = sessionManager.enqueueOnUpstreamSlot(
             leaseID: leaseID,
             descriptor: descriptor,
-            on: eventLoop
+            on: eventLoop,
+            preferredUpstreamIndex: nil
         ) { upstreamIndex in
             cancellationHandle.activate(upstreamIndex: upstreamIndex)
             self.sessionManager.activateRequestLease(
@@ -400,7 +401,11 @@ package final class HTTPPostService: Sendable {
                             prefersEventStream: prefersEventStream
                         )
                     )
-                    if execution.usedDirectForwarding == false {
+                    if execution.usedDirectForwarding {
+                        if case .success = execution.result {
+                            self.sessionManager.completeRequestLease(leaseID)
+                        }
+                    } else {
                         self.sessionManager.completeRequestLease(leaseID)
                     }
                 }
@@ -835,7 +840,8 @@ package final class HTTPPostService: Sendable {
             let resolution = try await sessionManager.enqueueOnUpstreamSlot(
                 leaseID: leaseID,
                 descriptor: descriptor,
-                on: eventLoop
+                on: eventLoop,
+                preferredUpstreamIndex: nil
             ) { selectedUpstreamIndex in
                 cancellationHandle?.activate(upstreamIndex: selectedUpstreamIndex)
 
@@ -913,7 +919,6 @@ package final class HTTPPostService: Sendable {
 
             switch resolution {
             case .success(let responseData):
-                sessionManager.completeRequestLease(leaseID)
                 return .success(responseData)
             case .timeout:
                 sessionManager.failRequestLease(

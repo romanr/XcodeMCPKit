@@ -3261,7 +3261,7 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
-    @Test func forwardingServiceInternalToolUsesScheduledUpstreamWhenOverrideDiffers()
+    @Test func forwardingServiceInternalToolRespectsRequestedOverride()
         async throws
     {
         let config = makeConfig(requestTimeout: 0.2)
@@ -3295,11 +3295,88 @@ struct HTTPHandlerTests {
         case .success:
             break
         case .timeout:
-            Issue.record("expected the scheduled upstream dispatch to succeed")
+            Issue.record("expected the requested upstream dispatch to succeed")
         case .unavailable:
-            Issue.record("expected the scheduled upstream to be usable")
+            Issue.record("expected the requested upstream to be usable")
         }
-        #expect(sessionManager.sentToolRequests() == ["XcodeListNavigatorIssues@1"])
+        #expect(sessionManager.sentToolRequests() == ["XcodeListNavigatorIssues@0"])
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+    }
+
+    @Test func httpRefreshCodeIssuesKeepsLeaseActiveAcrossRetryAttempts() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
+        let attempts = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { method, originalID in
+                #expect(method == "tools/call")
+                let attempt = attempts.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text:
+                                "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
+                        )
+                    )
+                }
+                return .manual(try makeToolSuccessResponse(id: originalID, text: "ok"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+        let requestTask = Task {
+            try await postHTTPData(
+                url: server.url,
+                sessionID: "session-retry-lease",
+                payload: toolsCallPayload(
+                    id: 14,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-retry-lease",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+        }
+
+        do {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while sessionManager.sentUpstreamCount() != 2, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(sessionManager.sentUpstreamCount() == 2)
+
+            let inFlightLease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(inFlightLease.state == .active)
+            #expect(inFlightLease.releaseReason == nil)
+
+            sessionManager.deliverNextPendingResponse()
+
+            let response = try await requestTask.value
+            #expect(response.statusCode == 200)
+            let body =
+                (try? JSONSerialization.jsonObject(with: response.bodyData, options: []))
+                as? [String: Any]
+            let result = body?["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) != true)
+
+            let completedLease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(completedLease.state == .completed)
+        } catch {
+            requestTask.cancel()
+            await server.shutdown()
+            throw error
+        }
+
+        await server.shutdown()
     }
 }
 
@@ -3504,9 +3581,11 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         leaseID _: RequestLeaseID,
         descriptor _: SessionPipelineRequestDescriptor,
         on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
-        guard let upstreamIndex = chooseUpstreamIndex() else {
+        let upstreamIndex = preferredUpstreamIndex ?? chooseUpstreamIndex()
+        guard let upstreamIndex else {
             return eventLoop.makeFailedFuture(
                 NSError(domain: "TestRuntimeCoordinator", code: 1)
             )
@@ -3989,6 +4068,11 @@ private struct TestHTTPHandlerServer {
     }
 }
 
+private struct RawHTTPResponse: Sendable {
+    let statusCode: Int
+    let bodyData: Data
+}
+
 private func postHTTPJSON(
     url: URL,
     sessionID: String,
@@ -4010,6 +4094,26 @@ private func postHTTPJSON(
         (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
         ?? [:]
     return (httpResponse, object)
+}
+
+private func postHTTPData(
+    url: URL,
+    sessionID: String,
+    payload: [String: Any]
+) async throws -> RawHTTPResponse {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw HTTPTestError.missingResponseHead
+    }
+    return RawHTTPResponse(statusCode: httpResponse.statusCode, bodyData: responseData)
 }
 
 private func getHTTPData(url: URL) async throws -> (HTTPURLResponse, Data) {

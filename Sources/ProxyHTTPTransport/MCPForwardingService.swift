@@ -224,7 +224,8 @@ package struct MCPForwardingService: Sendable {
             resolution = try await sessionManager.enqueueOnUpstreamSlot(
                 leaseID: leaseID,
                 descriptor: descriptor,
-                on: eventLoop
+                on: eventLoop,
+                preferredUpstreamIndex: upstreamIndexOverride
             ) { selectedUpstreamIndex in
                 self.sessionManager.activateRequestLease(
                     leaseID,

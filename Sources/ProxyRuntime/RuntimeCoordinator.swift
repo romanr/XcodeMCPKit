@@ -46,6 +46,7 @@ package protocol RuntimeCoordinating: Sendable {
         leaseID: RequestLeaseID,
         descriptor: SessionPipelineRequestDescriptor,
         on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64
@@ -83,6 +84,21 @@ package protocol RuntimeCoordinating: Sendable {
 }
 
 extension RuntimeCoordinating {
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: RequestLeaseID,
+        descriptor: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: nil,
+            starter: starter
+        )
+    }
+
     func debugSnapshot() -> ProxyDebugSnapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
@@ -150,6 +166,20 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             upstreamCount: upstreams.count,
             defaultCapacity: 1,
+            canUseUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] upstreamIndex in
+                let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+                guard let upstreamSelectionPolicy else { return false }
+                let evaluation = upstreamSelectionPolicy.evaluateUsableInitialized(
+                    index: upstreamIndex,
+                    nowUptimeNs: nowUptimeNs
+                )
+                let probesToStart = evaluation.1
+                if probesToStart.isEmpty == false {
+                    let startProbes = schedulerProbeStarter.withLockedValue { $0 }
+                    startProbes?(probesToStart)
+                }
+                return evaluation.0
+            },
             selectUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] occupied in
                 let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
                 let chooseResult = upstreamSelectionPolicy?.chooseBestInitializedUpstream(
@@ -335,6 +365,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         leaseID: RequestLeaseID,
         descriptor: SessionPipelineRequestDescriptor,
         on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int? = nil,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         let hasHealthyUpstream = upstreamSelectionPolicy.initializedHealthyishCount() > 0
@@ -354,6 +385,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             leaseID: leaseID,
             descriptor: descriptor,
             on: eventLoop,
+            preferredUpstreamIndex: preferredUpstreamIndex,
             starter: { upstreamIndex in
                 starter(upstreamIndex).cascade(to: promise)
             },

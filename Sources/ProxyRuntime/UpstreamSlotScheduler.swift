@@ -22,6 +22,7 @@ package final class UpstreamSlotScheduler: Sendable {
         let leaseID: RequestLeaseID
         let descriptor: SessionPipelineRequestDescriptor
         let eventLoop: EventLoop
+        let preferredUpstreamIndex: Int?
         let start: @Sendable (Int) -> Void
         let failUnavailable: @Sendable () -> Void
         let failCancelled: @Sendable () -> Void
@@ -35,15 +36,18 @@ package final class UpstreamSlotScheduler: Sendable {
 
     private let logger: Logger
     private let state: NIOLockedValueBox<State>
+    private let canUseUpstream: @Sendable (Int) -> Bool
     private let selectUpstream: @Sendable (Set<Int>) -> Int?
 
     package init(
         upstreamCount: Int,
         defaultCapacity: Int,
         logger: Logger = ProxyLogging.make("upstream.scheduler"),
+        canUseUpstream: @escaping @Sendable (Int) -> Bool,
         selectUpstream: @escaping @Sendable (Set<Int>) -> Int?
     ) {
         self.logger = logger
+        self.canUseUpstream = canUseUpstream
         self.selectUpstream = selectUpstream
         self.state = NIOLockedValueBox(
             State(
@@ -60,6 +64,7 @@ package final class UpstreamSlotScheduler: Sendable {
         leaseID: RequestLeaseID,
         descriptor: SessionPipelineRequestDescriptor,
         on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int? = nil,
         starter: @escaping @Sendable (Int) -> Void,
         failUnavailable: @escaping @Sendable () -> Void,
         failCancelled: @escaping @Sendable () -> Void
@@ -68,6 +73,7 @@ package final class UpstreamSlotScheduler: Sendable {
             leaseID: leaseID,
             descriptor: descriptor,
             eventLoop: eventLoop,
+            preferredUpstreamIndex: preferredUpstreamIndex,
             start: starter,
             failUnavailable: failUnavailable,
             failCancelled: failCancelled
@@ -184,15 +190,28 @@ package final class UpstreamSlotScheduler: Sendable {
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)
-                guard let upstreamIndex = selectUpstream(occupied) else {
-                    break
+                let next = state.pendingRequests[0]
+                let upstreamIndex: Int
+                if let preferredUpstreamIndex = next.preferredUpstreamIndex {
+                    guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil else {
+                        break
+                    }
+                    guard canUseUpstream(preferredUpstreamIndex) else {
+                        break
+                    }
+                    upstreamIndex = preferredUpstreamIndex
+                } else {
+                    guard let selectedUpstreamIndex = selectUpstream(occupied) else {
+                        break
+                    }
+                    guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {
+                        break
+                    }
+                    upstreamIndex = selectedUpstreamIndex
                 }
-                guard state.activeLeaseIDsByUpstream[upstreamIndex] == nil else {
-                    break
-                }
-                let next = state.pendingRequests.removeFirst()
-                state.activeLeaseIDsByUpstream[upstreamIndex] = next.leaseID
-                ready.append((next, upstreamIndex))
+                let pendingRequest = state.pendingRequests.removeFirst()
+                state.activeLeaseIDsByUpstream[upstreamIndex] = pendingRequest.leaseID
+                ready.append((pendingRequest, upstreamIndex))
             }
 
             return ready

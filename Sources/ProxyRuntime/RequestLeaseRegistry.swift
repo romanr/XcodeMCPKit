@@ -93,11 +93,16 @@ package final class RequestLeaseRegistry: Sendable {
     private struct State: Sendable {
         var leasesByID: [RequestLeaseID: LeaseRecord] = [:]
         var activeLeaseIDsByUpstream: [Int: Set<RequestLeaseID>] = [:]
+        var releasedLeasesByID: [RequestLeaseID: LeaseRecord] = [:]
+        var releasedLeaseIDsInOrder: [RequestLeaseID] = []
     }
 
     private let state = NIOLockedValueBox(State())
+    private let releasedHistoryLimit: Int
 
-    package init() {}
+    package init(releasedHistoryLimit: Int = 256) {
+        self.releasedHistoryLimit = max(0, releasedHistoryLimit)
+    }
 
     package func createLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID {
         let leaseID = UUID()
@@ -148,6 +153,33 @@ package final class RequestLeaseRegistry: Sendable {
         finishLease(leaseID, terminalState: .completed, reason: .completed)
     }
 
+    package func requeueLease(_ leaseID: RequestLeaseID) -> RequestLeaseReleaseAction? {
+        state.withLockedValue { state in
+            guard var record = state.leasesByID[leaseID] else { return nil }
+            guard record.state == .active else { return nil }
+
+            let upstreamIndex = record.upstreamIndex
+            record.state = .queued
+            record.requestIDKey = nil
+            record.upstreamIndex = nil
+            record.timeoutAt = nil
+            state.leasesByID[leaseID] = record
+
+            if let upstreamIndex {
+                state.activeLeaseIDsByUpstream[upstreamIndex]?.remove(leaseID)
+                if state.activeLeaseIDsByUpstream[upstreamIndex]?.isEmpty == true {
+                    state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
+                }
+            }
+
+            return RequestLeaseReleaseAction(
+                leaseID: leaseID,
+                sessionID: record.descriptor.sessionID,
+                upstreamIndex: upstreamIndex
+            )
+        }
+    }
+
     package func timeoutLease(_ leaseID: RequestLeaseID) -> RequestLeaseReleaseAction? {
         finishLease(leaseID, terminalState: .timedOut, reason: .timedOut)
     }
@@ -191,7 +223,10 @@ package final class RequestLeaseRegistry: Sendable {
 
     package func debugSnapshots() -> [RequestLeaseDebugSnapshot] {
         state.withLockedValue { state in
-            state.leasesByID.values
+            let records = Array(state.leasesByID.values) + state.releasedLeaseIDsInOrder.compactMap {
+                state.releasedLeasesByID[$0]
+            }
+            return records
                 .map { record in
                     RequestLeaseDebugSnapshot(
                         leaseID: record.leaseID.uuidString,
@@ -232,6 +267,8 @@ package final class RequestLeaseRegistry: Sendable {
             }
             state.leasesByID.removeAll()
             state.activeLeaseIDsByUpstream.removeAll()
+            state.releasedLeasesByID.removeAll()
+            state.releasedLeaseIDsInOrder.removeAll()
             return actions
         }
     }
@@ -270,7 +307,9 @@ package final class RequestLeaseRegistry: Sendable {
         reason: RequestLeaseReleaseReason
     ) -> RequestLeaseReleaseAction? {
         state.withLockedValue { state in
-            guard var record = state.leasesByID[leaseID] else { return nil }
+            guard var record = state.leasesByID[leaseID] ?? state.releasedLeasesByID[leaseID] else {
+                return nil
+            }
 
             switch record.state {
             case .queued, .active:
@@ -284,6 +323,8 @@ package final class RequestLeaseRegistry: Sendable {
                         state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
                     }
                 }
+                state.leasesByID.removeValue(forKey: leaseID)
+                storeReleasedLease(record, in: &state)
                 return RequestLeaseReleaseAction(
                     leaseID: leaseID,
                     sessionID: record.descriptor.sessionID,
@@ -291,10 +332,27 @@ package final class RequestLeaseRegistry: Sendable {
                 )
 
             case .completed, .timedOut, .failed, .abandoned:
-                record.lateResponseCount += 1
-                state.leasesByID[leaseID] = record
+                if var released = state.releasedLeasesByID[leaseID] {
+                    released.lateResponseCount += 1
+                    state.releasedLeasesByID[leaseID] = released
+                } else {
+                    record.lateResponseCount += 1
+                    storeReleasedLease(record, in: &state)
+                }
                 return nil
             }
+        }
+    }
+
+    private func storeReleasedLease(_ record: LeaseRecord, in state: inout State) {
+        if state.releasedLeasesByID[record.leaseID] == nil {
+            state.releasedLeaseIDsInOrder.append(record.leaseID)
+        }
+        state.releasedLeasesByID[record.leaseID] = record
+
+        while state.releasedLeaseIDsInOrder.count > releasedHistoryLimit {
+            let removedLeaseID = state.releasedLeaseIDsInOrder.removeFirst()
+            state.releasedLeasesByID.removeValue(forKey: removedLeaseID)
         }
     }
 }

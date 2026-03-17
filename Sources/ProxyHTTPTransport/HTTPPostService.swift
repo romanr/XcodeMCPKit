@@ -919,6 +919,9 @@ package final class HTTPPostService: Sendable {
 
             switch resolution {
             case .success(let responseData):
+                if RefreshCodeIssuesWorkflow.isRetryableRefreshCodeIssuesFailure(responseData) {
+                    sessionManager.requeueRequestLease(leaseID)
+                }
                 return .success(responseData)
             case .timeout:
                 sessionManager.failRequestLease(

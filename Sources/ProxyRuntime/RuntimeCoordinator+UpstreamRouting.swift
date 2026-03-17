@@ -297,6 +297,10 @@ extension RuntimeCoordinator {
         releaseLeases([requestLeaseRegistry.completeLease(leaseID)].compactMap { $0 })
     }
 
+    package func requeueRequestLease(_ leaseID: RequestLeaseID) {
+        releaseLeases([requestLeaseRegistry.requeueLease(leaseID)].compactMap { $0 })
+    }
+
     package func failRequestLease(
         _ leaseID: RequestLeaseID,
         terminalState: RequestLeaseState,

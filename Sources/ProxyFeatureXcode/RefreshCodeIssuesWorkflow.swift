@@ -830,7 +830,7 @@ package struct RefreshCodeIssuesWorkflow {
             .replacingOccurrences(of: "?", with: "[?]")
     }
 
-    private static func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
+    package static func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
         let retryableErrorText = "SourceEditorCallableDiagnosticError error 5"
         guard
             let object = try? JSONSerialization.jsonObject(with: responseData, options: [])

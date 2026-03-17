@@ -3303,7 +3303,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
     }
 
-    @Test func httpRefreshCodeIssuesKeepsLeaseActiveAcrossRetryAttempts() async throws {
+    @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
@@ -3353,6 +3353,7 @@ struct HTTPHandlerTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
             #expect(sessionManager.sentUpstreamCount() == 2)
+            #expect(sessionManager.requeuedLeaseCount() == 1)
 
             let inFlightLease = try #require(sessionManager.leaseDebugSnapshots().first)
             #expect(inFlightLease.state == .active)
@@ -3442,6 +3443,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         var pendingResponses: [PendingResponse] = []
         var sentRequests: [SentRequest] = []
         var availableUpstreamIndices: [Int?] = []
+        var requeuedLeaseCount = 0
     }
 
     private let state = NIOLockedValueBox(State())
@@ -3727,6 +3729,13 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = requestLeaseRegistry.completeLease(leaseID)
     }
 
+    func requeueRequestLease(_ leaseID: RequestLeaseID) {
+        state.withLockedValue { state in
+            state.requeuedLeaseCount += 1
+        }
+        _ = requestLeaseRegistry.requeueLease(leaseID)
+    }
+
     func failRequestLease(
         _ leaseID: RequestLeaseID,
         terminalState: RequestLeaseState,
@@ -3882,6 +3891,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func requestSuccessNotificationCount() -> Int {
         state.withLockedValue { $0.requestSuccessNotifications }
+    }
+
+    func requeuedLeaseCount() -> Int {
+        state.withLockedValue { $0.requeuedLeaseCount }
     }
 
     func setInitialized(_ value: Bool) {

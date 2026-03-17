@@ -64,6 +64,7 @@ package protocol RuntimeCoordinating: Sendable {
         timeout: TimeAmount?
     )
     func completeRequestLease(_ leaseID: RequestLeaseID)
+    func requeueRequestLease(_ leaseID: RequestLeaseID)
     func failRequestLease(
         _ leaseID: RequestLeaseID,
         terminalState: RequestLeaseState,

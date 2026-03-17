@@ -3317,6 +3317,68 @@ struct RuntimeCoordinatorTests {
         activePromise.fail(CancellationError())
     }
 
+    @Test func requestLeaseRegistryKeepsOnlyBoundedReleasedHistory() async throws {
+        let registry = RequestLeaseRegistry(releasedHistoryLimit: 2)
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-bounded-history",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+
+        let lease1 = registry.createLease(descriptor: descriptor)
+        registry.activateLease(lease1, requestIDKey: "1", upstreamIndex: 0, timeoutAt: nil)
+        _ = registry.completeLease(lease1)
+
+        let lease2 = registry.createLease(descriptor: descriptor)
+        registry.activateLease(lease2, requestIDKey: "2", upstreamIndex: 0, timeoutAt: nil)
+        _ = registry.failLease(lease2, terminalState: .failed, reason: .upstreamUnavailable)
+
+        let lease3 = registry.createLease(descriptor: descriptor)
+        registry.activateLease(lease3, requestIDKey: "3", upstreamIndex: 0, timeoutAt: nil)
+        _ = registry.completeLease(lease3)
+        _ = registry.completeLease(lease3)
+
+        let snapshots = registry.debugSnapshots()
+        #expect(snapshots.count == 2)
+        #expect(Set(snapshots.map(\.leaseID)) == Set([lease2.uuidString, lease3.uuidString]))
+        let latest = try #require(snapshots.first { $0.leaseID == lease3.uuidString })
+        #expect(latest.lateResponseCount == 1)
+    }
+
+    @Test func requestLeaseRegistryRequeueLeaseReleasesActiveSlotAndKeepsLeaseQueued()
+        async throws
+    {
+        let registry = RequestLeaseRegistry()
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-requeue",
+            label: "tools/call:XcodeRefreshCodeIssuesInFile",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+
+        let lease = registry.createLease(descriptor: descriptor)
+        registry.activateLease(
+            lease,
+            requestIDKey: "refresh-1",
+            upstreamIndex: 0,
+            timeoutAt: Date().addingTimeInterval(30)
+        )
+
+        let releaseAction = try #require(registry.requeueLease(lease))
+        #expect(releaseAction.leaseID == lease)
+        #expect(releaseAction.upstreamIndex == 0)
+
+        let snapshot = try #require(registry.debugSnapshots().first { $0.leaseID == lease.uuidString })
+        #expect(snapshot.state == .queued)
+        #expect(snapshot.requestIDKey == nil)
+        #expect(snapshot.upstreamIndex == nil)
+        #expect(snapshot.timeoutAt == nil)
+        #expect(snapshot.releaseReason == nil)
+    }
+
 }
 
 private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {

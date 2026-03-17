@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import Testing
 import ProxyCore
 import XcodeMCPTestSupport
@@ -1904,6 +1905,115 @@ struct RuntimeCoordinatorTests {
         #expect(try extractUpstreamID(from: queuedRequest) == 99)
 
         activePromise.fail(CancellationError())
+    }
+
+    @Test func sessionManagerQueuedPreferredRequestDoesNotBlockLaterGenericDispatch()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1]
+        )
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let init0ID = try extractUpstreamID(from: init0)
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+
+        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let init1ID = try extractUpstreamID(from: init1)
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
+        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+        let activeDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-active",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
+        let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: activeLeaseID,
+            descriptor: activeDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                activeLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            #expect(selectedUpstreamIndex == 0)
+            return activePromise.futureResult
+        }
+        _ = activeFuture
+
+        let preferredDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-preferred",
+            label: "tools/call:XcodeListWindows",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let preferredLeaseID = manager.createRequestLease(descriptor: preferredDescriptor)
+        let preferredStartedUpstream = NIOLockedValueBox<Int?>(nil)
+        let preferredFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: preferredLeaseID,
+            descriptor: preferredDescriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: 0
+        ) { selectedUpstreamIndex in
+            preferredStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.debugSnapshot().queuedRequestCount == 1
+        }
+
+        let genericDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-generic",
+            label: "tools/call:ExecuteSnippet",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let genericLeaseID = manager.createRequestLease(descriptor: genericDescriptor)
+        let genericStartedUpstream = NIOLockedValueBox<Int?>(nil)
+        let genericFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: genericLeaseID,
+            descriptor: genericDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        _ = try await genericFuture.get()
+        #expect(genericStartedUpstream.withLockedValue { $0 } == 1)
+        #expect(preferredStartedUpstream.withLockedValue { $0 } == nil)
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
+
+        manager.completeRequestLease(activeLeaseID)
+        activePromise.succeed(())
+        _ = try await preferredFuture.get()
+        #expect(preferredStartedUpstream.withLockedValue { $0 } == 0)
     }
 
     @Test func sessionManagerRepinsAfterUpstreamExit() async throws {

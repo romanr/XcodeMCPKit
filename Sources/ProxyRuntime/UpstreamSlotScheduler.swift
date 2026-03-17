@@ -190,26 +190,39 @@ package final class UpstreamSlotScheduler: Sendable {
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)
-                let next = state.pendingRequests[0]
-                let upstreamIndex: Int
-                if let preferredUpstreamIndex = next.preferredUpstreamIndex {
-                    guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil else {
+                var chosenPendingIndex: Int?
+                var chosenUpstreamIndex: Int?
+
+                for (pendingIndex, request) in state.pendingRequests.enumerated() {
+                    if let preferredUpstreamIndex = request.preferredUpstreamIndex {
+                        guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil else {
+                            continue
+                        }
+                        guard canUseUpstream(preferredUpstreamIndex) else {
+                            continue
+                        }
+                        chosenPendingIndex = pendingIndex
+                        chosenUpstreamIndex = preferredUpstreamIndex
                         break
                     }
-                    guard canUseUpstream(preferredUpstreamIndex) else {
-                        break
-                    }
-                    upstreamIndex = preferredUpstreamIndex
-                } else {
+
                     guard let selectedUpstreamIndex = selectUpstream(occupied) else {
                         break
                     }
                     guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {
                         break
                     }
-                    upstreamIndex = selectedUpstreamIndex
+                    chosenPendingIndex = pendingIndex
+                    chosenUpstreamIndex = selectedUpstreamIndex
+                    break
                 }
-                let pendingRequest = state.pendingRequests.removeFirst()
+
+                guard let chosenPendingIndex, let chosenUpstreamIndex else {
+                    break
+                }
+
+                let pendingRequest = state.pendingRequests.remove(at: chosenPendingIndex)
+                let upstreamIndex = chosenUpstreamIndex
                 state.activeLeaseIDsByUpstream[upstreamIndex] = pendingRequest.leaseID
                 ready.append((pendingRequest, upstreamIndex))
             }

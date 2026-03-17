@@ -28,6 +28,7 @@ extension RuntimeCoordinator {
                     "timeout_count": .string("\(timeoutCount)"),
                 ]
             )
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
         }
     }
 

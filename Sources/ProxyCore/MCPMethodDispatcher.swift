@@ -30,25 +30,6 @@ package enum MCPMethodDispatcher {
         return makeRequestTimeout(defaultSeconds)
     }
 
-    package static func shouldPinUpstream(for requestJSON: Any) -> Bool {
-        if let object = requestJSON as? [String: Any] {
-            guard let method = object["method"] as? String, method != "initialize" else {
-                return false
-            }
-            return object["id"] != nil && !(object["id"] is NSNull)
-        }
-        if let array = requestJSON as? [Any] {
-            for item in array {
-                guard let object = item as? [String: Any] else { continue }
-                guard let method = object["method"] as? String, method != "initialize" else { continue }
-                if let id = object["id"], !(id is NSNull) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
     private static func timeout(
         defaultSeconds: TimeInterval,
         capSeconds: TimeInterval

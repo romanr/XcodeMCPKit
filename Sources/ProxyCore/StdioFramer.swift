@@ -1,40 +1,56 @@
 import Foundation
 
-package struct StdioFramerRecovery: Sendable {
-    package enum Kind: String, Codable, Sendable {
-        case resync
-        case fatalClear
+package struct StdioFramerProtocolViolation: Sendable {
+    package enum Reason: String, Codable, Sendable {
+        case unexpectedLeadingByte
+        case invalidContentLengthHeader
+        case invalidJSON
+        case bufferLimitExceeded
     }
 
-    package let kind: Kind
-    package let droppedPrefixBytes: Int
-    package let candidateOffset: Int?
-    package let previewBeforeDrop: String
-    package let previewRecoveredMessage: String?
+    package let reason: Reason
+    package let bufferedByteCount: Int
+    package let preview: String
+    package let previewHex: String
+    package let leadingByteHex: String?
 
     package init(
-        kind: Kind,
-        droppedPrefixBytes: Int,
-        candidateOffset: Int?,
-        previewBeforeDrop: String,
-        previewRecoveredMessage: String?
+        reason: Reason,
+        bufferedByteCount: Int,
+        preview: String,
+        previewHex: String,
+        leadingByteHex: String?
     ) {
-        self.kind = kind
-        self.droppedPrefixBytes = droppedPrefixBytes
-        self.candidateOffset = candidateOffset
-        self.previewBeforeDrop = previewBeforeDrop
-        self.previewRecoveredMessage = previewRecoveredMessage
+        self.reason = reason
+        self.bufferedByteCount = bufferedByteCount
+        self.preview = preview
+        self.previewHex = previewHex
+        self.leadingByteHex = leadingByteHex
+    }
+
+    package init(reason: Reason, bufferedByteCount: Int, preview: String) {
+        self.init(
+            reason: reason,
+            bufferedByteCount: bufferedByteCount,
+            preview: preview,
+            previewHex: "",
+            leadingByteHex: nil
+        )
     }
 }
 
 package struct StdioFramerAppendResult: Sendable {
     package let messages: [Data]
-    package let recoveries: [StdioFramerRecovery]
+    package let protocolViolation: StdioFramerProtocolViolation?
     package let bufferedByteCount: Int
 
-    package init(messages: [Data], recoveries: [StdioFramerRecovery], bufferedByteCount: Int) {
+    package init(
+        messages: [Data],
+        protocolViolation: StdioFramerProtocolViolation?,
+        bufferedByteCount: Int
+    ) {
         self.messages = messages
-        self.recoveries = recoveries
+        self.protocolViolation = protocolViolation
         self.bufferedByteCount = bufferedByteCount
     }
 }
@@ -46,7 +62,6 @@ package final class StdioFramer {
         case invalid
     }
 
-    private let resyncScanThreshold = 16 * 1024
     private let bufferHardLimit = 4 * 1024 * 1024
     private let previewLimit = 200
 
@@ -55,14 +70,11 @@ package final class StdioFramer {
     package init() {}
 
     package func append(_ data: Data) -> StdioFramerAppendResult {
-        guard !data.isEmpty else {
-            return StdioFramerAppendResult(messages: [], recoveries: [], bufferedByteCount: buffer.count)
+        if !data.isEmpty {
+            buffer.append(data)
         }
 
-        buffer.append(data)
         var messages: [Data] = []
-        var recoveries: [StdioFramerRecovery] = []
-
         while true {
             if let message = nextContentLengthMessage() {
                 messages.append(message)
@@ -72,273 +84,142 @@ package final class StdioFramer {
                 messages.append(message)
                 continue
             }
-            if trimLeadingWhitespace() {
-                continue
-            }
-            if dropLeadingNonJSONLine() {
-                continue
-            }
-            if let recovery = recoverCorruptJSONPrefixIfNeeded() {
-                recoveries.append(recovery)
-                continue
-            }
             break
         }
 
+        let protocolViolation = protocolViolationIfNeeded()
         return StdioFramerAppendResult(
             messages: messages,
-            recoveries: recoveries,
+            protocolViolation: protocolViolation,
             bufferedByteCount: buffer.count
         )
-    }
-
-    private func nextContentLengthMessage() -> Data? {
-        let headerPrefix = "Content-Length"
-        guard buffer.count >= headerPrefix.count else { return nil }
-        guard let prefixString = String(data: buffer.prefix(headerPrefix.count), encoding: .utf8),
-              prefixString.caseInsensitiveCompare(headerPrefix) == .orderedSame else {
-            return nil
-        }
-
-        let delimiterCRLF = Data("\r\n\r\n".utf8)
-        let delimiterLF = Data("\n\n".utf8)
-        let headerEndRange = buffer.range(of: delimiterCRLF) ?? buffer.range(of: delimiterLF)
-        guard let headerRange = headerEndRange else { return nil }
-        let headerEndIndex = headerRange.upperBound
-        let headerData = buffer.subdata(in: 0..<headerRange.lowerBound)
-        guard let headerText = String(data: headerData, encoding: .utf8),
-              let length = parseContentLength(from: headerText) else { return nil }
-        guard buffer.count >= headerEndIndex + length else { return nil }
-
-        let bodyEndIndex = headerEndIndex + length
-        let bodyRange = headerEndIndex..<bodyEndIndex
-
-        if let jsonStart = firstNonWhitespaceIndex(in: bodyRange),
-           buffer[jsonStart] == 0x7B || buffer[jsonStart] == 0x5B,
-           let jsonEndIndex = jsonValueEndIndex(from: jsonStart),
-           jsonEndIndex <= bodyEndIndex,
-           buffer[jsonEndIndex..<bodyEndIndex].allSatisfy({ isWhitespace($0) }) {
-            let message = buffer.subdata(in: bodyRange)
-            buffer.removeSubrange(0..<bodyEndIndex)
-            return message
-        }
-
-        buffer.removeSubrange(0..<headerEndIndex)
-        return nil
     }
 
     private func nextJSONValueMessage() -> Data? {
         guard let startIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
             return nil
         }
+
         let first = buffer[startIndex]
-        guard first == 0x7B || first == 0x5B else { return nil }
-        guard let messageEnd = jsonValueEndIndex(from: startIndex) else { return nil }
+        guard first == 0x7B || first == 0x5B else {
+            return nil
+        }
+
+        guard case .complete(let messageEnd) = jsonPrefixParseResult(from: startIndex) else {
+            return nil
+        }
 
         let message = buffer.subdata(in: startIndex..<messageEnd)
-        guard isValidJSONObjectOrArray(message) else { return nil }
+        guard isValidJSONObjectOrArray(message) else {
+            return nil
+        }
+
         buffer.removeSubrange(0..<messageEnd)
         return message
     }
 
-    private func trimLeadingWhitespace() -> Bool {
-        guard !buffer.isEmpty else { return false }
-        var index = buffer.startIndex
-        while index < buffer.endIndex, isWhitespace(buffer[index]) {
-            index = buffer.index(after: index)
+    private func nextContentLengthMessage() -> Data? {
+        guard let startIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
+            return nil
         }
-        if index == buffer.startIndex {
-            return false
+        guard startsWithContentLengthHeader(at: startIndex) else {
+            return nil
         }
-        if index == buffer.endIndex {
-            buffer.removeAll(keepingCapacity: true)
-            return true
+        guard let headerEndIndex = contentLengthHeaderEndIndex(from: startIndex) else {
+            return nil
         }
-        buffer.removeSubrange(0..<index)
-        return true
+
+        let headerData = buffer.subdata(in: startIndex..<headerEndIndex)
+        guard
+            let headerText = String(data: headerData, encoding: .utf8),
+            let length = parseContentLength(from: headerText)
+        else {
+            return nil
+        }
+        guard buffer.count >= headerEndIndex + length else {
+            return nil
+        }
+
+        let bodyRange = headerEndIndex..<(headerEndIndex + length)
+        guard let message = validatedJSONObjectOrArray(in: bodyRange) else {
+            return nil
+        }
+
+        buffer.removeSubrange(0..<bodyRange.upperBound)
+        return message
     }
 
-    private func dropLeadingNonJSONLine() -> Bool {
-        guard !buffer.isEmpty else { return false }
+    private func protocolViolationIfNeeded() -> StdioFramerProtocolViolation? {
+        guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
+            if buffer.count > bufferHardLimit {
+                return makeProtocolViolation(reason: .bufferLimitExceeded)
+            }
+            return nil
+        }
 
-        if isPotentialContentLengthHeaderPrefix() {
-            let delimiterCRLF = Data("\r\n\r\n".utf8)
-            let delimiterLF = Data("\n\n".utf8)
-
-            if let headerRange = buffer.range(of: delimiterCRLF) ?? buffer.range(of: delimiterLF) {
-                let headerEndIndex = headerRange.upperBound
-                let headerData = buffer.subdata(in: 0..<headerRange.lowerBound)
-
-                if let headerText = String(data: headerData, encoding: .utf8),
-                   let length = parseContentLength(from: headerText) {
-                    if let bodyStart = firstNonWhitespaceIndex(from: headerEndIndex) {
-                        if buffer[bodyStart] != 0x7B && buffer[bodyStart] != 0x5B {
-                            buffer.removeSubrange(0..<headerEndIndex)
-                            return true
-                        }
-
-                        if let jsonEndIndex = jsonValueEndIndex(from: bodyStart) {
-                            let observedLength = buffer.distance(from: headerEndIndex, to: jsonEndIndex)
-                            if observedLength != length {
-                                buffer.removeSubrange(0..<headerEndIndex)
-                                return true
-                            }
-                        }
-                    }
-
-                    return false
+        if isPotentialContentLengthHeaderPrefix(at: firstIndex) {
+            guard let headerEndIndex = contentLengthHeaderEndIndex(from: firstIndex) else {
+                if hasMalformedContentLengthPrefixWithoutDelimiter(from: firstIndex) {
+                    return makeProtocolViolation(reason: .invalidContentLengthHeader)
                 }
+                if buffer.count > bufferHardLimit {
+                    return makeProtocolViolation(reason: .bufferLimitExceeded)
+                }
+                return nil
             }
 
-            guard let firstNewlineIndex = buffer.firstIndex(of: 0x0A) else {
-                return false
+            let headerData = buffer.subdata(in: firstIndex..<headerEndIndex)
+            guard
+                let headerText = String(data: headerData, encoding: .utf8),
+                let length = parseContentLength(from: headerText)
+            else {
+                return makeProtocolViolation(reason: .invalidContentLengthHeader)
             }
 
-            let afterNewline = buffer.index(after: firstNewlineIndex)
-            if afterNewline == buffer.endIndex {
-                return false
+            guard buffer.count >= headerEndIndex + length else {
+                return nil
             }
 
-            let hasJSONStartAfterNewline = buffer[afterNewline...].contains { $0 == 0x7B || $0 == 0x5B }
-            if !hasJSONStartAfterNewline, buffer.count < 8 * 1024 {
-                return false
+            let bodyRange = headerEndIndex..<(headerEndIndex + length)
+            guard validatedJSONObjectOrArray(in: bodyRange) != nil else {
+                return makeProtocolViolation(reason: .invalidJSON)
             }
+
+            return nil
         }
 
-        if let first = firstNonWhitespaceByte(), first == 0x7B || first == 0x5B {
-            return false
-        }
-
-        guard let newlineIndex = buffer.firstIndex(of: 0x0A) else { return false }
-        let dropEnd = buffer.index(after: newlineIndex)
-        buffer.removeSubrange(0..<dropEnd)
-        return true
-    }
-
-    private func recoverCorruptJSONPrefixIfNeeded() -> StdioFramerRecovery? {
-        guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else { return nil }
         let rootByte = buffer[firstIndex]
-        guard rootByte == 0x7B || rootByte == 0x5B else { return nil }
+        guard rootByte == 0x7B || rootByte == 0x5B else {
+            return makeProtocolViolation(reason: .unexpectedLeadingByte)
+        }
 
         switch jsonPrefixParseResult(from: firstIndex) {
-        case .complete, .incomplete:
+        case .complete(let messageEnd):
+            let message = buffer.subdata(in: firstIndex..<messageEnd)
+            if isValidJSONObjectOrArray(message) {
+                return nil
+            }
+            return makeProtocolViolation(reason: .invalidJSON)
+        case .incomplete:
+            if buffer.count > bufferHardLimit {
+                return makeProtocolViolation(reason: .bufferLimitExceeded)
+            }
             return nil
         case .invalid:
-            break
+            return makeProtocolViolation(reason: .invalidJSON)
         }
+    }
 
-        // Invalid JSON at the buffer head is already a proven corruption signal, so recover as soon
-        // as we can find a later top-level root instead of waiting for the large-buffer threshold.
-        let allowsLooseLineBoundaries = buffer.count > resyncScanThreshold
-        let minimumCandidateIndex = allowsLooseLineBoundaries ? nil : jsonValueEndIndex(from: firstIndex)
-        if !allowsLooseLineBoundaries, minimumCandidateIndex == nil {
-            return nil
-        }
-
-        let candidates = recoveryCandidateOffsets(
-            startingAfter: buffer.index(after: firstIndex),
-            allowsObjectRoots: true,
-            allowsArrayRoots: true,
-            minimumCandidateIndex: minimumCandidateIndex
+    private func makeProtocolViolation(reason: StdioFramerProtocolViolation.Reason)
+        -> StdioFramerProtocolViolation
+    {
+        StdioFramerProtocolViolation(
+            reason: reason,
+            bufferedByteCount: buffer.count,
+            preview: preview(of: buffer),
+            previewHex: previewHex(of: buffer),
+            leadingByteHex: firstNonWhitespaceByteHex()
         )
-        for candidate in candidates {
-            guard let messageEnd = jsonValueEndIndex(from: candidate) else { continue }
-            let recovered = buffer.subdata(in: candidate..<messageEnd)
-            guard isValidRecoveryRoot(recovered) else { continue }
-
-            let droppedPrefix = buffer.subdata(in: 0..<candidate)
-            buffer.removeSubrange(0..<candidate)
-            return StdioFramerRecovery(
-                kind: .resync,
-                droppedPrefixBytes: candidate,
-                candidateOffset: candidate,
-                previewBeforeDrop: preview(of: droppedPrefix, preferTail: true),
-                previewRecoveredMessage: preview(of: recovered, preferTail: false)
-            )
-        }
-
-        if buffer.count > bufferHardLimit {
-            let dropped = buffer
-            let droppedCount = buffer.count
-            buffer.removeAll(keepingCapacity: true)
-            return StdioFramerRecovery(
-                kind: .fatalClear,
-                droppedPrefixBytes: droppedCount,
-                candidateOffset: nil,
-                previewBeforeDrop: preview(of: dropped, preferTail: true),
-                previewRecoveredMessage: nil
-            )
-        }
-
-        return nil
-    }
-
-    private func recoveryCandidateOffsets(
-        startingAfter lowerBound: Data.Index,
-        allowsObjectRoots: Bool,
-        allowsArrayRoots: Bool,
-        minimumCandidateIndex: Data.Index?
-    ) -> [Data.Index] {
-        guard lowerBound < buffer.endIndex else { return [] }
-        var offsets: [Data.Index] = []
-        offsets.reserveCapacity(8)
-        var index = lowerBound
-        while index < buffer.endIndex {
-            let byte = buffer[index]
-            let isAllowedObjectRoot = byte == 0x7B && allowsObjectRoots
-            let isAllowedArrayRoot = byte == 0x5B && allowsArrayRoots
-            let clearsMinimumBoundary = minimumCandidateIndex.map { index >= $0 } ?? true
-            if (isAllowedObjectRoot || isAllowedArrayRoot),
-               clearsMinimumBoundary,
-               isRecoveryBoundary(at: index),
-               isPlausibleRecoveryRoot(at: index) {
-                offsets.append(index)
-            }
-            index = buffer.index(after: index)
-        }
-        return offsets
-    }
-
-    private func isRecoveryBoundary(at index: Data.Index) -> Bool {
-        guard index > buffer.startIndex else { return true }
-        let previous = buffer[buffer.index(before: index)]
-        if previous == 0x7D || previous == 0x5D {
-            return true
-        }
-        return previous == 0x0A
-    }
-
-    private func isPlausibleRecoveryRoot(at index: Data.Index) -> Bool {
-        guard index < buffer.endIndex else { return false }
-        let byte = buffer[index]
-        guard byte == 0x7B || byte == 0x5B else { return false }
-
-        let contentStart = buffer.index(after: index)
-        guard let nextIndex = firstNonWhitespaceIndex(from: contentStart) else { return false }
-
-        if byte == 0x7B {
-            return buffer[nextIndex] == 0x22
-        }
-
-        return buffer[nextIndex] == 0x7B
-    }
-
-    private func isValidRecoveryRoot(_ data: Data) -> Bool {
-        guard let any = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return false
-        }
-
-        if let object = any as? [String: Any] {
-            guard object["jsonrpc"] as? String == "2.0" else { return false }
-            return object["id"] != nil || object["method"] is String
-        }
-
-        if let array = any as? [Any] {
-            guard let first = array.first as? [String: Any] else { return false }
-            return first["jsonrpc"] as? String == "2.0"
-        }
-
-        return false
     }
 
     private func isValidJSONObjectOrArray(_ data: Data) -> Bool {
@@ -348,11 +229,29 @@ package final class StdioFramer {
         return any is [String: Any] || any is [Any]
     }
 
-    private func firstNonWhitespaceByte() -> UInt8? {
-        guard let index = firstNonWhitespaceIndex(from: buffer.startIndex) else {
+    private func validatedJSONObjectOrArray(in range: Range<Data.Index>) -> Data? {
+        guard let startIndex = firstNonWhitespaceIndex(in: range) else {
             return nil
         }
-        return buffer[index]
+        let rootByte = buffer[startIndex]
+        guard rootByte == 0x7B || rootByte == 0x5B else {
+            return nil
+        }
+        guard case .complete(let messageEnd) = jsonPrefixParseResult(from: startIndex) else {
+            return nil
+        }
+        guard messageEnd <= range.upperBound else {
+            return nil
+        }
+        guard buffer[messageEnd..<range.upperBound].allSatisfy(isWhitespace) else {
+            return nil
+        }
+
+        let message = buffer.subdata(in: startIndex..<messageEnd)
+        guard isValidJSONObjectOrArray(message) else {
+            return nil
+        }
+        return message
     }
 
     private func firstNonWhitespaceIndex(from startIndex: Data.Index) -> Data.Index? {
@@ -373,45 +272,72 @@ package final class StdioFramer {
         return index
     }
 
-    private func jsonValueEndIndex(from startIndex: Data.Index) -> Data.Index? {
-        var index = startIndex
-        guard index < buffer.endIndex else { return nil }
-        let first = buffer[index]
-        guard first == 0x7B || first == 0x5B else { return nil }
+    private func contentLengthHeaderEndIndex(from startIndex: Data.Index) -> Data.Index? {
+        let delimiterCRLF = Data("\r\n\r\n".utf8)
+        let delimiterLF = Data("\n\n".utf8)
+        let headerRange =
+            buffer.range(of: delimiterCRLF, in: startIndex..<buffer.endIndex)
+            ?? buffer.range(of: delimiterLF, in: startIndex..<buffer.endIndex)
+        return headerRange?.upperBound
+    }
 
-        var depth = 0
-        var inString = false
-        var isEscaped = false
-        var endIndex: Data.Index?
+    private func startsWithContentLengthHeader(at startIndex: Data.Index) -> Bool {
+        let headerPrefix = "Content-Length"
+        let available = buffer.distance(from: startIndex, to: buffer.endIndex)
+        guard available >= headerPrefix.utf8.count else {
+            return false
+        }
+        let prefixEnd = buffer.index(startIndex, offsetBy: headerPrefix.utf8.count)
+        guard let prefixString = String(data: buffer.subdata(in: startIndex..<prefixEnd), encoding: .utf8) else {
+            return false
+        }
+        return prefixString.caseInsensitiveCompare(headerPrefix) == .orderedSame
+    }
 
-        while index < buffer.endIndex {
-            let byte = buffer[index]
-            if inString {
-                if isEscaped {
-                    isEscaped = false
-                } else if byte == 0x5C {
-                    isEscaped = true
-                } else if byte == 0x22 {
-                    inString = false
-                }
-            } else {
-                if byte == 0x22 {
-                    inString = true
-                } else if byte == 0x7B || byte == 0x5B {
-                    depth += 1
-                } else if byte == 0x7D || byte == 0x5D {
-                    depth -= 1
-                    if depth == 0 {
-                        endIndex = index
-                        break
-                    }
-                }
-            }
-            index = buffer.index(after: index)
+    private func hasMalformedContentLengthPrefixWithoutDelimiter(from startIndex: Data.Index)
+        -> Bool
+    {
+        guard let firstLineEnd = buffer.range(of: Data("\n".utf8), in: startIndex..<buffer.endIndex)?.lowerBound else {
+            return false
+        }
+        let nextLineStart = buffer.index(after: firstLineEnd)
+        guard nextLineStart < buffer.endIndex else {
+            return false
+        }
+        let nextNonWhitespace = skipWhitespace(from: nextLineStart)
+        guard nextNonWhitespace < buffer.endIndex else {
+            return false
         }
 
-        guard let endIndex, depth == 0, !inString else { return nil }
-        return buffer.index(after: endIndex)
+        let nextByte = buffer[nextNonWhitespace]
+        return nextByte == 0x7B || nextByte == 0x5B
+    }
+
+    private func isPotentialContentLengthHeaderPrefix(at startIndex: Data.Index) -> Bool {
+        let headerPrefix = "Content-Length"
+        let available = buffer.distance(from: startIndex, to: buffer.endIndex)
+        let count = min(available, headerPrefix.utf8.count)
+        guard count > 0 else { return false }
+        let end = buffer.index(startIndex, offsetBy: count)
+        guard let prefix = String(data: buffer.subdata(in: startIndex..<end), encoding: .utf8) else {
+            return false
+        }
+        return headerPrefix.lowercased().hasPrefix(prefix.lowercased())
+    }
+
+    private func parseContentLength(from headerText: String) -> Int? {
+        for line in headerText.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            if parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("Content-Length") == .orderedSame {
+                guard let length = Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)), length >= 0 else {
+                    return nil
+                }
+                return length
+            }
+        }
+        return nil
     }
 
     private func jsonPrefixParseResult(from startIndex: Data.Index) -> JSONPrefixParseResult {
@@ -553,7 +479,9 @@ package final class StdioFramer {
         return .incomplete
     }
 
-    private func parseJSONLiteralPrefix(_ literal: StaticString, from startIndex: Data.Index) -> JSONPrefixParseResult {
+    private func parseJSONLiteralPrefix(_ literal: StaticString, from startIndex: Data.Index)
+        -> JSONPrefixParseResult
+    {
         let bytes = Array(String(describing: literal).utf8)
         var index = startIndex
 
@@ -629,29 +557,6 @@ package final class StdioFramer {
         return index
     }
 
-    private func parseContentLength(from headerText: String) -> Int? {
-        for line in headerText.split(separator: "\n") {
-            let parts = line.split(separator: ":", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            if parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                .caseInsensitiveCompare("Content-Length") == .orderedSame {
-                guard let length = Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)), length >= 0 else {
-                    return nil
-                }
-                return length
-            }
-        }
-        return nil
-    }
-
-    private func isPotentialContentLengthHeaderPrefix() -> Bool {
-        let headerPrefix = "Content-Length"
-        let count = min(buffer.count, headerPrefix.utf8.count)
-        guard count > 0 else { return false }
-        guard let prefix = String(data: buffer.prefix(count), encoding: .utf8) else { return false }
-        return headerPrefix.lowercased().hasPrefix(prefix.lowercased())
-    }
-
     private func isWhitespace(_ byte: UInt8) -> Bool {
         byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
     }
@@ -668,18 +573,29 @@ package final class StdioFramer {
         isWhitespace(byte) || byte == 0x2C || byte == 0x5D || byte == 0x7D
     }
 
-    private func preview(of data: Data, preferTail: Bool) -> String {
+    private func preview(of data: Data) -> String {
         guard !data.isEmpty else { return "" }
-        let slice: Data
-        if data.count <= previewLimit {
-            slice = data
-        } else if preferTail {
-            slice = data.suffix(previewLimit)
-        } else {
-            slice = data.prefix(previewLimit)
-        }
-
+        let slice = data.count <= previewLimit ? data : data.prefix(previewLimit)
         let text = String(decoding: slice, as: UTF8.self)
-        return data.count > previewLimit && preferTail ? "..." + text : text
+        return data.count > previewLimit ? text + "..." : text
+    }
+
+    private func previewHex(of data: Data) -> String {
+        guard !data.isEmpty else { return "" }
+        let slice = data.count <= previewLimit ? data : data.prefix(previewLimit)
+        let hex = slice.map(Self.hexString).joined(separator: " ")
+        return data.count > previewLimit ? hex + " ..." : hex
+    }
+
+    private func firstNonWhitespaceByteHex() -> String? {
+        guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
+            return nil
+        }
+        return Self.hexString(buffer[firstIndex])
+    }
+
+    private static func hexString(_ byte: UInt8) -> String {
+        let hex = String(byte, radix: 16, uppercase: false)
+        return hex.count == 1 ? "0" + hex : hex
     }
 }

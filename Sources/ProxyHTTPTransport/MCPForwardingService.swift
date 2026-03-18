@@ -13,6 +13,8 @@ package struct MCPForwardingService: Sendable {
     package struct StartedRequest: Sendable {
         package let transform: RequestTransform
         package let upstreamIndex: Int
+        package let requestTimeout: TimeAmount?
+        package let routerPendingToken: UUID
         package let future: EventLoopFuture<ByteBuffer>
     }
 
@@ -34,19 +36,13 @@ package struct MCPForwardingService: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        shouldPinUpstreamOverride: Bool? = nil,
         upstreamIndexOverride: Int? = nil
     ) throws -> PreparedRequest? {
         let upstreamIndex: Int
         if let upstreamIndexOverride {
             upstreamIndex = upstreamIndexOverride
         } else {
-            let shouldPinUpstream =
-                shouldPinUpstreamOverride ?? MCPMethodDispatcher.shouldPinUpstream(for: parsedRequestJSON)
-            guard let chosen = sessionManager.chooseUpstreamIndex(
-                sessionID: sessionID,
-                shouldPin: shouldPinUpstream
-            ) else {
+            guard let chosen = sessionManager.chooseUpstreamIndex() else {
                 return nil
             }
             upstreamIndex = chosen
@@ -70,7 +66,9 @@ package struct MCPForwardingService: Sendable {
         _ prepared: PreparedRequest,
         session: SessionContext,
         on eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount? = nil
+        requestTimeoutOverride: TimeAmount? = nil,
+        leaseID: RequestLeaseID? = nil,
+        onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
         let requestTimeout =
             requestTimeoutOverride
@@ -78,18 +76,32 @@ package struct MCPForwardingService: Sendable {
                 prepared.transform.method,
                 defaultSeconds: config.requestTimeout
             )
-        let future: EventLoopFuture<ByteBuffer>
+        let registration: ProxyRouter.PendingRegistration
         if prepared.transform.isBatch {
-            future = session.router.registerBatch(on: eventLoop, timeout: requestTimeout)
+            registration = session.router.registerBatchPending(
+                on: eventLoop,
+                timeout: requestTimeout,
+                onTimeout: onTimeout
+            )
         } else if let idKey = prepared.transform.idKey {
-            future = session.router.registerRequest(
+            registration = session.router.registerRequestPending(
                 idKey: idKey,
                 on: eventLoop,
-                timeout: requestTimeout
+                timeout: requestTimeout,
+                onTimeout: onTimeout
             )
         } else {
             struct MissingRequestIDError: Error {}
             throw MissingRequestIDError()
+        }
+
+        if let leaseID {
+            sessionManager.activateRequestLease(
+                leaseID,
+                requestIDKey: prepared.transform.responseIDs.first?.key,
+                upstreamIndex: prepared.upstreamIndex,
+                timeout: requestTimeout
+            )
         }
 
         sessionManager.sendUpstream(
@@ -99,7 +111,9 @@ package struct MCPForwardingService: Sendable {
         return StartedRequest(
             transform: prepared.transform,
             upstreamIndex: prepared.upstreamIndex,
-            future: future
+            requestTimeout: requestTimeout,
+            routerPendingToken: registration.token,
+            future: registration.future
         )
     }
 
@@ -195,56 +209,107 @@ package struct MCPForwardingService: Sendable {
             return .unavailable
         }
 
-        let prepared: PreparedRequest
-        do {
-            guard let candidate = try prepareRequest(
-                bodyData: bodyData,
-                parsedRequestJSON: requestObject,
-                sessionID: sessionID,
-                shouldPinUpstreamOverride: false,
-                upstreamIndexOverride: upstreamIndexOverride
-            ) else {
-                return .unavailable
-            }
-            prepared = candidate
-        } catch {
-            return .unavailable
-        }
-
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: sessionID,
+            label: "tools/call:\(name)",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
         let session = sessionManager.session(id: sessionID)
-        let started: StartedRequest
-        do {
-            started = try startRequest(
-                prepared,
-                session: session,
-                on: eventLoop,
-                requestTimeoutOverride: requestTimeoutOverride
-            )
-        } catch {
-            return .unavailable
-        }
 
         let resolution: ResponseResolution
         do {
-            resolution = resolveResponse(
-                .success(try await started.future.get()),
-                started: started,
-                sessionID: sessionID,
-                accountSuccess: false,
-                accountTimeout: false
-            )
+            resolution = try await sessionManager.enqueueOnUpstreamSlot(
+                leaseID: leaseID,
+                descriptor: descriptor,
+                on: eventLoop,
+                preferredUpstreamIndex: upstreamIndexOverride
+            ) { selectedUpstreamIndex in
+                self.sessionManager.activateRequestLease(
+                    leaseID,
+                    requestIDKey: nil,
+                    upstreamIndex: selectedUpstreamIndex,
+                    timeout: nil
+                )
+                let parsedRequestJSON: Any
+                do {
+                    parsedRequestJSON = try JSONSerialization.jsonObject(
+                        with: bodyData,
+                        options: []
+                    )
+                } catch {
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                }
+                let prepared: PreparedRequest
+                do {
+                    guard let candidate = try prepareRequest(
+                        bodyData: bodyData,
+                        parsedRequestJSON: parsedRequestJSON,
+                        sessionID: sessionID,
+                        upstreamIndexOverride: selectedUpstreamIndex
+                    ) else {
+                        return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                    }
+                    prepared = candidate
+                } catch {
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                }
+
+                let started: StartedRequest
+                do {
+                    started = try startRequest(
+                        prepared,
+                        session: session,
+                        on: eventLoop,
+                        requestTimeoutOverride: requestTimeoutOverride,
+                        leaseID: leaseID,
+                        onTimeout: {
+                            self.sessionManager.handleRequestLeaseTimeout(
+                                leaseID,
+                                sessionID: sessionID,
+                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
+                                upstreamIndex: prepared.upstreamIndex
+                            )
+                        }
+                    )
+                } catch {
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                }
+
+                return started.future.map { buffer in
+                    self.resolveResponse(
+                        .success(buffer),
+                        started: started,
+                        sessionID: sessionID,
+                        accountSuccess: false,
+                        accountTimeout: false
+                    )
+                }.flatMapErrorThrowing { error in
+                    self.resolveResponse(
+                        .failure(error),
+                        started: started,
+                        sessionID: sessionID,
+                        accountSuccess: false,
+                        accountTimeout: false
+                    )
+                }
+            }.get()
+        } catch is CancellationError {
+            return .timeout
         } catch {
-            resolution = resolveResponse(
-                .failure(error),
-                started: started,
-                sessionID: sessionID,
-                accountSuccess: false,
-                accountTimeout: false
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .upstreamUnavailable
             )
+            return .unavailable
         }
 
         switch resolution {
         case .success(let responseData):
+            sessionManager.completeRequestLease(leaseID)
             guard let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
                 as? [String: Any],
                 let result = object["result"] as? [String: Any]
@@ -256,8 +321,18 @@ package struct MCPForwardingService: Sendable {
             }
             return .success(result)
         case .timeout:
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .timedOut,
+                reason: .timedOut
+            )
             return .timeout
         case .invalidUpstreamResponse:
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .invalidUpstreamResponse
+            )
             return .unavailable
         }
     }

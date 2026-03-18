@@ -10,6 +10,9 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let warmupInFlight: Bool
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
+    package let sessions: [SessionDebugSnapshot]
+    package let leases: [RequestLeaseDebugSnapshot]
+    package let queuedRequestCount: Int
     package let refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
 
     package init(
@@ -22,6 +25,9 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.warmupInFlight = base.warmupInFlight
         self.upstreams = base.upstreams
         self.recentTraffic = base.recentTraffic
+        self.sessions = base.sessions
+        self.leases = base.leases
+        self.queuedRequestCount = base.queuedRequestCount
         self.refreshCodeIssues = refreshCodeIssues
     }
 }
@@ -46,13 +52,15 @@ package final class HTTPControlService: Sendable {
         self.refreshCodeIssuesDebugState = refreshCodeIssuesDebugState
     }
 
-    package func debugSnapshotData() -> Data? {
+    package func debugSnapshotData(includeSensitiveDebugPayloads: Bool = false) -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return try? encoder.encode(
             HTTPDebugSnapshot(
-                base: runtimeCoordinator.debugSnapshot(),
+                base: runtimeCoordinator.debugSnapshot(
+                    includeSensitiveDebugPayloads: includeSensitiveDebugPayloads
+                ),
                 refreshCodeIssues: refreshCodeIssuesDebugState?.snapshot()
             )
         )
@@ -79,5 +87,10 @@ package final class HTTPControlService: Sendable {
 
     package func hasSession(id sessionID: String) -> Bool {
         runtimeCoordinator.hasSession(id: sessionID)
+    }
+
+    package func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
+        runtimeCoordinator.debugReset()
+        return eventLoop.makeSucceededFuture(())
     }
 }

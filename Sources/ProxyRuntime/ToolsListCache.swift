@@ -40,6 +40,13 @@ package final class ToolsListCache: Sendable {
         state.withLockedValue { ($0.cachedResult, $0.warmupInFlight) }
     }
 
+    package func reset() {
+        state.withLockedValue { state in
+            state.cachedResult = nil
+            state.warmupInFlight = false
+        }
+    }
+
     package func internalSessionID(hasSession: (String) -> Bool) -> String {
         if let existing = state.withLockedValue({ $0.internalSessionID }) {
             return existing

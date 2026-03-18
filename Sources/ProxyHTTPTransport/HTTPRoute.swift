@@ -3,6 +3,7 @@ import NIOHTTP1
 package enum HTTPRoute {
     case health
     case debugSnapshot
+    case debugReset
     case sse
     case deleteSession
     case post
@@ -14,6 +15,8 @@ package enum HTTPRoute {
             .health
         case (.GET, "/debug/upstreams"):
             .debugSnapshot
+        case (.POST, "/debug/reset"):
+            .debugReset
         case (.GET, "/mcp"), (.GET, "/"), (.GET, "/mcp/events"), (.GET, "/events"):
             .sse
         case (.DELETE, "/mcp"), (.DELETE, "/"):

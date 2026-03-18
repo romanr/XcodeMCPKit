@@ -113,6 +113,7 @@ See Quick Start for how to launch.
 - upstream processes: `1` (spawns multiple `mcpbridge` processes when increased)
 - listen: `localhost:8765`
 - request timeout: `300` seconds (`0` disables)
+- requests sharing the same MCP session are forwarded FIFO, one at a time
 - max body size: `1048576` bytes
 - initialization: eager at startup
 - discovery: `~/Library/Caches/XcodeMCPProxy/endpoint.json`

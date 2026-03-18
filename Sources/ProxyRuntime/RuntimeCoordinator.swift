@@ -29,6 +29,7 @@ package protocol RuntimeCoordinating: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
     func removeSession(id: String)
+    func debugReset()
     func shutdown()
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
@@ -40,14 +41,68 @@ package protocol RuntimeCoordinating: Sendable {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
-    func chooseInitializeUpstreamIndex(sessionID: String) -> Int?
-    func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int?
+    func chooseUpstreamIndex() -> Int?
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: RequestLeaseID,
+        descriptor: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output>
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func sendUpstream(_ data: Data, upstreamIndex: Int)
     func debugSnapshot() -> ProxyDebugSnapshot
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
+    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID
+    func activateRequestLease(
+        _ leaseID: RequestLeaseID,
+        requestIDKey: String?,
+        upstreamIndex: Int?,
+        timeout: TimeAmount?
+    )
+    func completeRequestLease(_ leaseID: RequestLeaseID)
+    func requeueRequestLease(_ leaseID: RequestLeaseID)
+    func failRequestLease(
+        _ leaseID: RequestLeaseID,
+        terminalState: RequestLeaseState,
+        reason: RequestLeaseReleaseReason
+    )
+    func handleRequestLeaseTimeout(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    )
+    func abandonRequestLease(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    )
+}
+
+extension RuntimeCoordinating {
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: RequestLeaseID,
+        descriptor: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: nil,
+            starter: starter
+        )
+    }
+
+    func debugSnapshot() -> ProxyDebugSnapshot {
+        debugSnapshot(includeSensitiveDebugPayloads: false)
+    }
 }
 
 package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
@@ -79,6 +134,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let initializeGate = InitializeGate()
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
     package let debugRecorder: ProxyDebugRecorder
+    package let requestLeaseRegistry: RequestLeaseRegistry
     package let eventLoop: EventLoop
     package let responseCorrelationStore: ResponseCorrelationStore
     package let config: ProxyConfig
@@ -88,6 +144,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let initializeParamsOverride: [String: JSONValue]?
 
     package let upstreamSelectionPolicy: UpstreamSelectionPolicy
+    package let upstreamSlotScheduler: UpstreamSlotScheduler
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
@@ -98,17 +155,55 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package init(config: ProxyConfig, eventLoop: EventLoop, upstreams: [any UpstreamClient]) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
+        let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
         self.config = config
         self.eventLoop = eventLoop
         self.upstreams = upstreams
         self.sessionStore = SessionStore(config: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
+        self.requestLeaseRegistry = RequestLeaseRegistry()
         self.responseCorrelationStore = ResponseCorrelationStore(upstreamCount: upstreams.count)
         self.upstreamSelectionPolicy = UpstreamSelectionPolicy(upstreamCount: upstreams.count)
+        self.upstreamSlotScheduler = UpstreamSlotScheduler(
+            upstreamCount: upstreams.count,
+            defaultCapacity: 1,
+            canUseUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] upstreamIndex in
+                let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+                guard let upstreamSelectionPolicy else { return false }
+                let evaluation = upstreamSelectionPolicy.evaluateUsableInitialized(
+                    index: upstreamIndex,
+                    nowUptimeNs: nowUptimeNs
+                )
+                let probesToStart = evaluation.1
+                if probesToStart.isEmpty == false {
+                    let startProbes = schedulerProbeStarter.withLockedValue { $0 }
+                    startProbes?(probesToStart)
+                }
+                return evaluation.0
+            },
+            selectUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] occupied in
+                let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+                let chooseResult = upstreamSelectionPolicy?.chooseBestInitializedUpstream(
+                    nowUptimeNs: nowUptimeNs,
+                    occupiedUpstreams: occupied
+                )
+                let probesToStart = chooseResult?.1 ?? []
+                if probesToStart.isEmpty == false {
+                    let startProbes = schedulerProbeStarter.withLockedValue { $0 }
+                    startProbes?(probesToStart)
+                }
+                return chooseResult?.0
+            }
+        )
         self.initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
             configPath: config.configPath,
             logger: ProxyLogging.make("config")
         )
+        schedulerProbeStarter.withLockedValue { startProbes in
+            startProbes = { [weak self] probes in
+                self?.startHealthProbes(probes)
+            }
+        }
 
         var tasks: [Task<Void, Never>] = []
         tasks.reserveCapacity(upstreams.count)
@@ -121,8 +216,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
                     case .stderr(let message):
                         self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
-                    case .stdoutRecovery(let recovery):
-                        self.handleUpstreamRecovery(recovery, upstreamIndex: upstreamIndex)
+                    case .stdoutProtocolViolation(let protocolViolation):
+                        self.handleUpstreamProtocolViolation(
+                            protocolViolation,
+                            upstreamIndex: upstreamIndex
+                        )
                     case .stdoutBufferSize(let size):
                         self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
                     case .exit(let status):
@@ -153,6 +251,32 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package func removeSession(id: String) {
         let context = sessionStore.removeSession(id: id)
         context?.notificationHub.closeAll()
+    }
+
+    package func debugReset() {
+        let initializeReset = initializeGate.resetForDebug()
+        initializeReset.timeout?.cancel()
+        for pending in initializeReset.pending {
+            pending.eventLoop.execute {
+                pending.promise.fail(CancellationError())
+            }
+        }
+
+        let initTimeouts = upstreamSelectionPolicy.resetForDebug()
+        for timeout in initTimeouts {
+            timeout?.cancel()
+        }
+
+        let sessions = sessionStore.removeAllSessions()
+        for session in sessions {
+            session.notificationHub.closeAll()
+        }
+
+        toolsListCache.reset()
+        responseCorrelationStore.resetAll()
+        _ = requestLeaseRegistry.resetAll(reason: .clientDisconnected)
+        upstreamSlotScheduler.reset()
+        debugRecorder.resetAll()
     }
 
     package func shutdown() {
@@ -211,123 +335,73 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int? {
+    package func chooseUpstreamIndex() -> Int? {
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        var probesToStart: [HealthProbeRequest] = []
-        probesToStart.reserveCapacity(2)
+        let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
 
-        var pinned = sessionStore.pinnedUpstreamIndex(for: sessionID)
-        if let pinnedIndex = pinned {
-            let result = upstreamSelectionPolicy.evaluateUsableInitialized(
-                index: pinnedIndex,
-                nowUptimeNs: nowUptimeNs
-            )
-            probesToStart.append(contentsOf: result.1)
-            let isUsable = result.0
-            if isUsable {
-                return pinnedIndex
-            }
-
-            sessionStore.clearRoutingState(for: sessionID)
-            pinned = nil
-        }
-
-        let preferredInitializeUpstreamIndex = sessionStore.preferredInitializeUpstreamIndex(for: sessionID)
-
-        if shouldPin, let preferredInitializeUpstreamIndex {
-            let result = upstreamSelectionPolicy.evaluateUsableInitialized(
-                index: preferredInitializeUpstreamIndex,
-                nowUptimeNs: nowUptimeNs
-            )
-            probesToStart.append(contentsOf: result.1)
-            let isUsable = result.0
-            if isUsable {
-                for probe in probesToStart {
-                    probeUpstreamHealth(
-                        upstreamIndex: probe.upstreamIndex,
-                        probeGeneration: probe.probeGeneration
-                    )
-                }
-                sessionStore.pinSession(sessionID, to: preferredInitializeUpstreamIndex)
-                return preferredInitializeUpstreamIndex
-            }
-
-            sessionStore.clearInitializeHintIfUnpinned(for: sessionID)
-        }
-
-        let chooseResult = upstreamSelectionPolicy.chooseBestInitializedUpstream(nowUptimeNs: nowUptimeNs)
+        let chooseResult = upstreamSelectionPolicy.chooseBestInitializedUpstream(
+            nowUptimeNs: nowUptimeNs,
+            occupiedUpstreams: occupiedUpstreams
+        )
         let chosen = chooseResult.0
-        probesToStart.append(contentsOf: chooseResult.1)
-
-        for probe in probesToStart {
-            probeUpstreamHealth(
-                upstreamIndex: probe.upstreamIndex,
-                probeGeneration: probe.probeGeneration
-            )
-        }
+        startHealthProbes(chooseResult.1)
 
         guard let chosen else {
             return nil
         }
 
-        if pinned == nil, shouldPin {
-            sessionStore.pinSession(sessionID, to: chosen)
-        }
         return chosen
     }
 
-    package func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
-        var probesToStart: [HealthProbeRequest] = []
-        probesToStart.reserveCapacity(1)
-
-        let hintedUpstreamIndex = sessionStore.hintedUpstreamIndex(for: sessionID)
-
-        if let hintedUpstreamIndex {
-            let result = upstreamSelectionPolicy.evaluateUsableInitialized(
-                index: hintedUpstreamIndex,
-                nowUptimeNs: nowUptimeNs
+    private func startHealthProbes(_ probes: [HealthProbeRequest]) {
+        for probe in probes {
+            probeUpstreamHealth(
+                upstreamIndex: probe.upstreamIndex,
+                probeGeneration: probe.probeGeneration
             )
-            probesToStart.append(contentsOf: result.1)
-            let isUsable = result.0
-
-            for probe in probesToStart {
-                probeUpstreamHealth(
-                    upstreamIndex: probe.upstreamIndex,
-                    probeGeneration: probe.probeGeneration
-                )
-            }
-
-            if isUsable {
-                return hintedUpstreamIndex
-            }
-
-            sessionStore.clearInitializeHintIfUnpinned(for: sessionID)
         }
-
-        return chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
     }
 
-    func setInitializeUpstreamIndexIfNeeded(
-        sessionID: String,
-        upstreamIndex: Int,
-        preferOnNextPin: Bool
-    ) {
-        sessionStore.setInitializeUpstreamIfNeeded(
-            sessionID: sessionID,
-            upstreamIndex: upstreamIndex,
-            preferOnNextPin: preferOnNextPin
+    package func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: RequestLeaseID,
+        descriptor: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int? = nil,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        let hasHealthyUpstream = upstreamSelectionPolicy.initializedHealthyishCount() > 0
+        var recoveryInFlight = upstreamSelectionPolicy.anyRecoveryInFlight()
+        if hasHealthyUpstream == false, recoveryInFlight == false,
+            initializeGate.consumeRetryAfterWarmInitFailureRegardlessOfCachedInit()
+        {
+            startPrimaryEagerRetry()
+            recoveryInFlight = upstreamSelectionPolicy.anyRecoveryInFlight()
+        }
+        guard hasHealthyUpstream || recoveryInFlight else {
+            _ = chooseUpstreamIndex()
+            return eventLoop.makeFailedFuture(UpstreamSlotAcquisitionError.unavailable)
+        }
+        let promise = eventLoop.makePromise(of: Output.self)
+        upstreamSlotScheduler.enqueueRequest(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: preferredUpstreamIndex,
+            starter: { upstreamIndex in
+                starter(upstreamIndex).cascade(to: promise)
+            },
+            failUnavailable: {
+                promise.fail(UpstreamSlotAcquisitionError.unavailable)
+            },
+            failCancelled: {
+                promise.fail(CancellationError())
+            }
         )
+        return promise.futureResult
     }
 
-    func clearInitializeUpstreamIndex(
-        sessionID: String,
-        onlyIfGeneration sessionGeneration: UInt64? = nil
-    ) {
-        sessionStore.clearInitializeUpstreamIndex(
-            sessionID: sessionID,
-            onlyIfGeneration: sessionGeneration
-        )
+    func chooseUpstreamIndex(sessionID _: String, shouldPin _: Bool) -> Int? {
+        chooseUpstreamIndex()
     }
 
     func sessionStillMatchesPendingInitialize(
@@ -366,14 +440,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if let cachedResult {
             _ = session(id: sessionID)
-            if let upstreamIndex = chooseInitializeUpstreamIndex(sessionID: sessionID) {
-                let shouldPreferOnNextPin = upstreamSelectionPolicy.initializedHealthyishCount() > 1
-                setInitializeUpstreamIndexIfNeeded(
-                    sessionID: sessionID,
-                    upstreamIndex: upstreamIndex,
-                    preferOnNextPin: shouldPreferOnNextPin
-                )
-            }
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
@@ -386,11 +452,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if pendingPromise != nil {
             _ = session(id: sessionID)
-            setInitializeUpstreamIndexIfNeeded(
-                sessionID: sessionID,
-                upstreamIndex: 0,
-                preferOnNextPin: false
-            )
         }
 
         if shouldSend {

@@ -4,18 +4,22 @@ import NIOHTTP1
 import ProxyCore
 
 enum MCPResponseEmitter {
+    enum EmitterError: Error {
+        case invalidEventStreamPayload
+    }
+
     static func sendJSON(
         on channel: Channel,
         buffer: ByteBuffer,
         keepAlive: Bool,
         sessionID: String?
-    ) {
+    ) -> EventLoopFuture<Void> {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         if let sessionID {
             headers.add(name: "Mcp-Session-Id", value: sessionID)
         }
-        sendBuffer(on: channel, status: .ok, headers: headers, buffer: buffer, keepAlive: keepAlive)
+        return sendBuffer(on: channel, status: .ok, headers: headers, buffer: buffer, keepAlive: keepAlive)
     }
 
     static func sendSingleSSE(
@@ -23,9 +27,9 @@ enum MCPResponseEmitter {
         data: Data,
         keepAlive: Bool,
         sessionID: String
-    ) -> Bool {
+    ) -> EventLoopFuture<Void> {
         guard let payload = SSECodec.encodeDataEvent(data) else {
-            return false
+            return channel.eventLoop.makeFailedFuture(EmitterError.invalidEventStreamPayload)
         }
 
         var headers = HTTPHeaders()
@@ -40,11 +44,14 @@ enum MCPResponseEmitter {
         var buffer = channel.allocator.buffer(capacity: payload.utf8.count)
         buffer.writeString(payload)
         channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+        let promise = channel.eventLoop.makePromise(of: Void.self)
+        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: promise)
         if !keepAlive {
-            channel.close(promise: nil)
+            promise.futureResult.whenComplete { _ in
+                channel.close(promise: nil)
+            }
         }
-        return true
+        return promise.futureResult
     }
 
     static func sendPlain(
@@ -53,7 +60,7 @@ enum MCPResponseEmitter {
         body: String,
         keepAlive: Bool,
         sessionID: String?
-    ) {
+    ) -> EventLoopFuture<Void> {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
         if let sessionID {
@@ -61,7 +68,7 @@ enum MCPResponseEmitter {
         }
         var buffer = channel.allocator.buffer(capacity: body.utf8.count)
         buffer.writeString(body)
-        sendBuffer(on: channel, status: status, headers: headers, buffer: buffer, keepAlive: keepAlive)
+        return sendBuffer(on: channel, status: status, headers: headers, buffer: buffer, keepAlive: keepAlive)
     }
 
     static func sendEmpty(
@@ -69,10 +76,10 @@ enum MCPResponseEmitter {
         status: HTTPResponseStatus,
         keepAlive: Bool,
         sessionID: String
-    ) {
+    ) -> EventLoopFuture<Void> {
         var headers = HTTPHeaders()
         headers.add(name: "Mcp-Session-Id", value: sessionID)
-        sendBuffer(on: channel, status: status, headers: headers, buffer: nil, keepAlive: keepAlive)
+        return sendBuffer(on: channel, status: status, headers: headers, buffer: nil, keepAlive: keepAlive)
     }
 
     private static func sendBuffer(
@@ -81,16 +88,20 @@ enum MCPResponseEmitter {
         headers: HTTPHeaders,
         buffer: ByteBuffer?,
         keepAlive: Bool
-    ) {
+    ) -> EventLoopFuture<Void> {
         var head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
         channel.write(HTTPServerResponsePart.head(head), promise: nil)
         if let buffer {
             channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
         }
-        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+        let promise = channel.eventLoop.makePromise(of: Void.self)
+        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: promise)
         if !keepAlive {
-            channel.close(promise: nil)
+            promise.futureResult.whenComplete { _ in
+                channel.close(promise: nil)
+            }
         }
+        return promise.futureResult
     }
 }

@@ -17,14 +17,9 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
-        guard MCPResponseEmitter.sendSingleSSE(
-            on: channel,
-            data: data,
-            keepAlive: keepAlive,
-            sessionID: sessionID
-        ) else {
-            sendPlain(
+    ) -> EventLoopFuture<Void> {
+        guard SSECodec.encodeDataEvent(data) != nil else {
+            return sendPlain(
                 on: channel,
                 status: .badGateway,
                 body: "invalid upstream response",
@@ -32,9 +27,14 @@ package struct HTTPResponseWriter: Sendable {
                 sessionID: sessionID,
                 requestLog: requestLog
             )
-            return
         }
         logResponse(requestLog, status: .ok, sessionID: sessionID)
+        return MCPResponseEmitter.sendSingleSSE(
+            on: channel,
+            data: data,
+            keepAlive: keepAlive,
+            sessionID: sessionID
+        )
     }
 
     package func sendJSON(
@@ -43,9 +43,9 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         logResponse(requestLog, status: .ok, sessionID: sessionID)
-        MCPResponseEmitter.sendJSON(
+        return MCPResponseEmitter.sendJSON(
             on: channel,
             buffer: buffer,
             keepAlive: keepAlive,
@@ -59,11 +59,11 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         logResponse(requestLog, status: .ok, sessionID: sessionID)
         var buffer = channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
-        MCPResponseEmitter.sendJSON(
+        return MCPResponseEmitter.sendJSON(
             on: channel,
             buffer: buffer,
             keepAlive: keepAlive,
@@ -78,9 +78,9 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         logResponse(requestLog, status: status, sessionID: sessionID)
-        MCPResponseEmitter.sendPlain(
+        return MCPResponseEmitter.sendPlain(
             on: channel,
             status: status,
             body: body,
@@ -95,9 +95,9 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         logResponse(requestLog, status: status, sessionID: sessionID)
-        MCPResponseEmitter.sendEmpty(
+        return MCPResponseEmitter.sendEmpty(
             on: channel,
             status: status,
             keepAlive: keepAlive,
@@ -114,13 +114,13 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         guard let data = MCPErrorResponder.errorResponseData(
             id: id,
             code: code,
             message: message
         ) else {
-            sendPlain(
+            return sendPlain(
                 on: channel,
                 status: .badGateway,
                 body: "invalid error response",
@@ -128,9 +128,8 @@ package struct HTTPResponseWriter: Sendable {
                 sessionID: sessionID,
                 requestLog: requestLog
             )
-            return
         }
-        sendErrorPayload(
+        return sendErrorPayload(
             on: channel,
             data: data,
             prefersEventStream: prefersEventStream,
@@ -150,14 +149,14 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         guard let data = MCPErrorResponder.errorResponseData(
             ids: ids,
             code: code,
             message: message,
             forceBatchArray: forceBatchArray
         ) else {
-            sendPlain(
+            return sendPlain(
                 on: channel,
                 status: .badGateway,
                 body: "invalid error response",
@@ -165,9 +164,8 @@ package struct HTTPResponseWriter: Sendable {
                 sessionID: sessionID,
                 requestLog: requestLog
             )
-            return
         }
-        sendErrorPayload(
+        return sendErrorPayload(
             on: channel,
             data: data,
             prefersEventStream: prefersEventStream,
@@ -229,9 +227,9 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         if prefersEventStream {
-            sendSingleSSE(
+            return sendSingleSSE(
                 on: channel,
                 data: data,
                 keepAlive: keepAlive,
@@ -241,7 +239,7 @@ package struct HTTPResponseWriter: Sendable {
         } else {
             var buffer = channel.allocator.buffer(capacity: data.count)
             buffer.writeBytes(data)
-            sendJSON(
+            return sendJSON(
                 on: channel,
                 buffer: buffer,
                 keepAlive: keepAlive,
@@ -258,9 +256,9 @@ package struct HTTPResponseWriter: Sendable {
         keepAlive: Bool,
         sessionID: String,
         requestLog: HTTPHandler.RequestLogContext
-    ) {
+    ) -> EventLoopFuture<Void> {
         if prefersEventStream {
-            sendSingleSSE(
+            return sendSingleSSE(
                 on: channel,
                 data: data,
                 keepAlive: keepAlive,
@@ -270,7 +268,7 @@ package struct HTTPResponseWriter: Sendable {
         } else {
             var buffer = channel.allocator.buffer(capacity: data.count)
             buffer.writeBytes(data)
-            sendJSON(
+            return sendJSON(
                 on: channel,
                 buffer: buffer,
                 keepAlive: keepAlive,

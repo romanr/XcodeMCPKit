@@ -50,6 +50,35 @@ struct HTTPHandlerTests {
         #expect(snapshot.proxyInitialized == false)
         #expect(snapshot.upstreams.count == 1)
         #expect(snapshot.upstreams[0].upstreamIndex == 0)
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreview == nil)
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreviewHex == nil)
+        #expect(snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == nil)
+    }
+
+    @Test func httpDebugUpstreamsCanIncludeSensitivePayloadsOnExplicitOptIn() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .GET,
+            uri: "/debug/upstreams?includeSensitive=1"
+        )
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(ProxyDebugSnapshot.self, from: Data(response.body.utf8))
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreview == "raw-preview")
+        #expect(snapshot.upstreams[0].lastProtocolViolationPreviewHex == "61 62")
+        #expect(snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == "61")
     }
 
     @Test func httpDebugUpstreamsReturnsNotFoundWhenListenerIsNotLoopback() async throws {
@@ -62,6 +91,44 @@ struct HTTPHandlerTests {
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.body == "not found")
+    }
+
+    @Test func httpDebugResetResetsRuntimeOnLoopback() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setCachedToolsListResult(.object(["tools": .array([])]))
+        _ = sessionManager.session(id: "debug-reset-session")
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/debug/reset")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .accepted)
+        #expect(response.body == "reset scheduled")
+        #expect(sessionManager.hasSession(id: "debug-reset-session") == false)
+        #expect(sessionManager.cachedToolsListResult() == nil)
+    }
+
+    @Test func httpDebugResetReturnsNotFoundWhenListenerIsNotLoopback() async throws {
+        var config = makeConfig()
+        config.listenHost = "0.0.0.0"
+
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/debug/reset")
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -299,7 +366,6 @@ struct HTTPHandlerTests {
         let responseID = (responseObject?["id"] as? NSNumber)?.intValue
         #expect(responseID == 1)
         #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
@@ -888,8 +954,7 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
@@ -963,8 +1028,7 @@ struct HTTPHandlerTests {
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
-        #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
-        #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
@@ -2033,11 +2097,14 @@ struct HTTPHandlerTests {
                 "XcodeListWindows",
                 "XcodeListNavigatorIssues",
             ])
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false])
-            #expect(sessionManager.sentToolRequests() == [
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
+            #expect(Set(sessionManager.sentToolRequests()) == Set([
+                "XcodeListWindows@0",
+                "XcodeListNavigatorIssues@0",
+            ]) || Set(sessionManager.sentToolRequests()) == Set([
                 "XcodeListWindows@1",
                 "XcodeListNavigatorIssues@1",
-            ])
+            ]))
         } catch {
             await server.shutdown()
             throw error
@@ -2258,7 +2325,7 @@ struct HTTPHandlerTests {
                 "XcodeListWindows",
                 "XcodeRefreshCodeIssuesInFile",
             ])
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             await server.shutdown()
             throw error
@@ -2350,7 +2417,7 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
                 "XcodeRefreshCodeIssuesInFile",
             ])
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             await server.shutdown()
             throw error
@@ -3186,11 +3253,130 @@ struct HTTPHandlerTests {
             ])
             #expect(sessionManager.requestSuccessNotificationCount() == 0)
             #expect(sessionManager.requestTimeoutNotificationCount() == 1)
-            #expect(sessionManager.chooseUpstreamShouldPinValues() == [false, true])
+            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             await server.shutdown()
             throw error
         }
+        await server.shutdown()
+    }
+
+    @Test func forwardingServiceInternalToolRespectsRequestedOverride()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 0.2)
+        let eventLoop = EmbeddedEventLoop()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListNavigatorIssues")
+                return .immediate(
+                    try makeToolSuccessResponse(id: originalID, text: "{\"issues\":[]}")
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+
+        let forwardingService = MCPForwardingService(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListNavigatorIssues",
+            arguments: ["tabIdentifier": "windowtab-1"],
+            sessionID: "session-mismatch",
+            eventLoop: eventLoop,
+            upstreamIndexOverride: 0
+        )
+        switch result {
+        case .success:
+            break
+        case .timeout:
+            Issue.record("expected the requested upstream dispatch to succeed")
+        case .unavailable:
+            Issue.record("expected the requested upstream to be usable")
+        }
+        #expect(sessionManager.sentToolRequests() == ["XcodeListNavigatorIssues@0"])
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+    }
+
+    @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
+        let attempts = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { method, originalID in
+                #expect(method == "tools/call")
+                let attempt = attempts.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text:
+                                "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
+                        )
+                    )
+                }
+                return .manual(try makeToolSuccessResponse(id: originalID, text: "ok"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+        let requestTask = Task {
+            try await postHTTPData(
+                url: server.url,
+                sessionID: "session-retry-lease",
+                payload: toolsCallPayload(
+                    id: 14,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-retry-lease",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+        }
+
+        do {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while sessionManager.sentUpstreamCount() != 2, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(sessionManager.sentUpstreamCount() == 2)
+            #expect(sessionManager.requeuedLeaseCount() == 1)
+
+            let inFlightLease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(inFlightLease.state == .active)
+            #expect(inFlightLease.releaseReason == nil)
+
+            sessionManager.deliverNextPendingResponse()
+
+            let response = try await requestTask.value
+            #expect(response.statusCode == 200)
+            let body =
+                (try? JSONSerialization.jsonObject(with: response.bodyData, options: []))
+                as? [String: Any]
+            let result = body?["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) != true)
+
+            let completedLease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(completedLease.state == .completed)
+        } catch {
+            requestTask.cancel()
+            await server.shutdown()
+            throw error
+        }
+
         await server.shutdown()
     }
 }
@@ -3227,8 +3413,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     private struct ChooseUpstreamCall: Sendable {
-        let sessionID: String
-        let shouldPin: Bool
+        let sessionID: String?
     }
 
     private struct SentRequest: Sendable {
@@ -3258,6 +3443,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         var pendingResponses: [PendingResponse] = []
         var sentRequests: [SentRequest] = []
         var availableUpstreamIndices: [Int?] = []
+        var requeuedLeaseCount = 0
     }
 
     private let state = NIOLockedValueBox(State())
@@ -3268,6 +3454,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
+    private let requestLeaseRegistry = RequestLeaseRegistry()
 
     init(
         config: ProxyConfig,
@@ -3323,6 +3510,16 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         context?.notificationHub.closeAll()
     }
 
+    func debugReset() {
+        state.withLockedValue { state in
+            state.sessions.removeAll()
+            state.cachedToolsList = nil
+            state.pendingResponses.removeAll()
+            state.sentRequests.removeAll()
+            state.upstreamIDMapping.removeAll()
+        }
+    }
+
     func shutdown() {}
 
     func isInitialized() -> Bool {
@@ -3356,7 +3553,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { state in
             state.initialized = true
         }
-        _ = chooseUpstreamIndex(sessionID: sessionID, shouldPin: true)
+        _ = chooseUpstreamIndex()
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalID.value.foundationObject,
@@ -3370,10 +3567,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
-    func chooseUpstreamIndex(sessionID: String, shouldPin: Bool) -> Int? {
+    func chooseUpstreamIndex() -> Int? {
         state.withLockedValue { state in
             state.chooseUpstreamCalls.append(
-                ChooseUpstreamCall(sessionID: sessionID, shouldPin: shouldPin)
+                ChooseUpstreamCall(sessionID: nil)
             )
             if state.availableUpstreamIndices.isEmpty == false {
                 return state.availableUpstreamIndices.removeFirst()
@@ -3382,8 +3579,20 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
-        chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID _: RequestLeaseID,
+        descriptor _: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        let upstreamIndex = preferredUpstreamIndex ?? chooseUpstreamIndex()
+        guard let upstreamIndex else {
+            return eventLoop.makeFailedFuture(
+                NSError(domain: "TestRuntimeCoordinator", code: 1)
+            )
+        }
+        return starter(upstreamIndex)
     }
 
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex _: Int) -> Int64 {
@@ -3493,6 +3702,99 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func debugSnapshot() -> ProxyDebugSnapshot {
+        debugSnapshot(includeSensitiveDebugPayloads: false)
+    }
+
+    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID {
+        requestLeaseRegistry.createLease(descriptor: descriptor)
+    }
+
+    func activateRequestLease(
+        _ leaseID: RequestLeaseID,
+        requestIDKey: String?,
+        upstreamIndex: Int?,
+        timeout: TimeAmount?
+    ) {
+        requestLeaseRegistry.activateLease(
+            leaseID,
+            requestIDKey: requestIDKey,
+            upstreamIndex: upstreamIndex,
+            timeoutAt: timeout.map {
+                Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
+            }
+        )
+    }
+
+    func completeRequestLease(_ leaseID: RequestLeaseID) {
+        _ = requestLeaseRegistry.completeLease(leaseID)
+    }
+
+    func requeueRequestLease(_ leaseID: RequestLeaseID) {
+        state.withLockedValue { state in
+            state.requeuedLeaseCount += 1
+        }
+        _ = requestLeaseRegistry.requeueLease(leaseID)
+    }
+
+    func failRequestLease(
+        _ leaseID: RequestLeaseID,
+        terminalState: RequestLeaseState,
+        reason: RequestLeaseReleaseReason
+    ) {
+        _ = requestLeaseRegistry.failLease(
+            leaseID,
+            terminalState: terminalState,
+            reason: reason
+        )
+    }
+
+    func handleRequestLeaseTimeout(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    ) {
+        _ = leaseID
+        if let first = requestIDKeys.first {
+            onRequestTimeout(
+                sessionID: sessionID,
+                requestIDKey: first,
+                upstreamIndex: upstreamIndex
+            )
+            for requestIDKey in requestIDKeys.dropFirst() {
+                removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        }
+        _ = requestLeaseRegistry.timeoutLease(leaseID)
+    }
+
+    func abandonRequestLease(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    ) {
+        if let upstreamIndex {
+            for requestIDKey in requestIDKeys {
+                removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+        }
+        _ = requestLeaseRegistry.failLease(
+            leaseID,
+            terminalState: .abandoned,
+            reason: .clientDisconnected
+        )
+    }
+
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
         ProxyDebugSnapshot(
             generatedAt: Date(timeIntervalSince1970: 0),
             proxyInitialized: isInitialized(),
@@ -3511,15 +3813,25 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
                     recentStderr: [],
                     lastDecodeError: nil,
                     lastBridgeError: nil,
-                    resyncCount: 0,
-                    lastResyncAt: nil,
-                    lastResyncDroppedBytes: nil,
-                    lastResyncPreview: nil,
+                    protocolViolationCount: 0,
+                    lastProtocolViolationAt: nil,
+                    lastProtocolViolationReason: nil,
+                    lastProtocolViolationBufferedBytes: nil,
+                    lastProtocolViolationPreview: includeSensitiveDebugPayloads ? "raw-preview" : nil,
+                    lastProtocolViolationPreviewHex: includeSensitiveDebugPayloads ? "61 62" : nil,
+                    lastProtocolViolationLeadingByteHex: includeSensitiveDebugPayloads ? "61" : nil,
                     bufferedStdoutBytes: 0
                 )
             ],
-            recentTraffic: []
+            recentTraffic: [],
+            sessions: [],
+            leases: requestLeaseRegistry.debugSnapshots(),
+            queuedRequestCount: 0
         )
+    }
+
+    func leaseDebugSnapshots() -> [RequestLeaseDebugSnapshot] {
+        requestLeaseRegistry.debugSnapshots()
     }
 
     func sentUpstreamCount() -> Int {
@@ -3550,11 +3862,11 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func lastChooseUpstreamShouldPin() -> Bool {
-        state.withLockedValue { $0.chooseUpstreamCalls.last?.shouldPin ?? false }
+        false
     }
 
     func chooseUpstreamShouldPinValues() -> [Bool] {
-        state.withLockedValue { $0.chooseUpstreamCalls.map(\.shouldPin) }
+        []
     }
 
     func refreshToolsListCallCount() -> Int {
@@ -3579,6 +3891,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func requestSuccessNotificationCount() -> Int {
         state.withLockedValue { $0.requestSuccessNotifications }
+    }
+
+    func requeuedLeaseCount() -> Int {
+        state.withLockedValue { $0.requeuedLeaseCount }
     }
 
     func setInitialized(_ value: Bool) {
@@ -3765,6 +4081,11 @@ private struct TestHTTPHandlerServer {
     }
 }
 
+private struct RawHTTPResponse: Sendable {
+    let statusCode: Int
+    let bodyData: Data
+}
+
 private func postHTTPJSON(
     url: URL,
     sessionID: String,
@@ -3786,6 +4107,26 @@ private func postHTTPJSON(
         (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
         ?? [:]
     return (httpResponse, object)
+}
+
+private func postHTTPData(
+    url: URL,
+    sessionID: String,
+    payload: [String: Any]
+) async throws -> RawHTTPResponse {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw HTTPTestError.missingResponseHead
+    }
+    return RawHTTPResponse(statusCode: httpResponse.statusCode, bodyData: responseData)
 }
 
 private func getHTTPData(url: URL) async throws -> (HTTPURLResponse, Data) {

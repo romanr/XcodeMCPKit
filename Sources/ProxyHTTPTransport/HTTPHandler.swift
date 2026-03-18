@@ -25,6 +25,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         package var isSSE = false
         package var sseSessionID: String?
         package var bodyTooLarge = false
+        package var activePostRequestHandles: [String: HTTPPostCancellationHandle] = [:]
     }
 
     package let state = NIOLockedValueBox(State())
@@ -111,9 +112,16 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     package func channelInactive(context: ChannelHandlerContext) {
-        let sessionID = state.withLockedValue { $0.sseSessionID }
+        let (sessionID, activePostRequestHandles) = state.withLockedValue { state in
+            let handles = Array(state.activePostRequestHandles.values)
+            state.activePostRequestHandles.removeAll()
+            return (state.sseSessionID, handles)
+        }
         if let sessionID {
             controlService.closeSSE(sessionID: sessionID, channel: context.channel)
+        }
+        for handle in activePostRequestHandles {
+            postService.cancel(handle, source: .channelInactive)
         }
         if let remote = remoteAddressString(for: context.channel) {
             if let sessionID {
@@ -147,7 +155,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let bodyTooLarge = state.withLockedValue { $0.bodyTooLarge }
         if bodyTooLarge {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .payloadTooLarge,
                 body: "request body too large",
@@ -160,9 +168,11 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         switch HTTPRoute.resolve(method: head.method, path: path) {
         case .health:
-            sendPlain(on: context.channel, status: .ok, body: "ok", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
+            _ = sendPlain(on: context.channel, status: .ok, body: "ok", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
         case .debugSnapshot:
             handleDebugSnapshot(context: context, head: head, requestLog: requestLog)
+        case .debugReset:
+            handleDebugReset(context: context, head: head, requestLog: requestLog)
         case .sse:
             handleSSE(context: context, head: head, requestLog: requestLog)
         case .deleteSession:
@@ -170,13 +180,13 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         case .post:
             handlePost(context: context, head: head, requestLog: requestLog)
         case .notFound:
-            sendPlain(on: context.channel, status: .notFound, body: "not found", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
+            _ = sendPlain(on: context.channel, status: .notFound, body: "not found", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
         }
     }
 
     private func handleDebugSnapshot(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
         guard isLoopbackDebugEndpointEnabled else {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .notFound,
                 body: "not found",
@@ -187,8 +197,13 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard let data = controlService.debugSnapshotData() else {
-            sendPlain(
+        let includeSensitiveDebugPayloads = Self.shouldIncludeSensitiveDebugPayloads(
+            from: head.uri
+        )
+        guard let data = controlService.debugSnapshotData(
+            includeSensitiveDebugPayloads: includeSensitiveDebugPayloads
+        ) else {
+            _ = sendPlain(
                 on: context.channel,
                 status: .internalServerError,
                 body: "debug snapshot unavailable",
@@ -199,13 +214,60 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        sendJSONData(
+        _ = sendJSONData(
             on: context.channel,
             data: data,
             keepAlive: head.isKeepAlive,
             sessionID: nil,
             requestLog: requestLog
         )
+    }
+
+    private func handleDebugReset(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
+        guard isLoopbackDebugEndpointEnabled else {
+            _ = sendPlain(
+                on: context.channel,
+                status: .notFound,
+                body: "not found",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return
+        }
+
+        controlService.debugReset(on: context.eventLoop).whenComplete { [self, weak channel = context.channel] result in
+            guard let channel else { return }
+            switch result {
+            case .success:
+                _ = sendPlain(
+                    on: channel,
+                    status: .accepted,
+                    body: "reset scheduled",
+                    keepAlive: head.isKeepAlive,
+                    sessionID: nil,
+                    requestLog: requestLog
+                )
+            case .failure:
+                _ = sendPlain(
+                    on: channel,
+                    status: .internalServerError,
+                    body: "debug reset failed",
+                    keepAlive: head.isKeepAlive,
+                    sessionID: nil,
+                    requestLog: requestLog
+                )
+            }
+        }
+    }
+
+    private static func shouldIncludeSensitiveDebugPayloads(from uri: String) -> Bool {
+        guard let components = URLComponents(string: uri) else { return false }
+        return components.queryItems?.contains(where: { item in
+            guard item.name == "includeSensitive" else { return false }
+            guard let value = item.value?.lowercased() else { return false }
+            return value == "1" || value == "true" || value == "yes"
+        }) == true
     }
 
     private func handleSSE(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
@@ -215,7 +277,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         guard HTTPRequestValidator.acceptsEventStream(head.headers) else {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .notAcceptable,
                 body: "client must accept text/event-stream",
@@ -227,7 +289,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers) else {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .unauthorized,
                 body: "session id required",
@@ -271,7 +333,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     private func handleDelete(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
         guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers) else {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .unauthorized,
                 body: "session id required",
@@ -282,7 +344,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
         controlService.deleteSession(id: sessionID)
-        sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
+        _ = sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
     }
 
     private func handlePost(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
@@ -290,7 +352,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         do {
             prefersEventStream = try HTTPRequestValidator.postPreference(for: head.headers)
         } catch HTTPRequestValidationFailure.notAcceptable {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .notAcceptable,
                 body: "client must accept application/json or text/event-stream",
@@ -300,7 +362,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         } catch HTTPRequestValidationFailure.unsupportedMediaType {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .unsupportedMediaType,
                 body: "content-type must be application/json",
@@ -310,7 +372,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         } catch {
-            sendPlain(
+            _ = sendPlain(
                 on: context.channel,
                 status: .badRequest,
                 body: "invalid request headers",
@@ -327,12 +389,12 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return body
         }
         guard var body = body else {
-            sendPlain(on: context.channel, status: .badRequest, body: "missing body", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
+            _ = sendPlain(on: context.channel, status: .badRequest, body: "missing body", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
             return
         }
 
         guard let bodyData = body.readData(length: body.readableBytes) else {
-            sendPlain(on: context.channel, status: .badRequest, body: "invalid body", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
+            _ = sendPlain(on: context.channel, status: .badRequest, body: "invalid body", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
             return
         }
 
@@ -340,19 +402,60 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         let headerSessionExists = headerSessionID.map { controlService.hasSession(id: $0) } ?? false
         let keepAlive = head.isKeepAlive
         let channel = context.channel
-        postService.handle(
+        let operation = postService.handle(
             bodyData: bodyData,
             headerSessionID: headerSessionID,
             headerSessionExists: headerSessionExists,
             prefersEventStream: prefersEventStream,
             eventLoop: context.eventLoop
-        ).whenSuccess { resolution in
-            self.sendPostResolution(
-                resolution,
-                on: channel,
-                keepAlive: keepAlive,
-                requestLog: requestLog
-            )
+        )
+        if let handle = operation.cancellationHandle {
+            state.withLockedValue { state in
+                state.activePostRequestHandles[requestLog.id] = handle
+            }
+        }
+        operation.future.whenComplete { result in
+            switch result {
+            case .success(let resolution):
+                let writeFuture = self.sendPostResolution(
+                    resolution,
+                    on: channel,
+                    keepAlive: keepAlive,
+                    requestLog: requestLog
+                )
+                writeFuture.whenFailure { error in
+                    guard let handle = operation.cancellationHandle else { return }
+                    self.logger.warning(
+                        "HTTP response write failed",
+                        metadata: [
+                            "request_id": .string(requestLog.id),
+                            "disconnect_source": .string("responseWriteFailure"),
+                            "error": .string("\(error)"),
+                        ]
+                    )
+                    self.postService.cancel(handle, source: .responseWriteFailure)
+                }
+                writeFuture.whenComplete { _ in
+                    _ = self.state.withLockedValue { state in
+                        state.activePostRequestHandles.removeValue(forKey: requestLog.id)
+                    }
+                }
+            case .failure:
+                if let handle = operation.cancellationHandle {
+                    handle.markCompleted()
+                }
+                _ = self.state.withLockedValue { state in
+                    state.activePostRequestHandles.removeValue(forKey: requestLog.id)
+                }
+                _ = self.sendPlain(
+                    on: channel,
+                    status: .internalServerError,
+                    body: "internal server error",
+                    keepAlive: keepAlive,
+                    sessionID: headerSessionID,
+                    requestLog: requestLog
+                )
+            }
         }
     }
 

@@ -4,28 +4,12 @@ import NIOFoundationCompat
 import ProxyCore
 
 extension RuntimeCoordinator {
-    func clearPinnedSessions(forUpstreamIndex upstreamIndex: Int) -> Int {
-        sessionStore.clearPinnedSessions(forUpstreamIndex: upstreamIndex)
-    }
-
     func markRequestSucceeded(upstreamIndex: Int) {
         upstreamSelectionPolicy.markRequestSucceeded(upstreamIndex: upstreamIndex)
     }
 
     func markUpstreamOverloaded(upstreamIndex: Int) {
-        let shouldClearPins = upstreamSelectionPolicy.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
-
-        guard shouldClearPins else { return }
-        let cleared = clearPinnedSessions(forUpstreamIndex: upstreamIndex)
-        if cleared > 0 {
-            logger.warning(
-                "Upstream overloaded; cleared pinned sessions for failover",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
-                    "cleared_pins": .string("\(cleared)"),
-                ]
-            )
-        }
+        _ = upstreamSelectionPolicy.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
     }
 
     func markRequestTimedOut(upstreamIndex: Int) {
@@ -34,19 +18,17 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNs
         )
-        let shouldClearPins = result.shouldClearPins
         let timeoutCount = result.timeoutCount
 
-        if shouldClearPins {
-            let cleared = clearPinnedSessions(forUpstreamIndex: upstreamIndex)
+        if result.shouldClearPins {
             logger.warning(
                 "Upstream quarantined after repeated request timeouts",
                 metadata: [
                     "upstream": .string("\(upstreamIndex)"),
                     "timeout_count": .string("\(timeoutCount)"),
-                    "cleared_pins": .string("\(cleared)"),
                 ]
             )
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
         }
     }
 
@@ -136,6 +118,11 @@ extension RuntimeCoordinator {
             success: success,
             nowUptimeNs: nowUptimeNs
         )
+        if success {
+            upstreamSlotScheduler.wake()
+        } else {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        }
         logger.debug(
             "Upstream health probe completed",
             metadata: [
@@ -182,7 +169,7 @@ extension RuntimeCoordinator {
         _ = session(id: internalSessionID)
 
         guard
-            let upstreamIndex = chooseUpstreamIndex(sessionID: internalSessionID, shouldPin: false),
+            let upstreamIndex = chooseUpstreamIndex(),
             upstreamIndex >= 0,
             upstreamIndex < upstreams.count
         else {
@@ -306,10 +293,12 @@ extension RuntimeCoordinator {
         guard shouldClear else { return }
         responseCorrelationStore.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
-        guard upstreamIndex == 0 else { return }
-        let shouldRetryEagerInit = initializeGate.consumeRetryAfterWarmInitFailureIfNeeded()
-        if shouldRetryEagerInit {
-            startEagerInitializePrimary()
+        if upstreamIndex == 0 {
+            let shouldRetryEagerInit = initializeGate.consumeRetryAfterWarmInitFailureIfNeeded()
+            if shouldRetryEagerInit {
+                startEagerInitializePrimary()
+            }
         }
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 }

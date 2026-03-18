@@ -46,6 +46,46 @@ struct StdioAdapterIntegrationTests {
         outputPipe.fileHandleForWriting.closeFile()
         await server.shutdown()
     }
+
+    @Test func stdioAdapterStopsReadLoopAfterFatalInputProtocolViolation() async throws {
+        let server = try HangingHTTPServer.start()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let adapter = StdioAdapter(
+            upstreamURL: server.url,
+            requestTimeout: 0,
+            input: inputPipe.fileHandleForReading,
+            output: outputPipe.fileHandleForWriting
+        )
+
+        do {
+            let waitTask = Task {
+                await adapter.start()
+                await adapter.wait()
+            }
+
+            inputPipe.fileHandleForWriting.write(Data("Content-Length: abc\r\n\r\n{}".utf8))
+
+            let completed = try await waitWithTimeout(
+                "StdioAdapter should stop after a fatal input protocol violation",
+                timeout: .seconds(2)
+            ) {
+                await waitTask.value
+                return true
+            }
+
+            #expect(completed)
+        } catch {
+            inputPipe.fileHandleForWriting.closeFile()
+            outputPipe.fileHandleForWriting.closeFile()
+            await server.shutdown()
+            throw error
+        }
+
+        inputPipe.fileHandleForWriting.closeFile()
+        outputPipe.fileHandleForWriting.closeFile()
+        await server.shutdown()
+    }
 }
 
 private struct HangingHTTPServer {

@@ -4,7 +4,7 @@ import ProxyCore
 package enum UpstreamEvent: Sendable {
     case message(Data)
     case stderr(String)
-    case stdoutRecovery(StdioFramerRecovery)
+    case stdoutProtocolViolation(StdioFramerProtocolViolation)
     case stdoutBufferSize(Int)
     case exit(Int32)
 }

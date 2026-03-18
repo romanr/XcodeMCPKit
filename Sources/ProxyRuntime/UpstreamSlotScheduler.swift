@@ -28,9 +28,17 @@ package final class UpstreamSlotScheduler: Sendable {
         let failCancelled: @Sendable () -> Void
     }
 
+    private struct Reservation: Sendable {
+        let request: PendingRequest
+        let upstreamIndex: Int
+        var hasStarted = false
+    }
+
     private struct State: Sendable {
         var pendingRequests: [PendingRequest] = []
         var activeLeaseIDsByUpstream: [Int: RequestLeaseID] = [:]
+        var activeTopLevelLeaseIDsBySession: [String: RequestLeaseID] = [:]
+        var reservationsByLeaseID: [RequestLeaseID: Reservation] = [:]
         var capacityByUpstream: [Int: Int] = [:]
     }
 
@@ -89,6 +97,15 @@ package final class UpstreamSlotScheduler: Sendable {
         let released = state.withLockedValue { state -> Bool in
             guard state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID else { return false }
             state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
+            if let reservation = state.reservationsByLeaseID.removeValue(forKey: leaseID),
+                reservation.request.descriptor.isTopLevelClientRequest,
+                state.activeTopLevelLeaseIDsBySession[reservation.request.descriptor.sessionID]
+                    == leaseID
+            {
+                state.activeTopLevelLeaseIDsBySession.removeValue(
+                    forKey: reservation.request.descriptor.sessionID
+                )
+            }
             return true
         }
         guard released else { return }
@@ -125,21 +142,55 @@ package final class UpstreamSlotScheduler: Sendable {
     }
 
     package func cancelQueuedRequest(leaseID: RequestLeaseID) {
-        let removed = state.withLockedValue { state -> PendingRequest? in
+        enum CancelledRequest {
+            case pending(PendingRequest)
+            case reserved(PendingRequest, Int)
+        }
+
+        let removed = state.withLockedValue { state -> CancelledRequest? in
             guard let index = state.pendingRequests.firstIndex(where: { $0.leaseID == leaseID }) else {
-                return nil
+                guard let reservation = state.reservationsByLeaseID[leaseID], reservation.hasStarted == false
+                else {
+                    return nil
+                }
+                state.reservationsByLeaseID.removeValue(forKey: leaseID)
+                if state.activeLeaseIDsByUpstream[reservation.upstreamIndex] == leaseID {
+                    state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
+                }
+                if reservation.request.descriptor.isTopLevelClientRequest,
+                    state.activeTopLevelLeaseIDsBySession[reservation.request.descriptor.sessionID]
+                        == leaseID
+                {
+                    state.activeTopLevelLeaseIDsBySession.removeValue(
+                        forKey: reservation.request.descriptor.sessionID
+                    )
+                }
+                return .reserved(reservation.request, reservation.upstreamIndex)
             }
-            return state.pendingRequests.remove(at: index)
+            return .pending(state.pendingRequests.remove(at: index))
         }
         guard let removed else { return }
+
+        let request: PendingRequest
+        let wasReserved = if case .reserved = removed { true } else { false }
+        switch removed {
+        case .pending(let pendingRequest):
+            request = pendingRequest
+        case .reserved(let reservedRequest, _):
+            request = reservedRequest
+        }
+
         logger.debug(
             "Cancelled queued request before upstream dispatch",
             metadata: [
                 "lease_id": .string(leaseID.uuidString),
             ]
         )
-        removed.eventLoop.execute {
-            removed.failCancelled()
+        request.eventLoop.execute {
+            request.failCancelled()
+        }
+        if wasReserved {
+            dispatchQueuedRequestsIfPossible()
         }
     }
 
@@ -163,6 +214,8 @@ package final class UpstreamSlotScheduler: Sendable {
             let pendingRequests = state.pendingRequests
             state.pendingRequests.removeAll()
             state.activeLeaseIDsByUpstream.removeAll()
+            state.activeTopLevelLeaseIDsBySession.removeAll()
+            state.reservationsByLeaseID.removeAll()
             return pendingRequests
         }
 
@@ -194,6 +247,12 @@ package final class UpstreamSlotScheduler: Sendable {
                 var chosenUpstreamIndex: Int?
 
                 for (pendingIndex, request) in state.pendingRequests.enumerated() {
+                    if request.descriptor.isTopLevelClientRequest,
+                        state.activeTopLevelLeaseIDsBySession[request.descriptor.sessionID] != nil
+                    {
+                        continue
+                    }
+
                     if let preferredUpstreamIndex = request.preferredUpstreamIndex {
                         guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil else {
                             continue
@@ -224,6 +283,14 @@ package final class UpstreamSlotScheduler: Sendable {
                 let pendingRequest = state.pendingRequests.remove(at: chosenPendingIndex)
                 let upstreamIndex = chosenUpstreamIndex
                 state.activeLeaseIDsByUpstream[upstreamIndex] = pendingRequest.leaseID
+                state.reservationsByLeaseID[pendingRequest.leaseID] = Reservation(
+                    request: pendingRequest,
+                    upstreamIndex: upstreamIndex
+                )
+                if pendingRequest.descriptor.isTopLevelClientRequest {
+                    state.activeTopLevelLeaseIDsBySession[pendingRequest.descriptor.sessionID] =
+                        pendingRequest.leaseID
+                }
                 ready.append((pendingRequest, upstreamIndex))
             }
 
@@ -240,6 +307,17 @@ package final class UpstreamSlotScheduler: Sendable {
                 ]
             )
             request.eventLoop.execute {
+                let shouldStart = self.state.withLockedValue { state -> Bool in
+                    guard var reservation = state.reservationsByLeaseID[request.leaseID],
+                        reservation.upstreamIndex == upstreamIndex
+                    else {
+                        return false
+                    }
+                    reservation.hasStarted = true
+                    state.reservationsByLeaseID[request.leaseID] = reservation
+                    return true
+                }
+                guard shouldStart else { return }
                 request.start(upstreamIndex)
             }
         }

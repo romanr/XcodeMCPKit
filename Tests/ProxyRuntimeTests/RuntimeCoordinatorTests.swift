@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import NIOEmbedded
 import Testing
 import ProxyCore
 import XcodeMCPTestSupport
@@ -3379,6 +3380,168 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.releaseReason == nil)
     }
 
+    @Test func upstreamSlotSchedulerCancelsReservedDispatchBeforeStartWithoutLeakingSlot()
+        async throws
+    {
+        let eventLoop = EmbeddedEventLoop()
+        let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 1)
+        let startedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+        let cancelledLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+
+        let firstDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-race-1",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let firstLeaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: firstLeaseID,
+            descriptor: firstDescriptor,
+            on: eventLoop,
+            starter: { _ in
+                startedLeaseIDs.withLockedValue { $0.append(firstLeaseID) }
+            },
+            failUnavailable: {
+                Issue.record("first request should be cancelled, not failed unavailable")
+            },
+            failCancelled: {
+                cancelledLeaseIDs.withLockedValue { $0.append(firstLeaseID) }
+            }
+        )
+
+        scheduler.cancelQueuedRequest(leaseID: firstLeaseID)
+
+        let secondDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-race-2",
+            label: "tools/call:ExecuteSnippet",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let secondLeaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: secondLeaseID,
+            descriptor: secondDescriptor,
+            on: eventLoop,
+            starter: { _ in
+                startedLeaseIDs.withLockedValue { $0.append(secondLeaseID) }
+            },
+            failUnavailable: {
+                Issue.record("second request should start after the cancelled reservation releases")
+            },
+            failCancelled: {
+                Issue.record("second request should not be cancelled")
+            }
+        )
+
+        eventLoop.run()
+
+        #expect(cancelledLeaseIDs.withLockedValue { $0 } == [firstLeaseID])
+        #expect(startedLeaseIDs.withLockedValue { $0 } == [secondLeaseID])
+        #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
+    }
+
+    @Test func upstreamSlotSchedulerSerializesTopLevelRequestsPerSessionAcrossUpstreams()
+        async throws
+    {
+        let eventLoop = EmbeddedEventLoop()
+        let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 2)
+        let started = NIOLockedValueBox<[String]>([])
+
+        let firstDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-a",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let firstLeaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: firstLeaseID,
+            descriptor: firstDescriptor,
+            on: eventLoop,
+            starter: { upstreamIndex in
+                started.withLockedValue { $0.append("first@\(upstreamIndex)") }
+            },
+            failUnavailable: {
+                Issue.record("first request should start")
+            },
+            failCancelled: {
+                Issue.record("first request should not be cancelled")
+            }
+        )
+        eventLoop.run()
+
+        let secondDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-a",
+            label: "tools/call:ExecuteSnippet",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let secondLeaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: secondLeaseID,
+            descriptor: secondDescriptor,
+            on: eventLoop,
+            starter: { upstreamIndex in
+                started.withLockedValue { $0.append("second@\(upstreamIndex)") }
+            },
+            failUnavailable: {
+                Issue.record("second request should wait for the session slot, not fail unavailable")
+            },
+            failCancelled: {
+                Issue.record("second request should not be cancelled")
+            }
+        )
+
+        let thirdDescriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-b",
+            label: "tools/call:XcodeListWindows",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let thirdLeaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: thirdLeaseID,
+            descriptor: thirdDescriptor,
+            on: eventLoop,
+            starter: { upstreamIndex in
+                started.withLockedValue { $0.append("third@\(upstreamIndex)") }
+            },
+            failUnavailable: {
+                Issue.record("third request should use the other upstream")
+            },
+            failCancelled: {
+                Issue.record("third request should not be cancelled")
+            }
+        )
+        eventLoop.run()
+
+        #expect(started.withLockedValue { $0 } == ["first@0", "third@1"])
+        #expect(scheduler.debugSnapshot().queuedRequestCount == 1)
+
+        scheduler.releaseUpstreamSlot(upstreamIndex: 0, leaseID: firstLeaseID)
+        eventLoop.run()
+
+        #expect(started.withLockedValue { $0 } == ["first@0", "third@1", "second@0"])
+        #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
+    }
+
+}
+
+private func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
+    UpstreamSlotScheduler(
+        upstreamCount: upstreamCount,
+        defaultCapacity: 1,
+        canUseUpstream: { _ in true },
+        selectUpstream: { occupied in
+            (0..<upstreamCount).first { occupied.contains($0) == false }
+        }
+    )
 }
 
 private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {

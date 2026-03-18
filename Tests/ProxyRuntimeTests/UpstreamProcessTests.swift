@@ -193,6 +193,44 @@ struct UpstreamProcessTests {
             #expect(events.contains(where: { $0 > 0 }))
         }
     }
+
+    @Test func upstreamProcessResetsFramerAfterProtocolViolation() async throws {
+        let config = UpstreamProcess.Config(
+            command: "/bin/sh",
+            args: [
+                "-c",
+                "printf 'Content-Length: abc\\r\\n\\r\\n{}'; sleep 1; printf '{\"jsonrpc\":\"2.0\",\"result\":{}}\\n'; sleep 5",
+            ],
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+        try await withUpstreamProcess(config: config) { upstream in
+            let postViolationMessage = try await waitWithTimeout(
+                "valid stdout should still be parsed after resetting the framer",
+                timeout: .seconds(4)
+            ) {
+                var sawViolation = false
+
+                for await event in upstream.events {
+                    switch event {
+                    case .stdoutProtocolViolation(let violation):
+                        sawViolation = true
+                        #expect(violation.reason == .invalidContentLengthHeader)
+                    case .message(let message):
+                        if sawViolation {
+                            return String(decoding: message, as: UTF8.self)
+                        }
+                    case .stderr, .stdoutBufferSize, .exit:
+                        continue
+                    }
+                }
+
+                return ""
+            }
+
+            #expect(postViolationMessage == #"{"jsonrpc":"2.0","result":{}}"#)
+        }
+    }
 }
 
 private func withUpstreamProcess<T: Sendable>(

@@ -3523,6 +3523,45 @@ struct RuntimeCoordinatorTests {
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 
+    @Test func upstreamSlotSchedulerCancelsReservedDispatchBeforeStartWhenResetting()
+        async throws
+    {
+        let eventLoop = EmbeddedEventLoop()
+        let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 1)
+        let startedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+        let cancelledLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-reset-race",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            starter: { _ in
+                startedLeaseIDs.withLockedValue { $0.append(leaseID) }
+            },
+            failUnavailable: {
+                Issue.record("reserved request should be cancelled during reset")
+            },
+            failCancelled: {
+                cancelledLeaseIDs.withLockedValue { $0.append(leaseID) }
+            }
+        )
+
+        scheduler.reset()
+        eventLoop.run()
+
+        #expect(cancelledLeaseIDs.withLockedValue { $0 } == [leaseID])
+        #expect(startedLeaseIDs.withLockedValue { $0 }.isEmpty)
+        #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
+    }
+
     @Test func upstreamSlotSchedulerSerializesTopLevelRequestsPerSessionAcrossUpstreams()
         async throws
     {

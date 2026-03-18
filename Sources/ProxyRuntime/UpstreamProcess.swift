@@ -218,6 +218,8 @@ package actor UpstreamProcess: UpstreamClient {
             ]
         )
         continuation.yield(.stdoutProtocolViolation(protocolViolation))
+        framer = StdioFramer()
+        resetBufferedStdoutBytesIfNeeded()
     }
 
     private func resetBufferedStdoutBytesIfNeeded() {

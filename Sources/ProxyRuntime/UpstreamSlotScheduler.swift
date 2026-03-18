@@ -233,11 +233,14 @@ package final class UpstreamSlotScheduler: Sendable {
     package func reset() {
         let cancelled = state.withLockedValue { state -> [PendingRequest] in
             let pendingRequests = state.pendingRequests
+            let reservedRequests = state.reservationsByLeaseID.values
+                .filter { $0.hasStarted == false }
+                .map(\.request)
             state.pendingRequests.removeAll()
             state.activeLeaseIDsByUpstream.removeAll()
             state.activeTopLevelLeaseIDsBySession.removeAll()
             state.reservationsByLeaseID.removeAll()
-            return pendingRequests
+            return pendingRequests + reservedRequests
         }
 
         for request in cancelled {

@@ -123,7 +123,28 @@ package final class UpstreamSlotScheduler: Sendable {
         let failed = state.withLockedValue { state -> [PendingRequest] in
             let pending = state.pendingRequests
             state.pendingRequests.removeAll()
-            return pending
+            let reserved = state.reservationsByLeaseID.values
+                .filter { $0.hasStarted == false }
+                .map(\.request)
+
+            for reservation in state.reservationsByLeaseID.values where reservation.hasStarted == false {
+                if state.activeLeaseIDsByUpstream[reservation.upstreamIndex] == reservation.request.leaseID {
+                    state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
+                }
+                if reservation.request.descriptor.isTopLevelClientRequest,
+                    state.activeTopLevelLeaseIDsBySession[reservation.request.descriptor.sessionID]
+                        == reservation.request.leaseID
+                {
+                    state.activeTopLevelLeaseIDsBySession.removeValue(
+                        forKey: reservation.request.descriptor.sessionID
+                    )
+                }
+            }
+            state.reservationsByLeaseID = state.reservationsByLeaseID.filter { _, reservation in
+                reservation.hasStarted
+            }
+
+            return pending + reserved
         }
         guard failed.isEmpty == false else { return }
 

@@ -207,7 +207,8 @@ package final class RequestLeaseRegistry: Sendable {
                 record.state = .abandoned
                 record.releasedAt = Date()
                 record.releaseReason = reason
-                state.leasesByID[leaseID] = record
+                state.leasesByID.removeValue(forKey: leaseID)
+                storeReleasedLease(record, in: &state)
                 actions.append(
                     RequestLeaseReleaseAction(
                         leaseID: leaseID,

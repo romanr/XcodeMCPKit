@@ -3380,6 +3380,47 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.releaseReason == nil)
     }
 
+    @Test func requestLeaseRegistryAbandonActiveLeasesUsesBoundedReleasedHistory()
+        async throws
+    {
+        let registry = RequestLeaseRegistry(releasedHistoryLimit: 1)
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-abandon-history",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+
+        let abandonedLease = registry.createLease(descriptor: descriptor)
+        registry.activateLease(
+            abandonedLease,
+            requestIDKey: "abandon-1",
+            upstreamIndex: 0,
+            timeoutAt: nil
+        )
+        let abandonActions = registry.abandonActiveLeases(
+            upstreamIndex: 0,
+            reason: .stdoutProtocolViolation
+        )
+        #expect(abandonActions.count == 1)
+
+        let completedLease = registry.createLease(descriptor: descriptor)
+        registry.activateLease(
+            completedLease,
+            requestIDKey: "complete-1",
+            upstreamIndex: 1,
+            timeoutAt: nil
+        )
+        _ = registry.completeLease(completedLease)
+
+        let snapshots = registry.debugSnapshots()
+        #expect(snapshots.count == 1)
+        let snapshot = try #require(snapshots.first)
+        #expect(snapshot.leaseID == completedLease.uuidString)
+        #expect(snapshot.state == .completed)
+    }
+
     @Test func upstreamSlotSchedulerCancelsReservedDispatchBeforeStartWithoutLeakingSlot()
         async throws
     {
@@ -3440,6 +3481,45 @@ struct RuntimeCoordinatorTests {
 
         #expect(cancelledLeaseIDs.withLockedValue { $0 } == [firstLeaseID])
         #expect(startedLeaseIDs.withLockedValue { $0 } == [secondLeaseID])
+        #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
+    }
+
+    @Test func upstreamSlotSchedulerFailsReservedDispatchBeforeStartWhenQueueFails()
+        async throws
+    {
+        let eventLoop = EmbeddedEventLoop()
+        let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 1)
+        let startedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+        let failedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: "session-fail-race",
+            label: "tools/call:DocumentationSearch",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = UUID()
+        scheduler.enqueueRequest(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            starter: { _ in
+                startedLeaseIDs.withLockedValue { $0.append(leaseID) }
+            },
+            failUnavailable: {
+                failedLeaseIDs.withLockedValue { $0.append(leaseID) }
+            },
+            failCancelled: {
+                Issue.record("reserved request should fail unavailable when queue is drained")
+            }
+        )
+
+        scheduler.failQueuedRequests()
+        eventLoop.run()
+
+        #expect(failedLeaseIDs.withLockedValue { $0 } == [leaseID])
+        #expect(startedLeaseIDs.withLockedValue { $0 }.isEmpty)
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 

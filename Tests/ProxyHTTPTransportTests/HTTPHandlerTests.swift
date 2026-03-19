@@ -2814,6 +2814,60 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpToolCallAddsStructuredContentFromJSONStringWhenToolHasOutputSchema() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text:
+                            "{\"message\":\"* tabIdentifier: windowtab1, workspacePath: /tmp/Sample.xcodeproj\\n\"}"
+                    )
+                )
+            }
+        )
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [[
+                    "name": "XcodeListWindows",
+                    "outputSchema": ["type": "object"],
+                ]]
+            ])!
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-structured-tool-call",
+                payload: toolsCallPayload(
+                    id: 14,
+                    name: "XcodeListWindows",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(structuredContent?["message"] as? String == "* tabIdentifier: windowtab1, workspacePath: /tmp/Sample.xcodeproj\n")
+            #expect(content?.first?["text"] as? String == "{\"message\":\"* tabIdentifier: windowtab1, workspacePath: /tmp/Sample.xcodeproj\\n\"}")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorWhenQueueIsFull() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream

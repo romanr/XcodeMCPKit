@@ -140,15 +140,21 @@ package struct MCPForwardingService: Sendable {
                 upstreamData: rewrittenResourcesData,
                 mode: config.refreshCodeIssuesMode
             )
+            let normalizedToolCallData = Self.rewriteToolCallStructuredContentIfNeeded(
+                method: started.transform.method,
+                toolName: started.transform.toolName,
+                upstreamData: responseData,
+                cachedToolsListResult: sessionManager.cachedToolsListResult()
+            )
             if started.transform.isCacheableToolsListRequest,
-                let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
+                let object = try? JSONSerialization.jsonObject(with: normalizedToolCallData, options: [])
                     as? [String: Any],
                 let resultAny = object["result"],
                 let result = JSONValue(any: resultAny)
             {
                 sessionManager.setCachedToolsListResult(result)
             }
-            if accountSuccess, Self.shouldNotifyUpstreamSuccess(for: responseData) {
+            if accountSuccess, Self.shouldNotifyUpstreamSuccess(for: normalizedToolCallData) {
                 for responseID in started.transform.responseIDs {
                     sessionManager.onRequestSucceeded(
                         sessionID: sessionID,
@@ -157,7 +163,7 @@ package struct MCPForwardingService: Sendable {
                     )
                 }
             }
-            return .success(responseData)
+            return .success(normalizedToolCallData)
 
         case .failure:
             if let firstResponseID = started.transform.responseIDs.first {
@@ -445,6 +451,77 @@ package struct MCPForwardingService: Sendable {
             upstreamData,
             mode: mode
         )
+    }
+
+    private static func rewriteToolCallStructuredContentIfNeeded(
+        method: String?,
+        toolName: String?,
+        upstreamData: Data,
+        cachedToolsListResult: JSONValue?
+    ) -> Data {
+        guard method == "tools/call",
+            let toolName,
+            toolHasOutputSchema(named: toolName, in: cachedToolsListResult),
+            let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any],
+            var result = object["result"] as? [String: Any],
+            result["structuredContent"] == nil,
+            (result["isError"] as? Bool) != true,
+            let structuredContent = structuredToolContent(from: result)
+        else {
+            return upstreamData
+        }
+
+        result["structuredContent"] = structuredContent
+        var rewrittenObject = object
+        rewrittenObject["result"] = result
+        guard JSONSerialization.isValidJSONObject(rewrittenObject),
+            let rewrittenData = try? JSONSerialization.data(withJSONObject: rewrittenObject, options: [])
+        else {
+            return upstreamData
+        }
+        return rewrittenData
+    }
+
+    private static func toolHasOutputSchema(named toolName: String, in toolsListResult: JSONValue?) -> Bool {
+        guard let toolsListResult,
+            case .object(let resultObject) = toolsListResult,
+            case .array(let tools) = resultObject["tools"]
+        else {
+            return false
+        }
+
+        for tool in tools {
+            guard case .object(let toolObject) = tool,
+                case .string(let candidateName) = toolObject["name"],
+                candidateName == toolName
+            else {
+                continue
+            }
+            return toolObject["outputSchema"] != nil
+        }
+        return false
+    }
+
+    private static func structuredToolContent(from result: [String: Any]) -> Any? {
+        guard let content = result["content"] as? [[String: Any]] else {
+            return nil
+        }
+
+        for item in content {
+            guard let text = item["text"] as? String,
+                text.isEmpty == false,
+                let textData = text.data(using: .utf8),
+                let structuredContent = try? JSONSerialization.jsonObject(with: textData, options: [])
+            else {
+                continue
+            }
+
+            if structuredContent is [String: Any] || structuredContent is [Any] {
+                return structuredContent
+            }
+        }
+
+        return nil
     }
 
     private static func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

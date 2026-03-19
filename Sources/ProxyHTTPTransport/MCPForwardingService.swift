@@ -586,6 +586,7 @@ package struct MCPForwardingService: Sendable {
 
             var normalizedIssues: [[String: Any]] = []
             normalizedIssues.reserveCapacity(emittedIssues.count)
+            var entryChanged = false
 
             for issue in emittedIssues {
                 guard issue["line"] == nil else {
@@ -596,17 +597,17 @@ package struct MCPForwardingService: Sendable {
                 var normalizedIssue = issue
                 normalizedIssue["line"] = 0
                 normalizedIssues.append(normalizedIssue)
+                entryChanged = true
+            }
+
+            if entryChanged {
+                var normalizedEntry = entry
+                normalizedEntry["emittedIssues"] = normalizedIssues
+                normalizedEntries.append(normalizedEntry)
                 changed = true
-            }
-
-            guard changed else {
+            } else {
                 normalizedEntries.append(entry)
-                continue
             }
-
-            var normalizedEntry = entry
-            normalizedEntry["emittedIssues"] = normalizedIssues
-            normalizedEntries.append(normalizedEntry)
         }
 
         guard changed else {

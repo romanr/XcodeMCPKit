@@ -1139,6 +1139,16 @@ struct HTTPHandlerTests {
                         [
                             "name": "XcodeRefreshCodeIssuesInFile",
                             "description": "original description",
+                            "outputSchema": [
+                                "type": "object",
+                                "required": ["filePath", "diagnosticsCount", "content", "success"],
+                                "properties": [
+                                    "filePath": ["type": "string"],
+                                    "diagnosticsCount": ["type": "integer"],
+                                    "content": ["type": "string"],
+                                    "success": ["type": "boolean"],
+                                ],
+                            ],
                         ]
                     ]
                 ],
@@ -1193,8 +1203,11 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
         let description = tools?.first?["description"] as? String
+        let outputSchema = tools?.first?["outputSchema"] as? [String: Any]
+        let required = outputSchema?["required"] as? [String]
         #expect(description?.contains("avoid switching Spaces") == true)
         #expect(description?.contains("--refresh-code-issues-mode upstream") == true)
+        #expect(required == ["issues", "truncated", "totalFound"])
     }
 
     @Test func httpToolsListRewritesRefreshDescriptionOnCachedResponse() async throws {
@@ -1209,6 +1222,16 @@ struct HTTPHandlerTests {
                     [
                         "name": "XcodeRefreshCodeIssuesInFile",
                         "description": "original description",
+                        "outputSchema": [
+                            "type": "object",
+                            "required": ["filePath", "diagnosticsCount", "content", "success"],
+                            "properties": [
+                                "filePath": ["type": "string"],
+                                "diagnosticsCount": ["type": "integer"],
+                                "content": ["type": "string"],
+                                "success": ["type": "boolean"],
+                            ],
+                        ],
                     ]
                 ]
             ])!
@@ -1261,7 +1284,10 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
         let description = tools?.first?["description"] as? String
+        let outputSchema = tools?.first?["outputSchema"] as? [String: Any]
+        let required = outputSchema?["required"] as? [String]
         #expect(description?.contains("native live diagnostics path") == true)
+        #expect(required == ["filePath", "diagnosticsCount", "content", "success"])
     }
 
     @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {

@@ -2868,6 +2868,83 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpToolCallNormalizesGetBuildLogIssuesMissingLine() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "GetBuildLog")
+                return .immediate(
+                    try makeToolResultResponse(
+                        id: originalID,
+                        result: [
+                            "content": [[
+                                "type": "text",
+                                "text": "{\"buildResult\":\"The build succeeded\",\"buildIsRunning\":false,\"buildLogEntries\":[{\"buildTask\":\"Build target App\",\"emittedIssues\":[{\"message\":\"Using stub executor library with Swift entry point.\",\"severity\":\"remark\"}]}],\"fullLogPath\":\"/tmp/build.log\",\"totalFound\":1,\"truncated\":false}",
+                            ]],
+                            "structuredContent": [
+                                "buildResult": "The build succeeded",
+                                "buildIsRunning": false,
+                                "buildLogEntries": [[
+                                    "buildTask": "Build target App",
+                                    "emittedIssues": [[
+                                        "message": "Using stub executor library with Swift entry point.",
+                                        "severity": "remark",
+                                    ]],
+                                ]],
+                                "fullLogPath": "/tmp/build.log",
+                                "totalFound": 1,
+                                "truncated": false,
+                            ],
+                        ]
+                    )
+                )
+            }
+        )
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [[
+                    "name": "GetBuildLog",
+                    "outputSchema": ["type": "object"],
+                ]]
+            ])!
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-build-log-normalized",
+                payload: toolsCallPayload(
+                    id: 15,
+                    name: "GetBuildLog",
+                    arguments: [
+                        "tabIdentifier": "windowtab1",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let buildLogEntries = structuredContent?["buildLogEntries"] as? [[String: Any]]
+            let emittedIssues = buildLogEntries?.first?["emittedIssues"] as? [[String: Any]]
+            let content = result?["content"] as? [[String: Any]]
+
+            #expect((emittedIssues?.first?["line"] as? NSNumber)?.intValue == 0)
+            #expect(content?.first?["text"] as? String == "{\"buildResult\":\"The build succeeded\",\"buildIsRunning\":false,\"buildLogEntries\":[{\"buildTask\":\"Build target App\",\"emittedIssues\":[{\"message\":\"Using stub executor library with Swift entry point.\",\"severity\":\"remark\"}]}],\"fullLogPath\":\"/tmp/build.log\",\"totalFound\":1,\"truncated\":false}")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorWhenQueueIsFull() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream

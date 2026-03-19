@@ -463,17 +463,19 @@ package struct MCPForwardingService: Sendable {
             let toolName,
             toolHasOutputSchema(named: toolName, in: cachedToolsListResult),
             let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any],
-            var result = object["result"] as? [String: Any],
-            result["structuredContent"] == nil,
-            (result["isError"] as? Bool) != true,
-            let structuredContent = structuredToolContent(from: result)
+            let result = object["result"] as? [String: Any],
+            (result["isError"] as? Bool) != true
         else {
             return upstreamData
         }
 
-        result["structuredContent"] = structuredContent
+        let rewrittenResult = rewrittenToolCallResult(toolName: toolName, result: result)
+        guard rewrittenResult.changed else {
+            return upstreamData
+        }
+
         var rewrittenObject = object
-        rewrittenObject["result"] = result
+        rewrittenObject["result"] = rewrittenResult.result
         guard JSONSerialization.isValidJSONObject(rewrittenObject),
             let rewrittenData = try? JSONSerialization.data(withJSONObject: rewrittenObject, options: [])
         else {
@@ -522,6 +524,98 @@ package struct MCPForwardingService: Sendable {
         }
 
         return nil
+    }
+
+    private static func rewrittenToolCallResult(toolName: String, result: [String: Any]) -> (
+        result: [String: Any], changed: Bool
+    ) {
+        var rewrittenResult = result
+        var changed = false
+
+        if rewrittenResult["structuredContent"] == nil,
+            let structuredContent = structuredToolContent(from: rewrittenResult)
+        {
+            rewrittenResult["structuredContent"] = structuredContent
+            changed = true
+        }
+
+        if let structuredContent = rewrittenResult["structuredContent"],
+            let normalizedStructuredContent = normalizeStructuredContentIfNeeded(
+                toolName: toolName,
+                structuredContent: structuredContent
+            )
+        {
+            rewrittenResult["structuredContent"] = normalizedStructuredContent
+            changed = true
+        }
+
+        return (rewrittenResult, changed)
+    }
+
+    private static func normalizeStructuredContentIfNeeded(
+        toolName: String,
+        structuredContent: Any
+    ) -> Any? {
+        switch toolName {
+        case "GetBuildLog":
+            guard let object = structuredContent as? [String: Any] else {
+                return nil
+            }
+            return normalizeGetBuildLogStructuredContentIfNeeded(object)
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizeGetBuildLogStructuredContentIfNeeded(
+        _ structuredContent: [String: Any]
+    ) -> [String: Any]? {
+        guard let buildLogEntries = structuredContent["buildLogEntries"] as? [[String: Any]] else {
+            return nil
+        }
+
+        var normalizedEntries: [[String: Any]] = []
+        normalizedEntries.reserveCapacity(buildLogEntries.count)
+        var changed = false
+
+        for entry in buildLogEntries {
+            guard let emittedIssues = entry["emittedIssues"] as? [[String: Any]] else {
+                normalizedEntries.append(entry)
+                continue
+            }
+
+            var normalizedIssues: [[String: Any]] = []
+            normalizedIssues.reserveCapacity(emittedIssues.count)
+
+            for issue in emittedIssues {
+                guard issue["line"] == nil else {
+                    normalizedIssues.append(issue)
+                    continue
+                }
+
+                var normalizedIssue = issue
+                normalizedIssue["line"] = 0
+                normalizedIssues.append(normalizedIssue)
+                changed = true
+            }
+
+            guard changed else {
+                normalizedEntries.append(entry)
+                continue
+            }
+
+            var normalizedEntry = entry
+            normalizedEntry["emittedIssues"] = normalizedIssues
+            normalizedEntries.append(normalizedEntry)
+        }
+
+        guard changed else {
+            return nil
+        }
+
+        var normalizedStructuredContent = structuredContent
+        normalizedStructuredContent["buildLogEntries"] = normalizedEntries
+        return normalizedStructuredContent
     }
 
     private static func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

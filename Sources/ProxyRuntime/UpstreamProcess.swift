@@ -34,10 +34,15 @@ package actor UpstreamProcess: UpstreamClient {
     private var stdinPipe = Pipe()
     private var stdoutPipe = Pipe()
     private var stderrPipe = Pipe()
+    private var stdoutReader: OrderedPipeReader?
+    private var stderrReader: OrderedPipeReader?
+    private var stdoutTask: Task<Void, Never>?
+    private var stderrTask: Task<Void, Never>?
     private var framer = StdioFramer()
     private var isStopping = false
     private var queuedWriteBytes = 0
     private var writeGeneration: UInt64 = 0
+    private var readGeneration: UInt64 = 0
     private var stderrBuffer = ""
     private var lastReportedBufferedStdoutBytes = 0
     private let writeQueue = DispatchQueue(label: "XcodeMCPProxy.UpstreamProcess.write")
@@ -68,6 +73,10 @@ package actor UpstreamProcess: UpstreamClient {
     package func send(_ data: Data) async -> UpstreamSendResult {
         if process == nil {
             startLocked()
+        }
+        guard process != nil else {
+            logger.warning("Upstream send skipped because process is unavailable")
+            return .overloaded
         }
         var payload = data
         if payload.last != 0x0A {
@@ -118,6 +127,7 @@ package actor UpstreamProcess: UpstreamClient {
         framer = StdioFramer()
         queuedWriteBytes = 0
         writeGeneration &+= 1
+        readGeneration &+= 1
         stderrBuffer = ""
         resetBufferedStdoutBytesIfNeeded()
 
@@ -130,27 +140,29 @@ package actor UpstreamProcess: UpstreamClient {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                return
-            }
-            Task {
-                await self?.handleStdoutData(data)
+        let generation = readGeneration
+        let stdoutReader = OrderedPipeReader(
+            fileHandle: stdoutPipe.fileHandleForReading,
+            label: "XcodeMCPProxy.UpstreamProcess.stdout"
+        )
+        let stderrReader = OrderedPipeReader(
+            fileHandle: stderrPipe.fileHandleForReading,
+            label: "XcodeMCPProxy.UpstreamProcess.stderr"
+        )
+        self.stdoutReader = stdoutReader
+        self.stderrReader = stderrReader
+        stdoutReader.start()
+        stderrReader.start()
+        stdoutTask = Task { [weak self, stdoutReader] in
+            for await data in stdoutReader.chunks {
+                await self?.handleStdoutData(data, generation: generation)
             }
         }
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                Task { [weak self] in
-                    await self?.handleStderrEOF()
-                }
-                return
+        stderrTask = Task { [weak self, stderrReader] in
+            for await data in stderrReader.chunks {
+                await self?.handleStderrData(data, generation: generation)
             }
-            Task { [weak self] in
-                await self?.handleStderrData(data)
-            }
+            await self?.handleStderrEOF(generation: generation)
         }
 
         process.terminationHandler = { [weak self] proc in
@@ -164,13 +176,19 @@ package actor UpstreamProcess: UpstreamClient {
             self.process = process
         } catch {
             logger.error("Failed to start upstream process", metadata: ["error": "\(error)"])
+            cleanupFailedStart()
         }
     }
 
     private func stopLocked() {
         flushBufferedStderrIfNeeded()
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        readGeneration &+= 1
+        stdoutReader?.stop()
+        stderrReader?.stop()
+        stdoutReader = nil
+        stderrReader = nil
+        stdoutTask = nil
+        stderrTask = nil
         queuedWriteBytes = 0
         writeGeneration &+= 1
         stderrBuffer = ""
@@ -182,7 +200,27 @@ package actor UpstreamProcess: UpstreamClient {
         process = nil
     }
 
-    private func handleStdoutData(_ data: Data) {
+    private func cleanupFailedStart() {
+        stdoutReader?.stop()
+        stderrReader?.stop()
+        stdoutReader = nil
+        stderrReader = nil
+        stdoutTask = nil
+        stderrTask = nil
+        try? stdinPipe.fileHandleForWriting.close()
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+        framer = StdioFramer()
+        queuedWriteBytes = 0
+        writeGeneration &+= 1
+        readGeneration &+= 1
+        stderrBuffer = ""
+        resetBufferedStdoutBytesIfNeeded()
+        process = nil
+    }
+
+    private func handleStdoutData(_ data: Data, generation: UInt64) {
+        guard generation == readGeneration else { return }
         let result = framer.append(data)
         for message in result.messages {
             guard isValidJSONPayload(message) else {
@@ -215,6 +253,8 @@ package actor UpstreamProcess: UpstreamClient {
                 "reason": .string(protocolViolation.reason.rawValue),
                 "buffered_bytes": .string("\(protocolViolation.bufferedByteCount)"),
                 "preview": .string(protocolViolation.preview),
+                "preview_hex": .string(protocolViolation.previewHex),
+                "leading_byte_hex": .string(protocolViolation.leadingByteHex ?? ""),
             ]
         )
         continuation.yield(.stdoutProtocolViolation(protocolViolation))
@@ -254,7 +294,8 @@ package actor UpstreamProcess: UpstreamClient {
         continuation.yield(.exit(status))
     }
 
-    private func handleStderrData(_ data: Data) {
+    private func handleStderrData(_ data: Data, generation: UInt64) {
+        guard generation == readGeneration else { return }
         if let message = String(data: data, encoding: .utf8) {
             stderrBuffer.append(message)
             let parts = stderrBuffer.split(separator: "\n", omittingEmptySubsequences: false)
@@ -270,7 +311,8 @@ package actor UpstreamProcess: UpstreamClient {
         }
     }
 
-    private func handleStderrEOF() {
+    private func handleStderrEOF(generation: UInt64) {
+        guard generation == readGeneration else { return }
         flushBufferedStderrIfNeeded()
     }
 

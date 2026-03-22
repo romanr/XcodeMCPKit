@@ -231,6 +231,114 @@ struct UpstreamProcessTests {
             #expect(postViolationMessage == #"{"jsonrpc":"2.0","result":{}}"#)
         }
     }
+
+    @Test func upstreamProcessReturnsOverloadedWhenLaunchFails() async throws {
+        let config = UpstreamProcess.Config(
+            command: "/path/that/does/not/exist",
+            args: [],
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+        try await withUpstreamProcess(config: config) { upstream in
+            let first = await upstream.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
+            let second = await upstream.send(Data(#"{"jsonrpc":"2.0","id":2}"#.utf8))
+
+            switch first {
+            case .accepted:
+                Issue.record("failed launch should not accept writes into orphaned pipes")
+            case .overloaded:
+                break
+            }
+
+            switch second {
+            case .accepted:
+                Issue.record("subsequent sends should retry launch and still fail fast")
+            case .overloaded:
+                break
+            }
+        }
+    }
+
+    @Test func upstreamProcessReassemblesLargeJSONSplitAcrossOrderedChunks() async throws {
+        let payload = try makeJSONRPCResponse(
+            id: 41,
+            text: String(repeating: "x", count: 128 * 1024)
+        )
+        let config = UpstreamProcess.Config(
+            command: "/usr/bin/python3",
+            args: makePythonChunkEmitterArgs(
+                payloads: [payload],
+                chunkSize: 4096,
+                pauseSeconds: 0.001,
+                keepAliveSeconds: 1
+            ),
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+        try await withUpstreamProcess(config: config) { upstream in
+            let message = try await waitWithTimeout(
+                "large split JSON should be reconstructed as one message",
+                timeout: .seconds(5)
+            ) {
+                for await event in upstream.events {
+                    switch event {
+                    case .message(let message):
+                        return String(decoding: message, as: UTF8.self)
+                    case .stdoutProtocolViolation(let violation):
+                        return "VIOLATION:\(violation.reason.rawValue)"
+                    case .stderr, .stdoutBufferSize, .exit:
+                        continue
+                    }
+                }
+                return ""
+            }
+
+            #expect(message == payload)
+        }
+    }
+
+    @Test func upstreamProcessPreservesBackToBackLargeJSONMessageOrder() async throws {
+        let payloads = try [
+            makeJSONRPCResponse(id: 51, text: String(repeating: "a", count: 96 * 1024)),
+            makeJSONRPCResponse(id: 52, text: String(repeating: "b", count: 96 * 1024)),
+            makeJSONRPCResponse(id: 53, text: String(repeating: "c", count: 96 * 1024)),
+        ]
+        let config = UpstreamProcess.Config(
+            command: "/usr/bin/python3",
+            args: makePythonChunkEmitterArgs(
+                payloads: payloads,
+                chunkSize: 2048,
+                pauseSeconds: 0.0005,
+                keepAliveSeconds: 1
+            ),
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+        try await withUpstreamProcess(config: config) { upstream in
+            let messages = try await waitWithTimeout(
+                "back-to-back large JSON payloads should preserve order",
+                timeout: .seconds(5)
+            ) {
+                var messages: [String] = []
+                for await event in upstream.events {
+                    switch event {
+                    case .message(let message):
+                        messages.append(String(decoding: message, as: UTF8.self))
+                        if messages.count == payloads.count {
+                            return messages
+                        }
+                    case .stdoutProtocolViolation(let violation):
+                        return ["VIOLATION:\(violation.reason.rawValue)"]
+                    case .stderr, .stdoutBufferSize, .exit:
+                        continue
+                    }
+                }
+                return messages
+            }
+
+            #expect(messages == payloads)
+        }
+    }
 }
 
 private func withUpstreamProcess<T: Sendable>(
@@ -247,4 +355,44 @@ private func withUpstreamProcess<T: Sendable>(
         await upstream.stop()
         throw error
     }
+}
+
+private func makeJSONRPCResponse(id: Int, text: String) throws -> String {
+    let payload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": [
+            "text": text,
+        ],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    return String(decoding: data, as: UTF8.self)
+}
+
+private func makePythonChunkEmitterArgs(
+    payloads: [String],
+    chunkSize: Int,
+    pauseSeconds: Double,
+    keepAliveSeconds: Double
+) -> [String] {
+    let script = """
+    import sys
+    import time
+
+    chunk_size = int(sys.argv[1])
+    pause = float(sys.argv[2])
+    keep_alive = float(sys.argv[3])
+    payloads = sys.argv[4:]
+
+    for payload in payloads:
+        for start in range(0, len(payload), chunk_size):
+            sys.stdout.write(payload[start:start + chunk_size])
+            sys.stdout.flush()
+            time.sleep(pause)
+        sys.stdout.write("\\n")
+        sys.stdout.flush()
+
+    time.sleep(keep_alive)
+    """
+    return ["-c", script, "\(chunkSize)", "\(pauseSeconds)", "\(keepAliveSeconds)"] + payloads
 }

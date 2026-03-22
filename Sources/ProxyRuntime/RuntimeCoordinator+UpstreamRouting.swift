@@ -577,12 +577,13 @@ extension RuntimeCoordinator {
     ) {
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let initSnapshot = initializeGate.snapshot()
         let transition = upstreamSelectionPolicy.markProtocolViolation(
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNs
         )
         transition?.cancelledInitTimeout?.cancel()
-        if upstreamIndex == 0, initializeGate.snapshot().initInFlight {
+        if upstreamIndex == 0, initSnapshot.initInFlight {
             failInitPending(error: TimeoutError())
         }
         responseCorrelationStore.reset(upstreamIndex: upstreamIndex)
@@ -603,9 +604,15 @@ extension RuntimeCoordinator {
                 ]
             )
         }
-        Task { [weak self] in
-            guard let self else { return }
-            await self.upstreams[upstreamIndex].start()
+
+        if upstreamIndex == 0 {
+            if initSnapshot.hasInitResult {
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            } else {
+                startEagerInitializePrimary()
+            }
+        } else if initSnapshot.hasInitResult {
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }
 

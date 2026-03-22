@@ -2969,7 +2969,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil)
     }
 
-    @Test func sessionManagerProtocolViolationRequestsFreshUpstreamSession() async throws {
+    @Test func sessionManagerProtocolViolationRestartsWarmInitializeForPrimary() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -2978,11 +2978,16 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdown() }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                await upstream.startCount() == 1
-            }
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
         )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
         manager.handleUpstreamProtocolViolation(
             StdioFramerProtocolViolation(
@@ -2995,9 +3000,15 @@ struct RuntimeCoordinatorTests {
 
         #expect(
             await waitUntil(timeout: .seconds(2)) {
-                await upstream.startCount() == 2
+                await upstream.sentCount() >= 3
             }
         )
+
+        let restartedInitRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let object = try #require(
+            JSONSerialization.jsonObject(with: restartedInitRequest, options: []) as? [String: Any]
+        )
+        #expect(object["method"] as? String == "initialize")
     }
 
     @Test func sessionManagerProtocolViolationFailsQueuedRequestsWhenNoHealthyUpstreamRemains() async throws {

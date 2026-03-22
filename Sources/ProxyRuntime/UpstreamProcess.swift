@@ -113,6 +113,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private let config: UpstreamProcess.Config
     private let logger: Logger = ProxyLogging.make("upstream")
     private let maxBufferedStderrBytes = 16 * 1024
+    private let terminationDrainGraceNanoseconds: UInt64 = 250_000_000
 
     private var process: Process?
     private var stdinPipe = Pipe()
@@ -130,6 +131,8 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private var stdoutDrained = false
     private var stderrDrained = false
     private var suppressExitEvent = false
+    private var pendingExitStatus: Int32?
+    private var terminationDrainTimeoutTask: Task<Void, Never>?
     private var didFinishEvents = false
     private var isStopping = false
 
@@ -180,6 +183,8 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
 
         isStopping = true
         suppressExitEvent = true
+        terminationDrainTimeoutTask?.cancel()
+        terminationDrainTimeoutTask = nil
         stdinWriter?.close()
         stdoutReader?.stop()
         stderrReader?.stop()
@@ -213,6 +218,9 @@ private extension ProcessBackedUpstreamSession {
         stdoutDrained = false
         stderrDrained = false
         suppressExitEvent = false
+        pendingExitStatus = nil
+        terminationDrainTimeoutTask?.cancel()
+        terminationDrainTimeoutTask = nil
         didFinishEvents = false
         isStopping = false
 
@@ -369,10 +377,10 @@ private extension ProcessBackedUpstreamSession {
         terminationObserved = true
         process = nil
         if !suppressExitEvent {
-            continuation.yield(.exit(status))
+            pendingExitStatus = status
+            scheduleTerminationDrainTimeoutIfNeeded()
         }
-        stdoutReader?.stop()
-        stderrReader?.stop()
+        // Let pipe readers drain any bytes the kernel still holds after process exit.
         finishEventsIfNeeded()
     }
 
@@ -385,6 +393,8 @@ private extension ProcessBackedUpstreamSession {
         if suppressExitEvent {
             self.suppressExitEvent = true
         }
+        terminationDrainTimeoutTask?.cancel()
+        terminationDrainTimeoutTask = nil
         stdinWriter?.close()
         stdoutReader?.stop()
         stderrReader?.stop()
@@ -414,8 +424,43 @@ private extension ProcessBackedUpstreamSession {
         }
 
         didFinishEvents = true
+        terminationDrainTimeoutTask?.cancel()
+        terminationDrainTimeoutTask = nil
         resetBufferedStdoutBytesIfNeeded()
+        if let exitStatus = pendingExitStatus {
+            pendingExitStatus = nil
+            continuation.yield(.exit(exitStatus))
+        }
         continuation.finish()
+    }
+
+    func scheduleTerminationDrainTimeoutIfNeeded() {
+        guard pendingExitStatus != nil, !stdoutDrained || !stderrDrained else {
+            return
+        }
+
+        let grace = terminationDrainGraceNanoseconds
+        terminationDrainTimeoutTask?.cancel()
+        terminationDrainTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: grace)
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.forceTerminateDrainIfNeeded()
+        }
+    }
+
+    func forceTerminateDrainIfNeeded() {
+        guard terminationObserved, !didFinishEvents, pendingExitStatus != nil else {
+            return
+        }
+        guard !stdoutDrained || !stderrDrained else {
+            return
+        }
+
+        stdoutReader?.stop()
+        stderrReader?.stop()
+        finishEventsIfNeeded()
     }
 
     func resetBufferedStdoutBytesIfNeeded() {

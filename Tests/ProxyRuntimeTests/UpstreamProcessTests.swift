@@ -327,6 +327,141 @@ struct UpstreamProcessTests {
             #expect(messages == payloads)
         }
     }
+
+    @Test func upstreamSessionDrainsFinalStdoutAfterImmediateExit() async throws {
+        let payload = try makeJSONRPCResponse(
+            id: 61,
+            text: String(repeating: "z", count: 256 * 1024)
+        )
+        let config = UpstreamProcess.Config(
+            command: "/usr/bin/python3",
+            args: makePythonImmediateExitResponseArgs(id: 61, character: "z", repeatCount: 256 * 1024),
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+
+        for _ in 0..<10 {
+            try await withUpstreamSession(config: config) { session in
+                let events = try await waitWithTimeout(
+                    "final stdout should be drained before exit even when the process exits immediately",
+                    timeout: .seconds(5)
+                ) {
+                    var observedEvents: [UpstreamEvent] = []
+                    for await event in session.events {
+                        observedEvents.append(event)
+
+                        let sawMessage = observedEvents.contains {
+                            if case .message = $0 { return true }
+                            return false
+                        }
+                        let sawExit = observedEvents.contains {
+                            if case .exit = $0 { return true }
+                            return false
+                        }
+                        if sawMessage && sawExit {
+                            return observedEvents
+                        }
+                    }
+                    return observedEvents
+                }
+
+                let message = events.compactMap { event -> String? in
+                    guard case .message(let data) = event else {
+                        return nil
+                    }
+                    return String(decoding: data, as: UTF8.self)
+                }.first
+                let messageIndex = events.firstIndex {
+                    if case .message = $0 { return true }
+                    return false
+                }
+                let exitIndex = events.firstIndex {
+                    if case .exit = $0 { return true }
+                    return false
+                }
+
+                if let message {
+                    #expect(try canonicalJSONString(message) == canonicalJSONString(payload))
+                } else {
+                    Issue.record("expected a final stdout message before exit")
+                }
+                #expect(messageIndex != nil)
+                #expect(exitIndex != nil)
+                if let messageIndex, let exitIndex {
+                    #expect(messageIndex < exitIndex)
+                }
+            }
+        }
+    }
+
+    @Test func upstreamSessionEmitsExitWhenDescendantKeepsPipeOpen() async throws {
+        let payload = try makeJSONRPCResponse(
+            id: 62,
+            text: String(repeating: "y", count: 8 * 1024)
+        )
+        let config = UpstreamProcess.Config(
+            command: "/usr/bin/python3",
+            args: makePythonForkingExitResponseArgs(
+                id: 62,
+                character: "y",
+                repeatCount: 8 * 1024,
+                childSleepSeconds: 2
+            ),
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+
+        try await withUpstreamSession(config: config) { session in
+            let events = try await waitWithTimeout(
+                "exit should not wait indefinitely for descendant-held pipe descriptors",
+                timeout: .seconds(1)
+            ) {
+                var observedEvents: [UpstreamEvent] = []
+                for await event in session.events {
+                    observedEvents.append(event)
+
+                    let sawMessage = observedEvents.contains {
+                        if case .message = $0 { return true }
+                        return false
+                    }
+                    let sawExit = observedEvents.contains {
+                        if case .exit = $0 { return true }
+                        return false
+                    }
+                    if sawMessage && sawExit {
+                        return observedEvents
+                    }
+                }
+                return observedEvents
+            }
+
+            let message = events.compactMap { event -> String? in
+                guard case .message(let data) = event else {
+                    return nil
+                }
+                return String(decoding: data, as: UTF8.self)
+            }.first
+            let messageIndex = events.firstIndex {
+                if case .message = $0 { return true }
+                return false
+            }
+            let exitIndex = events.firstIndex {
+                if case .exit = $0 { return true }
+                return false
+            }
+
+            if let message {
+                #expect(try canonicalJSONString(message) == canonicalJSONString(payload))
+            } else {
+                Issue.record("expected the parent process response before exit")
+            }
+            #expect(messageIndex != nil)
+            #expect(exitIndex != nil)
+            if let messageIndex, let exitIndex {
+                #expect(messageIndex < exitIndex)
+            }
+        }
+    }
 }
 
 private func withUpstreamSession<T: Sendable>(
@@ -382,4 +517,66 @@ private func makePythonChunkEmitterArgs(
     time.sleep(keep_alive)
     """
     return ["-c", script, "\(chunkSize)", "\(pauseSeconds)", "\(keepAliveSeconds)"] + payloads
+}
+
+private func makePythonImmediateExitResponseArgs(
+    id: Int,
+    character: String,
+    repeatCount: Int
+) -> [String] {
+    let script = """
+    import json
+    import sys
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": int(sys.argv[1]),
+        "result": {
+            "text": sys.argv[2] * int(sys.argv[3]),
+        },
+    }
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+    sys.stdout.write("\\n")
+    sys.stdout.flush()
+    """
+    return ["-c", script, "\(id)", character, "\(repeatCount)"]
+}
+
+private func makePythonForkingExitResponseArgs(
+    id: Int,
+    character: String,
+    repeatCount: Int,
+    childSleepSeconds: Int
+) -> [String] {
+    let script = """
+    import json
+    import os
+    import sys
+    import time
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": int(sys.argv[1]),
+        "result": {
+            "text": sys.argv[2] * int(sys.argv[3]),
+        },
+    }
+
+    pid = os.fork()
+    if pid == 0:
+        time.sleep(float(sys.argv[4]))
+        os._exit(0)
+
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+    sys.stdout.write("\\n")
+    sys.stdout.flush()
+    os._exit(0)
+    """
+    return ["-c", script, "\(id)", character, "\(repeatCount)", "\(childSleepSeconds)"]
+}
+
+private func canonicalJSONString(_ string: String) throws -> String {
+    let object = try JSONSerialization.jsonObject(with: Data(string.utf8))
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    return String(decoding: data, as: UTF8.self)
 }

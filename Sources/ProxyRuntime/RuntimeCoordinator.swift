@@ -53,7 +53,7 @@ package protocol RuntimeCoordinating: Sendable {
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
-    func sendUpstream(_ data: Data, upstreamIndex: Int)
+    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
     func debugSnapshot() -> ProxyDebugSnapshot
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
     func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID
@@ -85,6 +85,10 @@ package protocol RuntimeCoordinating: Sendable {
 }
 
 extension RuntimeCoordinating {
+    func sendUpstream(_ data: Data, upstreamIndex: Int) {
+        sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
+    }
+
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: RequestLeaseID,
         descriptor: SessionPipelineRequestDescriptor,
@@ -139,7 +143,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let responseCorrelationStore: ResponseCorrelationStore
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
-    package let upstreams: [any UpstreamClient]
+    package let upstreams: [any UpstreamSlotControlling]
     package let toolsListCache = ToolsListCache()
     package let initializeParamsOverride: [String: JSONValue]?
 
@@ -153,7 +157,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.init(config: config, eventLoop: eventLoop, upstreams: upstreams)
     }
 
-    package init(config: ProxyConfig, eventLoop: EventLoop, upstreams: [any UpstreamClient]) {
+    package init(config: ProxyConfig, eventLoop: EventLoop, upstreams: [any UpstreamSlotControlling]) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
         self.config = config
@@ -460,7 +464,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
             let initRequest = makeInternalInitializeRequest(id: upstreamID)
             if let data = try? JSONSerialization.data(withJSONObject: initRequest, options: []) {
-                sendUpstream(data, upstreamIndex: 0)
+                sendUpstream(data, upstreamIndex: 0, ensureRunning: true)
             } else {
                 failInitPending(error: TimeoutError())
             }

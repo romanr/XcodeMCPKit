@@ -22,27 +22,25 @@ final class DispatchGroupLeaveGuard: @unchecked Sendable {
 }
 
 private final class PipeCollector: @unchecked Sendable {
-    private let fileHandle: FileHandle
+    private let reader: OrderedPipeReader
     private let drainGuard: DispatchGroupLeaveGuard
     private let buffer = NIOLockedValueBox(Data())
+    private var task: Task<Void, Never>?
 
-    init(fileHandle: FileHandle, drainGroup: DispatchGroup) {
-        self.fileHandle = fileHandle
+    init(fileHandle: FileHandle, drainGroup: DispatchGroup, label: String) {
+        self.reader = OrderedPipeReader(fileHandle: fileHandle, label: label)
         self.drainGuard = DispatchGroupLeaveGuard(group: drainGroup)
     }
 
     func start() {
-        fileHandle.readabilityHandler = { [buffer, drainGuard] handle in
-            let chunk = handle.availableData
-            if chunk.isEmpty {
-                handle.readabilityHandler = nil
-                try? handle.close()
-                drainGuard.leaveIfNeeded()
-                return
+        reader.start()
+        task = Task { [buffer, drainGuard, reader] in
+            for await chunk in reader.chunks {
+                buffer.withLockedValue { data in
+                    data.append(chunk)
+                }
             }
-            buffer.withLockedValue { data in
-                data.append(chunk)
-            }
+            drainGuard.leaveIfNeeded()
         }
     }
 
@@ -51,8 +49,9 @@ private final class PipeCollector: @unchecked Sendable {
     }
 
     func cancel() {
-        fileHandle.readabilityHandler = nil
-        try? fileHandle.close()
+        reader.stop()
+        task?.cancel()
+        task = nil
         drainGuard.leaveIfNeeded()
     }
 }
@@ -99,11 +98,13 @@ package struct ProcessRunner: ProcessRunning {
             let drainGroup = DispatchGroup()
             let stdoutCollector = PipeCollector(
                 fileHandle: stdoutPipe.fileHandleForReading,
-                drainGroup: drainGroup
+                drainGroup: drainGroup,
+                label: "XcodeMCPProxy.ProcessRunner.stdout"
             )
             let stderrCollector = PipeCollector(
                 fileHandle: stderrPipe.fileHandleForReading,
-                drainGroup: drainGroup
+                drainGroup: drainGroup,
+                label: "XcodeMCPProxy.ProcessRunner.stderr"
             )
             let didResume = NIOLockedValueBox(false)
             let resumeOnce: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in

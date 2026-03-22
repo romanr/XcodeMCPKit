@@ -222,16 +222,12 @@ package final class UpstreamSelectionPolicy: Sendable {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             let quarantineUntil = nowUptimeNs &+ 15_000_000_000
-            let cancelledInitTimeout = state.upstreamStates[upstreamIndex].initInFlight
-                ? state.upstreamStates[upstreamIndex].initTimeout
-                : nil
-            if state.upstreamStates[upstreamIndex].initInFlight {
-                state.upstreamStates[upstreamIndex].isInitialized = false
-                state.upstreamStates[upstreamIndex].initInFlight = false
-                state.upstreamStates[upstreamIndex].initTimeout = nil
-                state.upstreamStates[upstreamIndex].initUpstreamID = nil
-                state.upstreamStates[upstreamIndex].didSendInitialized = false
-            }
+            let cancelledInitTimeout = state.upstreamStates[upstreamIndex].initTimeout
+            state.upstreamStates[upstreamIndex].isInitialized = false
+            state.upstreamStates[upstreamIndex].initInFlight = false
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+            state.upstreamStates[upstreamIndex].initUpstreamID = nil
+            state.upstreamStates[upstreamIndex].didSendInitialized = false
             state.upstreamStates[upstreamIndex].healthState = .quarantined(
                 untilUptimeNs: quarantineUntil
             )

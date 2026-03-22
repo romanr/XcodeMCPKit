@@ -2969,6 +2969,48 @@ struct RuntimeCoordinatorTests {
         #expect(manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil)
     }
 
+    @Test func sessionManagerProtocolViolationRestartsWarmInitializeForPrimary() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.handleUpstreamProtocolViolation(
+            StdioFramerProtocolViolation(
+                reason: .invalidJSON,
+                bufferedByteCount: 128,
+                preview: "{broken"
+            ),
+            upstreamIndex: 0
+        )
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                await upstream.sentCount() >= 3
+            }
+        )
+
+        let restartedInitRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let object = try #require(
+            JSONSerialization.jsonObject(with: restartedInitRequest, options: []) as? [String: Any]
+        )
+        #expect(object["method"] as? String == "initialize")
+    }
+
     @Test func sessionManagerProtocolViolationFailsQueuedRequestsWhenNoHealthyUpstreamRemains() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -3688,11 +3730,16 @@ private func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [Str
     return try upstreamEnvironment(from: upstream)
 }
 
-private func upstreamEnvironment(from upstream: UpstreamProcess) throws -> [String: String] {
-    let mirror = Mirror(reflecting: upstream)
+private func upstreamEnvironment(from upstream: ManagedUpstreamSlot) throws -> [String: String] {
+    let upstreamMirror = Mirror(reflecting: upstream)
+    let factory = try #require(
+        upstreamMirror.children.first(where: { $0.label == "factory" })?.value,
+        "ManagedUpstreamSlot should expose a stored factory for tests"
+    )
+    let factoryMirror = Mirror(reflecting: factory)
     let config = try #require(
-        mirror.children.first(where: { $0.label == "config" })?.value,
-        "UpstreamProcess should expose a stored config for tests"
+        factoryMirror.children.first(where: { $0.label == "config" })?.value,
+        "UpstreamProcess factory should expose a stored config for tests"
     )
     let configMirror = Mirror(reflecting: config)
     return try #require(
@@ -3727,7 +3774,7 @@ private func withEnvironmentVariables<T>(
     return try body()
 }
 
-private actor AlwaysOverloadedUpstreamClient: UpstreamClient {
+private actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private let sentMessages = RecordedValues<Data>()
@@ -3768,7 +3815,7 @@ private actor AlwaysOverloadedUpstreamClient: UpstreamClient {
     }
 }
 
-private actor ToggleableOverloadUpstreamClient: UpstreamClient {
+private actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private let sentMessages = RecordedValues<Data>()

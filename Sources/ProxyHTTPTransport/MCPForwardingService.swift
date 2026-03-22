@@ -106,7 +106,8 @@ package struct MCPForwardingService: Sendable {
 
         sessionManager.sendUpstream(
             prepared.transform.upstreamData,
-            upstreamIndex: prepared.upstreamIndex
+            upstreamIndex: prepared.upstreamIndex,
+            ensureRunning: false
         )
         return StartedRequest(
             transform: prepared.transform,

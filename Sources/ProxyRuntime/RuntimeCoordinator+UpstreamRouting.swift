@@ -220,11 +220,14 @@ extension RuntimeCoordinator {
         markRequestSucceeded(upstreamIndex: upstreamIndex)
     }
 
-    package func sendUpstream(_ data: Data, upstreamIndex: Int) {
+    package func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
         guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
             return
         }
         Task {
+            if ensureRunning {
+                await upstreams[upstreamIndex].start()
+            }
             let result = await upstreams[upstreamIndex].send(data)
             if result == .accepted {
                 self.recordTraffic(
@@ -574,12 +577,13 @@ extension RuntimeCoordinator {
     ) {
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let initSnapshot = initializeGate.snapshot()
         let transition = upstreamSelectionPolicy.markProtocolViolation(
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNs
         )
         transition?.cancelledInitTimeout?.cancel()
-        if upstreamIndex == 0, initializeGate.snapshot().initInFlight {
+        if upstreamIndex == 0, initSnapshot.initInFlight {
             failInitPending(error: TimeoutError())
         }
         responseCorrelationStore.reset(upstreamIndex: upstreamIndex)
@@ -599,6 +603,16 @@ extension RuntimeCoordinator {
                     "uptime_ns": .string("\(nowUptimeNs)"),
                 ]
             )
+        }
+
+        if upstreamIndex == 0 {
+            if initSnapshot.hasInitResult {
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            } else {
+                startEagerInitializePrimary()
+            }
+        } else if initSnapshot.hasInitResult {
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }
 

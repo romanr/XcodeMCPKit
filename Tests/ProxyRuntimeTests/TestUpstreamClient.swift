@@ -3,7 +3,7 @@ import XcodeMCPTestSupport
 
 @testable import ProxyRuntime
 
-actor TestUpstreamClient: UpstreamClient {
+actor TestUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private let sentMessages = RecordedValues<Data>()

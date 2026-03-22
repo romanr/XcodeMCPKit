@@ -732,10 +732,10 @@ private struct TestHTTPServer {
     let channel: Channel
     let url: URL
     let sessionManager: RuntimeCoordinator
-    let upstream: any UpstreamClient
+    let upstream: any UpstreamSlotControlling
 
     static func start(
-        upstream providedUpstream: (any UpstreamClient)? = nil,
+        upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
         requestTimeout: TimeInterval = 5
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
@@ -798,7 +798,7 @@ private struct TestHTTPServer {
     }
 }
 
-private actor EchoUpstreamClient: UpstreamClient {
+private actor EchoUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
 
@@ -860,7 +860,7 @@ private actor EchoUpstreamClient: UpstreamClient {
     }
 }
 
-private actor ControlledUpstreamClient: UpstreamClient {
+private actor ControlledUpstreamClient: UpstreamSlotControlling {
     struct SentRequest: Sendable {
         let label: String
         let responseData: Data?
@@ -972,7 +972,7 @@ private actor ControlledUpstreamClient: UpstreamClient {
     }
 }
 
-private actor RefreshSensitiveUpstreamClient: UpstreamClient {
+private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private var activeTabs: Set<String> = []
@@ -1099,7 +1099,7 @@ private actor RefreshSensitiveUpstreamClient: UpstreamClient {
     }
 }
 
-private actor SingleFlightRefreshUpstreamClient: UpstreamClient {
+private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private var hasActiveRefresh = false
@@ -1219,7 +1219,7 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamClient {
     }
 }
 
-private actor NotifyingUpstreamClient: UpstreamClient {
+private actor NotifyingUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
 

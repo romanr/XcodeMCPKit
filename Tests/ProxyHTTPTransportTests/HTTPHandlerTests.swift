@@ -3631,7 +3631,8 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func sendUpstream(_ data: Data, upstreamIndex: Int) {
+    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {
+        _ = ensureRunning
         state.withLockedValue { state in
             state.upstreamSendCount += 1
         }

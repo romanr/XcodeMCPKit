@@ -264,7 +264,7 @@ extension RuntimeCoordinator {
 
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
-            sendUpstream(data, upstreamIndex: upstreamIndex)
+            sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: true)
         } else {
             clearUpstreamState(upstreamIndex: upstreamIndex)
         }

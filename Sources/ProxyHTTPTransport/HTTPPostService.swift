@@ -665,7 +665,8 @@ package final class HTTPPostService: Sendable {
 
         sessionManager.sendUpstream(
             prepared.transform.upstreamData,
-            upstreamIndex: prepared.upstreamIndex
+            upstreamIndex: prepared.upstreamIndex,
+            ensureRunning: false
         )
         return makeImmediateLeaseResolution(
             .empty(status: .accepted, sessionID: sessionID),

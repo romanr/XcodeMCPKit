@@ -220,11 +220,14 @@ extension RuntimeCoordinator {
         markRequestSucceeded(upstreamIndex: upstreamIndex)
     }
 
-    package func sendUpstream(_ data: Data, upstreamIndex: Int) {
+    package func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
         guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
             return
         }
         Task {
+            if ensureRunning {
+                await upstreams[upstreamIndex].start()
+            }
             let result = await upstreams[upstreamIndex].send(data)
             if result == .accepted {
                 self.recordTraffic(
@@ -599,6 +602,10 @@ extension RuntimeCoordinator {
                     "uptime_ns": .string("\(nowUptimeNs)"),
                 ]
             )
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.upstreams[upstreamIndex].start()
         }
     }
 

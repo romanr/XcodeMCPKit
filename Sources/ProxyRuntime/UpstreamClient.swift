@@ -14,7 +14,17 @@ package enum UpstreamSendResult: Sendable {
     case overloaded
 }
 
-package protocol UpstreamClient: Sendable {
+package protocol UpstreamSession: AnyObject, Sendable {
+    var events: AsyncStream<UpstreamEvent> { get }
+    func send(_ data: Data) async -> UpstreamSendResult
+    func stop() async
+}
+
+package protocol UpstreamSessionFactory: Sendable {
+    func startSession() async throws -> any UpstreamSession
+}
+
+package protocol UpstreamSlotControlling: Sendable {
     var events: AsyncStream<UpstreamEvent> { get }
     func start() async
     func stop() async

@@ -6,20 +6,20 @@ import XcodeMCPTestSupport
 
 @Suite(.serialized)
 struct UpstreamProcessTests {
-    @Test func upstreamProcessSendRemainsResponsiveUnderStdinBackpressure() async throws {
+    @Test func upstreamSessionSendRemainsResponsiveUnderStdinBackpressure() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/cat",
             args: [],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 550_000
         )
-        try await withUpstreamProcess(config: config) { upstream in
+        try await withUpstreamSession(config: config) { session in
             let payload = Data(repeating: 0x41, count: 500_000)
             let first = try await waitWithTimeout(
                 "first send should complete before backpressure timeout",
                 timeout: .seconds(5)
             ) {
-                await upstream.send(payload)
+                await session.send(payload)
             }
             switch first {
             case .accepted:
@@ -32,7 +32,7 @@ struct UpstreamProcessTests {
                 "second send should return promptly under backpressure",
                 timeout: .seconds(5)
             ) {
-                await upstream.send(payload)
+                await session.send(payload)
             }
             switch second {
             case .accepted:
@@ -43,19 +43,19 @@ struct UpstreamProcessTests {
         }
     }
 
-    @Test func upstreamProcessFlushesTrailingStderrLineWithoutNewline() async throws {
+    @Test func upstreamSessionFlushesTrailingStderrLineWithoutNewline() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/sh",
             args: ["-c", "printf 'fatal stderr' >&2"],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
+        try await withUpstreamSession(config: config) { session in
             let stderr = try await waitWithTimeout(
                 "stderr line should be flushed without newline",
                 timeout: .seconds(2)
             ) {
-                for await event in upstream.events {
+                for await event in session.events {
                     switch event {
                     case .stderr(let message):
                         return message
@@ -70,19 +70,19 @@ struct UpstreamProcessTests {
         }
     }
 
-    @Test func upstreamProcessFlushesLargeStderrChunkWithoutWaitingForEOF() async throws {
+    @Test func upstreamSessionFlushesLargeStderrChunkWithoutWaitingForEOF() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/sh",
             args: ["-c", "head -c 20000 /dev/zero | tr '\\0' 'x' >&2; sleep 1"],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
+        try await withUpstreamSession(config: config) { session in
             let stderr = try await waitWithTimeout(
                 "large stderr chunk should flush before EOF",
                 timeout: .seconds(1)
             ) {
-                for await event in upstream.events {
+                for await event in session.events {
                     switch event {
                     case .stderr(let message):
                         return message
@@ -97,25 +97,24 @@ struct UpstreamProcessTests {
         }
     }
 
-    @Test func upstreamProcessEmitsBufferedStdoutResetWhenStopping() async throws {
+    @Test func upstreamSessionEmitsBufferedStdoutResetWhenStopping() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/cat",
             args: [],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        let upstream = UpstreamProcess(config: config)
-        await upstream.start()
+        let session = try await UpstreamProcess(config: config).startSession()
         defer {
             Task {
-                await upstream.stop()
+                await session.stop()
             }
         }
 
         let observedSizesRecorder = RecordedValues<Int>()
         let observedSizes = Task { () -> [Int] in
             var sizes: [Int] = []
-            for await event in upstream.events {
+            for await event in session.events {
                 switch event {
                 case .stdoutBufferSize(let size):
                     sizes.append(size)
@@ -130,7 +129,7 @@ struct UpstreamProcessTests {
             return sizes
         }
 
-        let sendResult = await upstream.send(Data("{".utf8))
+        let sendResult = await session.send(Data("{".utf8))
         switch sendResult {
         case .accepted:
             break
@@ -143,7 +142,7 @@ struct UpstreamProcessTests {
                 await observedSizesRecorder.snapshot().contains(where: { $0 > 0 })
             }
         )
-        await upstream.stop()
+        await session.stop()
 
         let sizes = try await waitWithTimeout(
             "buffered stdout should reset to zero after stop",
@@ -156,22 +155,22 @@ struct UpstreamProcessTests {
         #expect(sizes.contains(0))
     }
 
-    @Test func upstreamProcessTreatsInvalidStdoutAsFatalProtocolViolation() async throws {
+    @Test func upstreamSessionTreatsInvalidStdoutAsFatalProtocolViolation() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/sh",
             args: ["-c", "printf 'Content-Length: abc\\r\\n\\r\\n{}'; sleep 5"],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
-        let events = try await waitWithTimeout(
-                "invalid stdout should emit a protocol violation without auto-restart",
+        try await withUpstreamSession(config: config) { session in
+            let events = try await waitWithTimeout(
+                "invalid stdout should emit a protocol violation",
                 timeout: .seconds(3)
             ) {
                 var sawViolation = false
                 var bufferedSizes: [Int] = []
 
-                for await event in upstream.events {
+                for await event in session.events {
                     switch event {
                     case .stdoutProtocolViolation(let violation):
                         sawViolation = true
@@ -194,72 +193,61 @@ struct UpstreamProcessTests {
         }
     }
 
-    @Test func upstreamProcessResetsFramerAfterProtocolViolation() async throws {
-        let config = UpstreamProcess.Config(
-            command: "/bin/sh",
-            args: [
-                "-c",
-                "printf 'Content-Length: abc\\r\\n\\r\\n{}'; sleep 1; printf '{\"jsonrpc\":\"2.0\",\"result\":{}}\\n'; sleep 5",
-            ],
-            environment: ProcessInfo.processInfo.environment,
-            maxQueuedWriteBytes: 1024
-        )
-        try await withUpstreamProcess(config: config) { upstream in
-            let postViolationMessage = try await waitWithTimeout(
-                "valid stdout should still be parsed after resetting the framer",
-                timeout: .seconds(4)
-            ) {
-                var sawViolation = false
-
-                for await event in upstream.events {
-                    switch event {
-                    case .stdoutProtocolViolation(let violation):
-                        sawViolation = true
-                        #expect(violation.reason == .invalidContentLengthHeader)
-                    case .message(let message):
-                        if sawViolation {
-                            return String(decoding: message, as: UTF8.self)
-                        }
-                    case .stderr, .stdoutBufferSize, .exit:
-                        continue
-                    }
-                }
-
-                return ""
-            }
-
-            #expect(postViolationMessage == #"{"jsonrpc":"2.0","result":{}}"#)
-        }
-    }
-
-    @Test func upstreamProcessReturnsOverloadedWhenLaunchFails() async throws {
+    @Test func upstreamSessionReturnsOverloadedWhenLaunchFails() async throws {
         let config = UpstreamProcess.Config(
             command: "/path/that/does/not/exist",
             args: [],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
-            let first = await upstream.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
-            let second = await upstream.send(Data(#"{"jsonrpc":"2.0","id":2}"#.utf8))
+        let slot = ManagedUpstreamSlot(factory: UpstreamProcess(config: config))
+        await slot.start()
 
-            switch first {
-            case .accepted:
-                Issue.record("failed launch should not accept writes into orphaned pipes")
-            case .overloaded:
-                break
-            }
+        let first = await slot.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
+        let second = await slot.send(Data(#"{"jsonrpc":"2.0","id":2}"#.utf8))
+        await slot.stop()
 
-            switch second {
-            case .accepted:
-                Issue.record("subsequent sends should retry launch and still fail fast")
-            case .overloaded:
-                break
-            }
+        switch first {
+        case .accepted:
+            Issue.record("failed launch should not accept writes into an unavailable slot")
+        case .overloaded:
+            break
+        }
+
+        switch second {
+        case .accepted:
+            Issue.record("subsequent sends should still fail fast after launch failure")
+        case .overloaded:
+            break
         }
     }
 
-    @Test func upstreamProcessReassemblesLargeJSONSplitAcrossOrderedChunks() async throws {
+    @Test func upstreamSessionRejectsWritesAfterExitEvent() async throws {
+        let config = UpstreamProcess.Config(
+            command: "/bin/sh",
+            args: ["-c", "printf '{\"jsonrpc\":\"2.0\",\"result\":{}}\\n'; exit 0"],
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024
+        )
+        try await withUpstreamSession(config: config) { session in
+            _ = try await waitWithTimeout(
+                "session should emit exit before accepting more writes",
+                timeout: .seconds(2)
+            ) {
+                for await event in session.events {
+                    if case .exit = event {
+                        return true
+                    }
+                }
+                return false
+            }
+
+            let result = await session.send(Data(#"{"jsonrpc":"2.0","id":7}"#.utf8))
+            #expect(result == .overloaded)
+        }
+    }
+
+    @Test func upstreamSessionReassemblesLargeJSONSplitAcrossOrderedChunks() async throws {
         let payload = try makeJSONRPCResponse(
             id: 41,
             text: String(repeating: "x", count: 128 * 1024)
@@ -275,12 +263,12 @@ struct UpstreamProcessTests {
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
+        try await withUpstreamSession(config: config) { session in
             let message = try await waitWithTimeout(
                 "large split JSON should be reconstructed as one message",
                 timeout: .seconds(5)
             ) {
-                for await event in upstream.events {
+                for await event in session.events {
                     switch event {
                     case .message(let message):
                         return String(decoding: message, as: UTF8.self)
@@ -297,7 +285,7 @@ struct UpstreamProcessTests {
         }
     }
 
-    @Test func upstreamProcessPreservesBackToBackLargeJSONMessageOrder() async throws {
+    @Test func upstreamSessionPreservesBackToBackLargeJSONMessageOrder() async throws {
         let payloads = try [
             makeJSONRPCResponse(id: 51, text: String(repeating: "a", count: 96 * 1024)),
             makeJSONRPCResponse(id: 52, text: String(repeating: "b", count: 96 * 1024)),
@@ -314,13 +302,13 @@ struct UpstreamProcessTests {
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
-        try await withUpstreamProcess(config: config) { upstream in
+        try await withUpstreamSession(config: config) { session in
             let messages = try await waitWithTimeout(
                 "back-to-back large JSON payloads should preserve order",
                 timeout: .seconds(5)
             ) {
                 var messages: [String] = []
-                for await event in upstream.events {
+                for await event in session.events {
                     switch event {
                     case .message(let message):
                         messages.append(String(decoding: message, as: UTF8.self))
@@ -341,18 +329,17 @@ struct UpstreamProcessTests {
     }
 }
 
-private func withUpstreamProcess<T: Sendable>(
+private func withUpstreamSession<T: Sendable>(
     config: UpstreamProcess.Config,
-    _ body: @escaping @Sendable (UpstreamProcess) async throws -> T
+    _ body: @escaping @Sendable (any UpstreamSession) async throws -> T
 ) async throws -> T {
-    let upstream = UpstreamProcess(config: config)
-    await upstream.start()
+    let session = try await UpstreamProcess(config: config).startSession()
     do {
-        let result = try await body(upstream)
-        await upstream.stop()
+        let result = try await body(session)
+        await session.stop()
         return result
     } catch {
-        await upstream.stop()
+        await session.stop()
         throw error
     }
 }

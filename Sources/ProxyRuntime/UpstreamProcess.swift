@@ -3,7 +3,79 @@ import Darwin
 import Logging
 import ProxyCore
 
-package actor UpstreamProcess: UpstreamClient {
+private final class StdinWriter: @unchecked Sendable {
+    private struct State: Sendable {
+        var queuedBytes = 0
+        var isClosed = false
+    }
+
+    private let fileHandle: FileHandle
+    private let maxQueuedWriteBytes: Int
+    private let queue: DispatchQueue
+    private let state = NSLock()
+    private var queuedBytes = 0
+    private var isClosed = false
+    private let onComplete: @Sendable (_ bytes: Int, _ error: Error?) -> Void
+
+    init(
+        fileHandle: FileHandle,
+        maxQueuedWriteBytes: Int,
+        label: String,
+        onComplete: @escaping @Sendable (_ bytes: Int, _ error: Error?) -> Void
+    ) {
+        self.fileHandle = fileHandle
+        self.maxQueuedWriteBytes = maxQueuedWriteBytes
+        self.queue = DispatchQueue(label: label)
+        self.onComplete = onComplete
+    }
+
+    func send(_ payload: Data) -> UpstreamSendResult {
+        state.lock()
+        defer { state.unlock() }
+
+        guard !isClosed else {
+            return .overloaded
+        }
+        guard queuedBytes + payload.count <= maxQueuedWriteBytes else {
+            return .overloaded
+        }
+
+        queuedBytes += payload.count
+        queue.async { [fileHandle, onComplete] in
+            var writeError: Error?
+            do {
+                try fileHandle.write(contentsOf: payload)
+            } catch {
+                writeError = error
+            }
+            onComplete(payload.count, writeError)
+        }
+        return .accepted
+    }
+
+    func completeWrite(bytes: Int) {
+        state.lock()
+        queuedBytes = max(0, queuedBytes - bytes)
+        state.unlock()
+    }
+
+    func close() {
+        state.lock()
+        let shouldClose = !isClosed
+        isClosed = true
+        state.unlock()
+
+        guard shouldClose else {
+            return
+        }
+
+        queue.async { [fileHandle] in
+            try? fileHandle.close()
+        }
+    }
+}
+
+package struct UpstreamProcess: UpstreamSessionFactory {
     package struct Config {
         package var command: String
         package var args: [String]
@@ -23,34 +95,53 @@ package actor UpstreamProcess: UpstreamClient {
         }
     }
 
-    typealias Event = UpstreamEvent
+    private let config: Config
 
+    package init(config: Config) {
+        self.config = config
+    }
+
+    package func startSession() async throws -> any UpstreamSession {
+        try await ProcessBackedUpstreamSession.start(config: config)
+    }
+}
+
+package actor ProcessBackedUpstreamSession: UpstreamSession {
     package nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
 
-    private let config: Config
+    private let config: UpstreamProcess.Config
+    private let logger: Logger = ProxyLogging.make("upstream")
+    private let maxBufferedStderrBytes = 16 * 1024
+
     private var process: Process?
-    private var terminatingProcess: Process?
     private var stdinPipe = Pipe()
     private var stdoutPipe = Pipe()
     private var stderrPipe = Pipe()
+    private var stdinWriter: StdinWriter?
     private var stdoutReader: OrderedPipeReader?
     private var stderrReader: OrderedPipeReader?
     private var stdoutTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
     private var framer = StdioFramer()
-    private var isStopping = false
-    private var queuedWriteBytes = 0
-    private var writeGeneration: UInt64 = 0
-    private var readGeneration: UInt64 = 0
     private var stderrBuffer = ""
     private var lastReportedBufferedStdoutBytes = 0
-    private let writeQueue = DispatchQueue(label: "XcodeMCPProxy.UpstreamProcess.write")
-    private let logger: Logger = ProxyLogging.make("upstream")
-    private let maxBufferedStderrBytes = 16 * 1024
+    private var terminationObserved = false
+    private var stdoutDrained = false
+    private var stderrDrained = false
+    private var suppressExitEvent = false
+    private var didFinishEvents = false
+    private var isStopping = false
 
-    package init(config: Config) {
+    package static func start(config: UpstreamProcess.Config) async throws -> ProcessBackedUpstreamSession {
+        let session = ProcessBackedUpstreamSession(config: config)
+        try await session.runProcess()
+        return session
+    }
+
+    private init(config: UpstreamProcess.Config) {
         self.config = config
+
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
@@ -58,78 +149,72 @@ package actor UpstreamProcess: UpstreamClient {
         self.continuation = streamContinuation
     }
 
-    package func start() async {
-        isStopping = false
-        startLocked()
-    }
-
-    package func stop() async {
-        isStopping = true
-        stopLocked()
-        terminatingProcess = nil
-        continuation.finish()
-    }
-
     package func send(_ data: Data) async -> UpstreamSendResult {
-        if process == nil {
-            startLocked()
-        }
-        guard process != nil else {
-            logger.warning("Upstream send skipped because process is unavailable")
+        guard !didFinishEvents, !isStopping, !terminationObserved, process != nil, let stdinWriter else {
+            logger.warning("Upstream send skipped because session is unavailable")
             return .overloaded
         }
+
         var payload = data
         if payload.last != 0x0A {
             payload.append(0x0A)
         }
-        if queuedWriteBytes + payload.count > config.maxQueuedWriteBytes {
+
+        let result = stdinWriter.send(payload)
+        if result == .overloaded {
             logger.warning(
                 "Upstream write queue overloaded",
                 metadata: [
-                    "queued_bytes": "\(queuedWriteBytes)",
                     "payload_bytes": "\(payload.count)",
                     "limit_bytes": "\(config.maxQueuedWriteBytes)",
                 ]
             )
-            return .overloaded
         }
-
-        let queuedPayload = payload
-        let queuedPayloadBytes = queuedPayload.count
-        queuedWriteBytes += queuedPayloadBytes
-        let handle = stdinPipe.fileHandleForWriting
-        let generation = writeGeneration
-        writeQueue.async { [weak self] in
-            var writeError: Error?
-            do {
-                try handle.write(contentsOf: queuedPayload)
-            } catch {
-                writeError = error
-            }
-            Task { [weak self] in
-                await self?.completeQueuedWrite(
-                    bytes: queuedPayloadBytes,
-                    generation: generation,
-                    error: writeError
-                )
-            }
-        }
-        return .accepted
+        return result
     }
 
-    private func startLocked() {
-        guard process == nil else { return }
+    package func stop() async {
+        guard !isStopping else {
+            return
+        }
 
+        isStopping = true
+        suppressExitEvent = true
+        stdinWriter?.close()
+        stdoutReader?.stop()
+        stderrReader?.stop()
+
+        if let process {
+            if process.isRunning {
+                process.terminate()
+            } else {
+                terminationObserved = true
+            }
+        } else {
+            terminationObserved = true
+        }
+
+        await stdoutTask?.value
+        await stderrTask?.value
+        finishEventsIfNeeded(force: true)
+    }
+}
+
+private extension ProcessBackedUpstreamSession {
+    func runProcess() async throws {
         stdinPipe = Pipe()
         stdoutPipe = Pipe()
         stderrPipe = Pipe()
         configureNoSigPipe(on: stdinPipe.fileHandleForWriting)
         framer = StdioFramer()
-        queuedWriteBytes = 0
-        writeGeneration &+= 1
-        readGeneration &+= 1
         stderrBuffer = ""
         resetBufferedStdoutBytesIfNeeded()
+        terminationObserved = false
+        stdoutDrained = false
+        stderrDrained = false
+        suppressExitEvent = false
+        didFinishEvents = false
+        isStopping = false
 
         let (executableURL, args) = resolveCommand(command: config.command, args: config.args)
         let process = Process()
@@ -139,88 +224,70 @@ package actor UpstreamProcess: UpstreamClient {
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        process.terminationHandler = { [weak self] proc in
+            Task {
+                await self?.handleTermination(status: proc.terminationStatus)
+            }
+        }
 
-        let generation = readGeneration
         let stdoutReader = OrderedPipeReader(
             fileHandle: stdoutPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.UpstreamProcess.stdout"
+            label: "XcodeMCPProxy.UpstreamSession.stdout"
         )
         let stderrReader = OrderedPipeReader(
             fileHandle: stderrPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.UpstreamProcess.stderr"
+            label: "XcodeMCPProxy.UpstreamSession.stderr"
         )
-        self.stdoutReader = stdoutReader
-        self.stderrReader = stderrReader
-        stdoutReader.start()
-        stderrReader.start()
-        stdoutTask = Task { [weak self, stdoutReader] in
-            for await data in stdoutReader.chunks {
-                await self?.handleStdoutData(data, generation: generation)
-            }
-        }
-        stderrTask = Task { [weak self, stderrReader] in
-            for await data in stderrReader.chunks {
-                await self?.handleStderrData(data, generation: generation)
-            }
-            await self?.handleStderrEOF(generation: generation)
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            Task {
-                await self?.handleTermination(process: proc, status: proc.terminationStatus)
-            }
-        }
 
         do {
             try process.run()
-            self.process = process
         } catch {
-            logger.error("Failed to start upstream process", metadata: ["error": "\(error)"])
-            cleanupFailedStart()
+            stdoutReader.stop()
+            stderrReader.stop()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            try? stdinPipe.fileHandleForWriting.close()
+            continuation.finish()
+            throw error
         }
-    }
 
-    private func stopLocked() {
-        flushBufferedStderrIfNeeded()
-        readGeneration &+= 1
-        stdoutReader?.stop()
-        stderrReader?.stop()
-        stdoutReader = nil
-        stderrReader = nil
-        stdoutTask = nil
-        stderrTask = nil
-        queuedWriteBytes = 0
-        writeGeneration &+= 1
-        stderrBuffer = ""
-        resetBufferedStdoutBytesIfNeeded()
-        if let process = process {
-            terminatingProcess = process
-            process.terminate()
+        self.process = process
+        self.stdoutReader = stdoutReader
+        self.stderrReader = stderrReader
+        self.stdinWriter = StdinWriter(
+            fileHandle: stdinPipe.fileHandleForWriting,
+            maxQueuedWriteBytes: config.maxQueuedWriteBytes,
+            label: "XcodeMCPProxy.UpstreamSession.stdin"
+        ) { [weak self] bytes, error in
+            Task {
+                await self?.completeQueuedWrite(bytes: bytes, error: error)
+            }
         }
-        process = nil
-    }
 
-    private func cleanupFailedStart() {
-        stdoutReader?.stop()
-        stderrReader?.stop()
-        stdoutReader = nil
-        stderrReader = nil
-        stdoutTask = nil
-        stderrTask = nil
-        try? stdinPipe.fileHandleForWriting.close()
+        stdoutReader.start()
+        stderrReader.start()
         try? stdoutPipe.fileHandleForWriting.close()
         try? stderrPipe.fileHandleForWriting.close()
-        framer = StdioFramer()
-        queuedWriteBytes = 0
-        writeGeneration &+= 1
-        readGeneration &+= 1
-        stderrBuffer = ""
-        resetBufferedStdoutBytesIfNeeded()
-        process = nil
+
+        stdoutTask = Task { [weak self, stdoutReader] in
+            for await data in stdoutReader.chunks {
+                await self?.handleStdoutData(data)
+            }
+            await self?.handleStdoutEOF()
+        }
+        stderrTask = Task { [weak self, stderrReader] in
+            for await data in stderrReader.chunks {
+                await self?.handleStderrData(data)
+            }
+            await self?.handleStderrEOF()
+        }
     }
 
-    private func handleStdoutData(_ data: Data, generation: UInt64) {
-        guard generation == readGeneration else { return }
+    func handleStdoutData(_ data: Data) async {
+        guard !didFinishEvents else {
+            return
+        }
+
         let result = framer.append(data)
         for message in result.messages {
             guard isValidJSONPayload(message) else {
@@ -260,42 +327,19 @@ package actor UpstreamProcess: UpstreamClient {
         continuation.yield(.stdoutProtocolViolation(protocolViolation))
         framer = StdioFramer()
         resetBufferedStdoutBytesIfNeeded()
+        await terminateSession(suppressExitEvent: true)
     }
 
-    private func resetBufferedStdoutBytesIfNeeded() {
-        guard lastReportedBufferedStdoutBytes != 0 else { return }
-        lastReportedBufferedStdoutBytes = 0
-        continuation.yield(.stdoutBufferSize(0))
+    func handleStdoutEOF() {
+        stdoutDrained = true
+        finishEventsIfNeeded()
     }
 
-    private func handleTermination(process terminated: Process, status: Int32) {
-        let wasCurrent = process.map { terminated === $0 } ?? false
-        let wasTerminating = terminatingProcess.map { terminated === $0 } ?? false
-
-        if wasCurrent {
-            process = nil
-        } else if wasTerminating {
-            terminatingProcess = nil
-        } else {
-            // Stale termination for an older process we no longer track.
+    func handleStderrData(_ data: Data) {
+        guard !didFinishEvents else {
             return
         }
 
-        guard !isStopping else {
-            return
-        }
-
-        if wasTerminating, process != nil {
-            logger.debug("Upstream process exited (superseded)", metadata: ["status": "\(status)"])
-            return
-        }
-
-        logger.warning("Upstream process exited", metadata: ["status": "\(status)"])
-        continuation.yield(.exit(status))
-    }
-
-    private func handleStderrData(_ data: Data, generation: UInt64) {
-        guard generation == readGeneration else { return }
         if let message = String(data: data, encoding: .utf8) {
             stderrBuffer.append(message)
             let parts = stderrBuffer.split(separator: "\n", omittingEmptySubsequences: false)
@@ -311,17 +355,83 @@ package actor UpstreamProcess: UpstreamClient {
         }
     }
 
-    private func handleStderrEOF(generation: UInt64) {
-        guard generation == readGeneration else { return }
+    func handleStderrEOF() {
         flushBufferedStderrIfNeeded()
+        stderrDrained = true
+        finishEventsIfNeeded()
     }
 
-    private func flushBufferedStderrIfNeeded() {
+    func handleTermination(status: Int32) async {
+        guard !terminationObserved else {
+            return
+        }
+
+        terminationObserved = true
+        process = nil
+        if !suppressExitEvent {
+            continuation.yield(.exit(status))
+        }
+        stdoutReader?.stop()
+        stderrReader?.stop()
+        finishEventsIfNeeded()
+    }
+
+    func terminateSession(suppressExitEvent: Bool) async {
+        guard !isStopping else {
+            return
+        }
+
+        isStopping = true
+        if suppressExitEvent {
+            self.suppressExitEvent = true
+        }
+        stdinWriter?.close()
+        stdoutReader?.stop()
+        stderrReader?.stop()
+
+        if let process, process.isRunning {
+            process.terminate()
+        } else {
+            terminationObserved = true
+            finishEventsIfNeeded()
+        }
+    }
+
+    func completeQueuedWrite(bytes: Int, error: Error?) {
+        stdinWriter?.completeWrite(bytes: bytes)
+        guard let error else {
+            return
+        }
+        logger.warning("Upstream async write failed", metadata: ["error": "\(error)"])
+    }
+
+    func finishEventsIfNeeded(force: Bool = false) {
+        guard !didFinishEvents else {
+            return
+        }
+        guard force || (terminationObserved && stdoutDrained && stderrDrained) else {
+            return
+        }
+
+        didFinishEvents = true
+        resetBufferedStdoutBytesIfNeeded()
+        continuation.finish()
+    }
+
+    func resetBufferedStdoutBytesIfNeeded() {
+        guard lastReportedBufferedStdoutBytes != 0 else {
+            return
+        }
+        lastReportedBufferedStdoutBytes = 0
+        continuation.yield(.stdoutBufferSize(0))
+    }
+
+    func flushBufferedStderrIfNeeded() {
         emitStderrLine(stderrBuffer)
         stderrBuffer = ""
     }
 
-    private func flushBufferedStderrChunkIfNeeded() {
+    func flushBufferedStderrChunkIfNeeded() {
         while stderrBuffer.utf8.count > maxBufferedStderrBytes {
             let prefixData = Data(stderrBuffer.utf8.prefix(maxBufferedStderrBytes))
             emitStderrLine(String(decoding: prefixData, as: UTF8.self), suffix: " [truncated]")
@@ -329,15 +439,17 @@ package actor UpstreamProcess: UpstreamClient {
         }
     }
 
-    private func emitStderrLine(_ line: String, suffix: String = "") {
+    func emitStderrLine(_ line: String, suffix: String = "") {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else {
+            return
+        }
         let message = suffix.isEmpty ? trimmed : trimmed + suffix
         logger.error("Upstream stderr: \(message)")
         continuation.yield(.stderr(message))
     }
 
-    private func resolveCommand(command: String, args: [String]) -> (URL, [String]) {
+    func resolveCommand(command: String, args: [String]) -> (URL, [String]) {
         if command.contains("/") {
             return (URL(fileURLWithPath: command), args)
         }
@@ -345,7 +457,7 @@ package actor UpstreamProcess: UpstreamClient {
         return (URL(fileURLWithPath: env), [command] + args)
     }
 
-    private func configureNoSigPipe(on handle: FileHandle) {
+    func configureNoSigPipe(on handle: FileHandle) {
         let fd = handle.fileDescriptor
         let result = fcntl(fd, F_SETNOSIGPIPE, 1)
         if result == -1 {
@@ -354,17 +466,5 @@ package actor UpstreamProcess: UpstreamClient {
                 metadata: ["errno": "\(errno)"]
             )
         }
-    }
-
-    private func completeQueuedWrite(
-        bytes: Int,
-        generation: UInt64,
-        error: Error?
-    ) {
-        if generation == writeGeneration {
-            queuedWriteBytes = max(0, queuedWriteBytes - bytes)
-        }
-        guard let error else { return }
-        logger.warning("Upstream async write failed", metadata: ["error": "\(error)"])
     }
 }

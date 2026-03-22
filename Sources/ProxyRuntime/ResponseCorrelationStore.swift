@@ -7,7 +7,7 @@ extension RuntimeCoordinator {
         config: ProxyConfig,
         sharedSessionID: String?,
         count: Int
-    ) -> [UpstreamProcess] {
+    ) -> [ManagedUpstreamSlot] {
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "XCODE_PID")
         if let sharedSessionID, !sharedSessionID.isEmpty {
@@ -30,12 +30,14 @@ extension RuntimeCoordinator {
             }()
         )
         if count <= 1 {
-            return [UpstreamProcess(config: upstreamConfig)]
+            return [ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig), startImmediately: true)]
         }
-        var upstreams: [UpstreamProcess] = []
+        var upstreams: [ManagedUpstreamSlot] = []
         upstreams.reserveCapacity(count)
         for _ in 0..<count {
-            upstreams.append(UpstreamProcess(config: upstreamConfig))
+            upstreams.append(
+                ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig), startImmediately: true)
+            )
         }
         return upstreams
     }

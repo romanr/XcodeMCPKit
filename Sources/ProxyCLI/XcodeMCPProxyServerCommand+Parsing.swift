@@ -12,6 +12,7 @@ extension XcodeMCPProxyServerCommand {
             hasHostFlag: scan.hasHostFlag,
             hasPortFlag: scan.hasPortFlag,
             hasConfigFlag: scan.hasConfigFlag,
+            hasAutoApproveFlag: scan.hasAutoApproveFlag,
             hasRefreshCodeIssuesModeFlag: scan.hasRefreshCodeIssuesModeFlag,
             forceRestart: scan.forceRestart,
             dryRun: scan.dryRun
@@ -69,6 +70,7 @@ extension XcodeMCPProxyServerCommand {
           --host host
           --port port
           --config path
+          --auto-approve
           --upstream-processes n
           --refresh-code-issues-mode proxy|upstream
           --force-restart
@@ -80,6 +82,7 @@ extension XcodeMCPProxyServerCommand {
           - Starts the HTTP/SSE proxy server (and spawns xcrun mcpbridge as upstream processes).
           - Use xcode-mcp-proxy as a STDIO adapter for Codex / Claude Code.
           - Default listen: localhost:8765 (override via --listen / --host / --port or env LISTEN/HOST/PORT).
+          - --auto-approve opt-in enables automatic approval of the Xcode permission dialog.
           - Initialize config path: --config or env \(CLIParser.configPathEnv)
           - When the listen port is already in use, rerun with --force-restart to terminate an existing xcode-mcp-proxy-server.
         """

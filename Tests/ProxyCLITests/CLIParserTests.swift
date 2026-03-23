@@ -85,6 +85,15 @@ struct CLIParserTests {
         #expect(config.refreshCodeIssuesMode == .upstream)
     }
 
+    @Test func cliParsesAutoApproveFlag() async throws {
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--auto-approve"],
+            environment: [:]
+        )
+
+        #expect(config.autoApproveXcodeDialog == true)
+    }
+
     @Test func cliParsesConfigPath() async throws {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", "/tmp/proxy-config.toml"],
@@ -135,11 +144,13 @@ struct CLIParserTests {
                 "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "MCP_XCODE_SESSION_ID": "session-xyz",
                 "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
+                "MCP_XCODE_AUTO_APPROVE": "1",
             ]
         )
         #expect(config.configPath == "/tmp/proxy-config.toml")
         #expect(config.upstreamSessionID == "session-xyz")
         #expect(config.refreshCodeIssuesMode == .upstream)
+        #expect(config.autoApproveXcodeDialog == false)
     }
 
     @Test func cliIgnoresRemovedXcodePIDEnvironment() async throws {

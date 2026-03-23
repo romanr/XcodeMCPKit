@@ -130,6 +130,7 @@ See Quick Start for how to launch.
 | `--max-body-bytes n` | Max request body size |
 | `--request-timeout seconds` | Request timeout (`0` disables non-initialize timeouts; `initialize` still uses a bounded handshake timeout) |
 | `--config path` | Path to proxy config TOML for overriding the upstream handshake |
+| `--auto-approve` | Opt in to auto-approve the Xcode permission dialog |
 | `--refresh-code-issues-mode mode` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
 | `--force-restart` | If the listen port is in use, terminate an existing `xcode-mcp-proxy-server` and restart |
 

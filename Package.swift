@@ -138,7 +138,8 @@ let package = Package(
         .target(
             name: "XcodeMCPTestSupport",
             dependencies: [
-                .product(name: "NIO", package: "swift-nio")
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
             swiftSettings: strictSwiftSettings
         ),

@@ -226,7 +226,7 @@ extension RuntimeCoordinator {
         else {
             return
         }
-        let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
+        let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
             guard let self else { return }
             self.failInitPending(error: TimeoutError())
         }

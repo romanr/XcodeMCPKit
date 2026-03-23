@@ -13,7 +13,7 @@ extension RuntimeCoordinator {
     }
 
     func markRequestTimedOut(upstreamIndex: Int) {
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let nowUptimeNs = nowUptimeNanoseconds()
         let result = upstreamSelectionPolicy.markRequestTimedOut(
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNs
@@ -111,7 +111,7 @@ extension RuntimeCoordinator {
         success: Bool,
         reason: String
     ) {
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let nowUptimeNs = nowUptimeNanoseconds()
         upstreamSelectionPolicy.finishHealthProbe(
             upstreamIndex: upstreamIndex,
             probeGeneration: probeGeneration,
@@ -164,7 +164,7 @@ extension RuntimeCoordinator {
         }
 
         let refreshTimeout: TimeAmount = .seconds(5)
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let nowUptimeNs = nowUptimeNanoseconds()
         let internalSessionID = toolsListInternalSessionID()
         _ = session(id: internalSessionID)
 
@@ -277,7 +277,7 @@ extension RuntimeCoordinator {
         else {
             return
         }
-        let timeout = eventLoop.scheduleTask(in: timeoutAmount) { [weak self] in
+        let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
             guard let self else { return }
             self.handleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
         }

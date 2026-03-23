@@ -21,21 +21,21 @@ package final class InitializeGate: Sendable {
     }
 
     package struct SuccessPreparation: Sendable {
-        package let timeout: Scheduled<Void>?
+        package let timeout: RuntimeScheduledTimeout?
         package let shouldWarmSecondary: Bool
         package let cachedResult: JSONValue?
     }
 
     package struct FailureResult: Sendable {
         package let pending: [PendingInitialize]
-        package let timeout: Scheduled<Void>?
+        package let timeout: RuntimeScheduledTimeout?
         package let upstreamID: Int64?
         package let shouldRetryEagerInitialize: Bool
     }
 
     package struct ExitResult: Sendable {
         package let pending: [PendingInitialize]
-        package let timeout: Scheduled<Void>?
+        package let timeout: RuntimeScheduledTimeout?
         package let hadGlobalInit: Bool
         package let wasInFlight: Bool
         package let primaryInitUpstreamID: Int64?
@@ -53,7 +53,7 @@ package final class InitializeGate: Sendable {
         var initResult: JSONValue?
         var initPending: [PendingInitialize] = []
         var initInFlight = false
-        var initTimeout: Scheduled<Void>?
+        var initTimeout: RuntimeScheduledTimeout?
         var isShuttingDown = false
         var didWarmSecondary = false
         var primaryInitUpstreamID: Int64?
@@ -64,7 +64,7 @@ package final class InitializeGate: Sendable {
 
     package init() {}
 
-    package func beginShutdown() -> (pending: [PendingInitialize], timeout: Scheduled<Void>?) {
+    package func beginShutdown() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
         state.withLockedValue { state in
             state.isShuttingDown = true
             state.initInFlight = false
@@ -253,7 +253,7 @@ package final class InitializeGate: Sendable {
         }
     }
 
-    package func replaceInitTimeout(_ timeout: Scheduled<Void>) -> Scheduled<Void>? {
+    package func replaceInitTimeout(_ timeout: RuntimeScheduledTimeout) -> RuntimeScheduledTimeout? {
         state.withLockedValue { state in
             let existing = state.initTimeout
             state.initTimeout = timeout
@@ -296,7 +296,7 @@ package final class InitializeGate: Sendable {
         }
     }
 
-    package func resetForDebug() -> (pending: [PendingInitialize], timeout: Scheduled<Void>?) {
+    package func resetForDebug() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
         state.withLockedValue { state in
             let result = (pending: state.initPending, timeout: state.initTimeout)
             state.initResult = nil

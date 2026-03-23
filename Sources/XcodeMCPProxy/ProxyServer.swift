@@ -97,11 +97,12 @@ public final class ProxyServer {
     }
 
     public func start() throws -> Channel {
+        let logger = self.logger
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer {
-                [runtimeHolder, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver, refreshCodeIssuesDebugState] channel in
+                [runtimeHolder, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver, refreshCodeIssuesDebugState, logger] channel in
                 runtimeHolder.sessionManager(on: channel.eventLoop).flatMap { sessionManager in
                     channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                         channel.pipeline.addHandler(
@@ -114,9 +115,19 @@ public final class ProxyServer {
                             )
                         )
                     }
-                }.flatMapError { _ in
-                    channel.close(mode: .all, promise: nil)
-                    return channel.eventLoop.makeSucceededFuture(())
+                }.flatMapError { error in
+                    if case RuntimeHolderError.shuttingDown = error {
+                        channel.close(mode: .all, promise: nil)
+                        return channel.eventLoop.makeSucceededFuture(())
+                    }
+
+                    logger.warning(
+                        "Child channel initialization failed.",
+                        metadata: [
+                            "error": "\(error)"
+                        ]
+                    )
+                    return channel.eventLoop.makeFailedFuture(error)
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -230,16 +241,17 @@ public final class ProxyServer {
         "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(ProxyBuildInfo.version))"
     }
 
-    private static func additionalPermissionDialogExecutableCandidates(config: ProxyConfig) -> [String] {
+    package static func additionalPermissionDialogExecutableCandidates(config: ProxyConfig) -> [String] {
         var candidates: [String] = []
         if let resolvedUpstreamCommand = resolvedExecutablePath(for: config.upstreamCommand) {
             candidates.append(resolvedUpstreamCommand)
         }
 
-        if let xcrunInvocation = xcrunInvocation(from: config),
-           let toolResolution = resolvedXcrunTool(from: xcrunInvocation.arguments) {
+        if let xcrunInvocation = xcrunInvocation(from: config) {
             candidates.append(xcrunInvocation.commandPath)
-            candidates.append(toolResolution)
+            if let toolResolution = resolvedXcrunTool(from: xcrunInvocation.arguments) {
+                candidates.append(toolResolution)
+            }
         }
 
         return candidates

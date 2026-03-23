@@ -9,25 +9,71 @@ package enum XcodePermissionDialogAccessibilityStatus: Sendable {
     case untrusted
 }
 
-package struct XcodePermissionDialogWindowSnapshot: Equatable, Sendable {
-    package let title: String
-    package let textValues: [String]
-    package let isModal: Bool
-    package let defaultButtonTitle: String?
-    package let cancelButtonTitle: String?
+package struct XcodePermissionDialogButtonSnapshot: Equatable, Sendable {
+    package let title: String?
+    package let role: String?
+    package let subrole: String?
+    package let identifier: String?
 
     package init(
-        title: String,
-        textValues: [String],
-        isModal: Bool,
-        defaultButtonTitle: String?,
-        cancelButtonTitle: String?
+        title: String? = nil,
+        role: String? = nil,
+        subrole: String? = nil,
+        identifier: String? = nil
     ) {
         self.title = title
+        self.role = role
+        self.subrole = subrole
+        self.identifier = identifier
+    }
+}
+
+package struct XcodePermissionDialogWindowSnapshot: Equatable, Sendable {
+    package let processBundleIdentifier: String?
+    package let title: String
+    package let textValues: [String]
+    package let role: String?
+    package let subrole: String?
+    package let windowIdentifier: String?
+    package let isModal: Bool
+    package let isMain: Bool?
+    package let isMinimized: Bool?
+    package let document: String?
+    package let childCount: Int
+    package let hasProxy: Bool
+    package let defaultButton: XcodePermissionDialogButtonSnapshot?
+    package let cancelButton: XcodePermissionDialogButtonSnapshot?
+
+    package init(
+        processBundleIdentifier: String? = nil,
+        title: String,
+        textValues: [String],
+        role: String? = nil,
+        subrole: String? = nil,
+        windowIdentifier: String? = nil,
+        isModal: Bool,
+        isMain: Bool? = nil,
+        isMinimized: Bool? = nil,
+        document: String? = nil,
+        childCount: Int = 0,
+        hasProxy: Bool = false,
+        defaultButton: XcodePermissionDialogButtonSnapshot? = nil,
+        cancelButton: XcodePermissionDialogButtonSnapshot? = nil
+    ) {
+        self.processBundleIdentifier = processBundleIdentifier
+        self.title = title
         self.textValues = textValues
+        self.role = role
+        self.subrole = subrole
+        self.windowIdentifier = windowIdentifier
         self.isModal = isModal
-        self.defaultButtonTitle = defaultButtonTitle
-        self.cancelButtonTitle = cancelButtonTitle
+        self.isMain = isMain
+        self.isMinimized = isMinimized
+        self.document = document
+        self.childCount = childCount
+        self.hasProxy = hasProxy
+        self.defaultButton = defaultButton
+        self.cancelButton = cancelButton
     }
 }
 
@@ -42,50 +88,44 @@ package struct XcodePermissionDialogMatchDecision: Equatable, Sendable {
 }
 
 package enum XcodePermissionDialogMatcher {
+    private static let allowedProcessBundleIdentifiers = normalizedCandidates([
+        "com.apple.dt.Xcode",
+        "com.apple.dt.ExternalViewService",
+    ])
+    private static let allowedWindowRoles = normalizedCandidates([
+        "AXWindow"
+    ])
+    private static let allowedWindowSubroles = normalizedCandidates([
+        "AXDialog",
+        "AXSystemDialog",
+    ])
+
     package static func decision(
         for snapshot: XcodePermissionDialogWindowSnapshot,
         processID: pid_t,
-        agentPathCandidates: Set<String>,
-        assistantNameCandidates: Set<String>
+        agentPathCandidates: Set<String> = [],
+        assistantNameCandidates: Set<String>,
+        serverProcessIDCandidates: Set<pid_t> = [ProcessInfo.processInfo.processIdentifier]
     ) -> XcodePermissionDialogMatchDecision? {
-        guard snapshot.isModal else {
+        guard passesStructuralChecks(snapshot) else {
             return nil
         }
 
-        guard
-            let defaultButtonTitle = normalizedText(snapshot.defaultButtonTitle)
-        else {
-            return nil
-        }
-
-        let haystacks = normalizedHaystacks(for: snapshot)
-        guard haystacks.contains(where: { $0.contains("xcode") }) else {
-            return nil
-        }
-
-        let normalizedCandidates = normalizedAgentPathCandidates(agentPathCandidates)
-        let normalizedAssistantNames = normalizedAgentPathCandidates(assistantNameCandidates)
-        guard normalizedCandidates.isEmpty == false || normalizedAssistantNames.isEmpty == false else {
-            return nil
-        }
-
-        let containsPath = haystacks.contains { haystack in
-            normalizedCandidates.contains { candidate in
-                haystack.contains(candidate)
-            }
-        }
-        let containsAssistantName = haystacks.contains { haystack in
-            normalizedAssistantNames.contains { candidate in
-                haystack.contains(candidate)
-            }
-        }
-        guard containsPath || containsAssistantName else {
+        let normalizedAgentPaths = normalizedCandidates(agentPathCandidates)
+        let normalizedAssistantNames = normalizedCandidates(assistantNameCandidates)
+        let pidCandidates = normalizedPIDCandidates(serverProcessIDCandidates)
+        guard containsAssistantNameAndPID(
+            in: normalizedTextNodes(for: snapshot),
+            agentPathCandidates: normalizedAgentPaths,
+            assistantNameCandidates: normalizedAssistantNames,
+            serverProcessIDCandidates: pidCandidates
+        ) else {
             return nil
         }
 
         return XcodePermissionDialogMatchDecision(
             fingerprint: fingerprint(for: snapshot, processID: processID),
-            defaultButtonTitle: defaultButtonTitle
+            defaultButtonTitle: normalizedButtonDescription(snapshot.defaultButton)
         )
     }
 
@@ -93,16 +133,118 @@ package enum XcodePermissionDialogMatcher {
         for snapshot: XcodePermissionDialogWindowSnapshot,
         processID: pid_t
     ) -> String {
-        let textFingerprint = normalizedHaystacks(for: snapshot).joined(separator: "\u{1F}")
-        return "\(processID)|\(snapshot.isModal)|\(textFingerprint)"
+        let textFingerprint = normalizedTextNodes(for: snapshot).joined(separator: "\u{1F}")
+        let bundleFingerprint = normalizedText(snapshot.processBundleIdentifier) ?? ""
+        let roleFingerprint = normalizedText(snapshot.role) ?? ""
+        let subroleFingerprint = normalizedText(snapshot.subrole) ?? ""
+        return [
+            "\(processID)",
+            bundleFingerprint,
+            roleFingerprint,
+            subroleFingerprint,
+            "\(snapshot.isModal)",
+            textFingerprint,
+        ].joined(separator: "|")
     }
 
-    package static func normalizedAgentPathCandidates(_ candidates: Set<String>) -> Set<String> {
+    package static func passesStructuralChecks(_ snapshot: XcodePermissionDialogWindowSnapshot) -> Bool {
+        guard
+            let normalizedBundleIdentifier = normalizedText(snapshot.processBundleIdentifier),
+            allowedProcessBundleIdentifiers.contains(normalizedBundleIdentifier)
+        else {
+            return false
+        }
+        guard snapshot.isModal else {
+            return false
+        }
+        guard snapshot.defaultButton != nil else {
+            return false
+        }
+        guard snapshot.isMinimized != true else {
+            return false
+        }
+        if let normalizedRole = normalizedText(snapshot.role),
+           allowedWindowRoles.contains(normalizedRole) == false {
+            return false
+        }
+        if let normalizedSubrole = normalizedText(snapshot.subrole),
+           allowedWindowSubroles.contains(normalizedSubrole) == false {
+            return false
+        }
+        if looksLikeNormalWorkspaceWindow(snapshot) {
+            return false
+        }
+        return true
+    }
+
+    private static func looksLikeNormalWorkspaceWindow(_ snapshot: XcodePermissionDialogWindowSnapshot) -> Bool {
+        let hasDocument = normalizedText(snapshot.document) != nil
+        return snapshot.isMain == true && (hasDocument || snapshot.hasProxy)
+    }
+
+    private static func normalizedTextNodes(for snapshot: XcodePermissionDialogWindowSnapshot) -> [String] {
+        ([snapshot.title] + snapshot.textValues).compactMap(normalizedText)
+    }
+
+    private static func containsAssistantNameAndPID(
+        in normalizedTextNodes: [String],
+        agentPathCandidates: Set<String>,
+        assistantNameCandidates: Set<String>,
+        serverProcessIDCandidates: Set<String>
+    ) -> Bool {
+        let containsPath = normalizedTextNodes.contains { text in
+            agentPathCandidates.contains(where: { text.contains($0) })
+        }
+        if assistantNameCandidates.isEmpty {
+            return containsPath
+        }
+
+        let sameNodeMatch = normalizedTextNodes.contains { text in
+            serverProcessIDCandidates.contains(where: { text.contains($0) })
+                && assistantNameCandidates.contains(where: { text.contains($0) })
+        }
+        if sameNodeMatch {
+            return true
+        }
+
+        let containsAssistantName = normalizedTextNodes.contains { text in
+            assistantNameCandidates.contains(where: { text.contains($0) })
+        }
+        let containsPID = normalizedTextNodes.contains { text in
+            serverProcessIDCandidates.contains(where: { text.contains($0) })
+        }
+        if containsAssistantName && containsPID {
+            return true
+        }
+        guard containsPID == false, containsPath else {
+            return false
+        }
+
+        let sameNodePathMatch = normalizedTextNodes.contains { text in
+            agentPathCandidates.contains(where: { text.contains($0) })
+                && assistantNameCandidates.contains(where: { text.contains($0) })
+        }
+        if sameNodePathMatch {
+            return true
+        }
+        return containsAssistantName
+    }
+
+    private static func normalizedButtonDescription(
+        _ button: XcodePermissionDialogButtonSnapshot?
+    ) -> String {
+        normalizedText(button?.title)
+            ?? normalizedText(button?.identifier)
+            ?? normalizedText(button?.role)
+            ?? "default"
+    }
+
+    private static func normalizedCandidates(_ candidates: some Sequence<String>) -> Set<String> {
         Set(candidates.compactMap(normalizedText))
     }
 
-    private static func normalizedHaystacks(for snapshot: XcodePermissionDialogWindowSnapshot) -> [String] {
-        ([snapshot.title] + snapshot.textValues).compactMap(normalizedText)
+    private static func normalizedPIDCandidates(_ candidates: Set<pid_t>) -> Set<String> {
+        Set(candidates.map(String.init))
     }
 
     private static func normalizedText(_ text: String?) -> String? {
@@ -215,14 +357,25 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
         guard let defaultButton = copyElement(attribute: kAXDefaultButtonAttribute as CFString, from: window) else {
             return nil
         }
+        let children = (try? copyElementArray(attribute: kAXChildrenAttribute as CFString, from: window)) ?? []
+        let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
 
         let snapshot = XcodePermissionDialogWindowSnapshot(
+            processBundleIdentifier: processBundleIdentifier,
             title: copyString(attribute: kAXTitleAttribute as CFString, from: window) ?? "",
             textValues: collectTextValues(from: window),
+            role: copyString(attribute: kAXRoleAttribute as CFString, from: window),
+            subrole: copyString(attribute: kAXSubroleAttribute as CFString, from: window),
+            windowIdentifier: copyString(attribute: kAXIdentifierAttribute as CFString, from: window),
             isModal: copyBool(attribute: kAXModalAttribute as CFString, from: window) ?? false,
-            defaultButtonTitle: copyButtonLabel(from: defaultButton),
-            cancelButtonTitle: copyElement(attribute: kAXCancelButtonAttribute as CFString, from: window)
-                .flatMap(copyButtonLabel(from:))
+            isMain: copyBool(attribute: kAXMainAttribute as CFString, from: window),
+            isMinimized: copyBool(attribute: kAXMinimizedAttribute as CFString, from: window),
+            document: copyString(attribute: kAXDocumentAttribute as CFString, from: window),
+            childCount: children.count,
+            hasProxy: copyElement(attribute: kAXProxyAttribute as CFString, from: window) != nil,
+            defaultButton: buttonSnapshot(from: defaultButton),
+            cancelButton: copyElement(attribute: kAXCancelButtonAttribute as CFString, from: window)
+                .flatMap(buttonSnapshot(from:))
         )
 
         return XcodePermissionDialogAXWindow(
@@ -266,10 +419,15 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
         }
     }
 
-    private func copyButtonLabel(from element: AXUIElement) -> String? {
-        copyString(attribute: kAXTitleAttribute as CFString, from: element)
-            ?? copyString(attribute: kAXDescriptionAttribute as CFString, from: element)
-            ?? copyString(attribute: kAXValueAttribute as CFString, from: element)
+    private func buttonSnapshot(from element: AXUIElement) -> XcodePermissionDialogButtonSnapshot {
+        XcodePermissionDialogButtonSnapshot(
+            title: copyString(attribute: kAXTitleAttribute as CFString, from: element)
+                ?? copyString(attribute: kAXDescriptionAttribute as CFString, from: element)
+                ?? copyString(attribute: kAXValueAttribute as CFString, from: element),
+            role: copyString(attribute: kAXRoleAttribute as CFString, from: element),
+            subrole: copyString(attribute: kAXSubroleAttribute as CFString, from: element),
+            identifier: copyString(attribute: kAXIdentifierAttribute as CFString, from: element)
+        )
     }
 
     private func copyString(attribute: CFString, from element: AXUIElement) -> String? {
@@ -334,6 +492,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         package var axClient: any XcodePermissionDialogAXAccessing
         package var agentPathCandidates: @Sendable () -> Set<String>
         package var assistantNameCandidates: @Sendable () -> Set<String>
+        package var serverProcessIDCandidates: @Sendable () -> Set<pid_t>
         package var sleep: @Sendable (Duration) async -> Void
         package var pollInterval: Duration
         package var logger: Logger
@@ -342,6 +501,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
             axClient: any XcodePermissionDialogAXAccessing,
             agentPathCandidates: @escaping @Sendable () -> Set<String>,
             assistantNameCandidates: @escaping @Sendable () -> Set<String>,
+            serverProcessIDCandidates: @escaping @Sendable () -> Set<pid_t>,
             sleep: @escaping @Sendable (Duration) async -> Void,
             pollInterval: Duration,
             logger: Logger
@@ -349,6 +509,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
             self.axClient = axClient
             self.agentPathCandidates = agentPathCandidates
             self.assistantNameCandidates = assistantNameCandidates
+            self.serverProcessIDCandidates = serverProcessIDCandidates
             self.sleep = sleep
             self.pollInterval = pollInterval
             self.logger = logger
@@ -359,13 +520,17 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
                 XcodePermissionDialogAutoApprover.defaultAgentPathCandidates()
             },
             assistantNameCandidates: @escaping @Sendable () -> Set<String> = {
-                []
+                ["XcodeMCPKit"]
+            },
+            serverProcessIDCandidates: @escaping @Sendable () -> Set<pid_t> = {
+                XcodePermissionDialogAutoApprover.defaultServerProcessIDCandidates()
             }
         ) -> Self {
             Self(
                 axClient: LiveXcodePermissionDialogAXClient(),
                 agentPathCandidates: agentPathCandidates,
                 assistantNameCandidates: assistantNameCandidates,
+                serverProcessIDCandidates: serverProcessIDCandidates,
                 sleep: { duration in
                     try? await Task.sleep(for: duration)
                 },
@@ -379,7 +544,14 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         var started = false
         var task: Task<Void, Never>?
         var lastAttemptUptimeByFingerprint: [String: UInt64] = [:]
+        var loggedInspectionFingerprints: Set<String> = []
         var didLogNoMatch = false
+    }
+
+    private struct MatchedWindow {
+        let processID: pid_t
+        let window: XcodePermissionDialogAXWindow
+        let decision: XcodePermissionDialogMatchDecision
     }
 
     private let dependencies: Dependencies
@@ -428,6 +600,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         let task: Task<Void, Never>? = stateLock.withLock {
             state.started = false
             state.lastAttemptUptimeByFingerprint.removeAll()
+            state.loggedInspectionFingerprints.removeAll()
             let task = state.task
             state.task = nil
             return task
@@ -465,6 +638,22 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         }
 
         return Set(candidates.filter { $0.isEmpty == false })
+    }
+
+    package static func defaultServerProcessIDCandidates(
+        parentProcessID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) -> Set<pid_t> {
+        var candidates: Set<pid_t> = [parentProcessID]
+        var pending = [parentProcessID]
+
+        while let currentProcessID = pending.popLast() {
+            for childProcessID in childProcessIDs(of: currentProcessID)
+            where candidates.insert(childProcessID).inserted {
+                pending.append(childProcessID)
+            }
+        }
+
+        return candidates
     }
 
     private func runMonitorLoop(dependencies: Dependencies) async {
@@ -509,8 +698,11 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         dependencies: Dependencies
     ) -> Set<String> {
         var visibleFingerprints: Set<String> = []
+        var visibleInspectionFingerprints: Set<String> = []
         var inspectedWindowTitles: [String] = []
+        var matchedWindows: [MatchedWindow] = []
         let processIDs = dependencies.axClient.runningXcodeProcessIDs()
+        let serverProcessIDCandidates = dependencies.serverProcessIDCandidates()
         let nowUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
 
         for processID in processIDs {
@@ -532,48 +724,84 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
                 if trimmedTitle.isEmpty == false, inspectedWindowTitles.count < 8 {
                     inspectedWindowTitles.append(trimmedTitle)
                 }
+                let isStructurallyEligible =
+                    XcodePermissionDialogMatcher.passesStructuralChecks(window.snapshot)
                 guard let decision = XcodePermissionDialogMatcher.decision(
                     for: window.snapshot,
                     processID: processID,
                     agentPathCandidates: agentPathCandidates,
-                    assistantNameCandidates: assistantNameCandidates
+                    assistantNameCandidates: assistantNameCandidates,
+                    serverProcessIDCandidates: serverProcessIDCandidates
                 ) else {
+                    if isStructurallyEligible {
+                        visibleInspectionFingerprints.insert(
+                            inspectionFingerprint(processID: processID, snapshot: window.snapshot)
+                        )
+                        logStructurallyEligibleWindowIfNeeded(
+                            processID: processID,
+                            snapshot: window.snapshot,
+                            agentPathCandidates: agentPathCandidates,
+                            assistantNameCandidates: assistantNameCandidates,
+                            dependencies: dependencies
+                        )
+                    }
                     continue
                 }
 
                 visibleFingerprints.insert(decision.fingerprint)
-
-                let shouldPress = stateLock.withLock { () -> Bool in
-                    if let lastAttempt = state.lastAttemptUptimeByFingerprint[decision.fingerprint],
-                       nowUptimeNanoseconds &- lastAttempt < retryIntervalNanoseconds
-                    {
-                        return false
-                    }
-                    state.lastAttemptUptimeByFingerprint[decision.fingerprint] = nowUptimeNanoseconds
-                    return true
-                }
-                guard shouldPress else {
-                    continue
-                }
-
-                do {
-                    try dependencies.axClient.pressDefaultButton(in: window)
-                    dependencies.logger.info(
-                        "Auto-approved the Xcode permission dialog.",
-                        metadata: [
-                            "pid": "\(processID)",
-                            "button": .string(decision.defaultButtonTitle),
-                        ]
+                visibleInspectionFingerprints.insert(decision.fingerprint)
+                matchedWindows.append(
+                    MatchedWindow(
+                        processID: processID,
+                        window: window,
+                        decision: decision
                     )
-                } catch {
-                    dependencies.logger.warning(
-                        "Matched the Xcode permission dialog but could not press its default button.",
-                        metadata: [
-                            "pid": "\(processID)",
-                            "error": "\(error)",
-                        ]
-                    )
+                )
+            }
+        }
+
+        stateLock.withLock {
+            state.loggedInspectionFingerprints =
+                state.loggedInspectionFingerprints.filter { visibleInspectionFingerprints.contains($0) }
+        }
+
+        for matchedWindow in matchedWindows {
+            logMatchedWindowIfNeeded(matchedWindow, dependencies: dependencies)
+
+            let shouldPress = stateLock.withLock { () -> Bool in
+                if let lastAttempt = state.lastAttemptUptimeByFingerprint[matchedWindow.decision.fingerprint],
+                   nowUptimeNanoseconds &- lastAttempt < retryIntervalNanoseconds
+                {
+                    return false
                 }
+                state.lastAttemptUptimeByFingerprint[matchedWindow.decision.fingerprint] =
+                    nowUptimeNanoseconds
+                return true
+            }
+            guard shouldPress else {
+                continue
+            }
+
+            do {
+                try dependencies.axClient.pressDefaultButton(in: matchedWindow.window)
+                dependencies.logger.info(
+                    "Auto-approved the Xcode permission dialog.",
+                    metadata: [
+                        "pid": "\(matchedWindow.processID)",
+                        "button": .string(matchedWindow.decision.defaultButtonTitle),
+                        "server_pid_candidates": .string(
+                            serverProcessIDCandidates.map(String.init).sorted().joined(separator: ",")
+                        ),
+                    ]
+                )
+            } catch {
+                dependencies.logger.warning(
+                    "Matched the Xcode permission dialog but could not press its default button.",
+                    metadata: [
+                        "pid": "\(matchedWindow.processID)",
+                        "error": "\(error)",
+                    ]
+                )
             }
         }
 
@@ -599,6 +827,115 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         }
 
         return visibleFingerprints
+    }
+
+    private func logStructurallyEligibleWindowIfNeeded(
+        processID: pid_t,
+        snapshot: XcodePermissionDialogWindowSnapshot,
+        agentPathCandidates: Set<String>,
+        assistantNameCandidates: Set<String>,
+        dependencies: Dependencies
+    ) {
+        let fingerprint = inspectionFingerprint(processID: processID, snapshot: snapshot)
+        let shouldLog = stateLock.withLock {
+            state.loggedInspectionFingerprints.insert(fingerprint).inserted
+        }
+        guard shouldLog else {
+            return
+        }
+
+        dependencies.logger.debug(
+            "Observed a structurally eligible Xcode modal window that did not match the assistant-name plus PID/path guard; auto-approve skipped.",
+            metadata: inspectionMetadata(
+                processID: processID,
+                snapshot: snapshot,
+                agentPathCandidates: agentPathCandidates,
+                assistantNameCandidates: assistantNameCandidates,
+                serverProcessIDCandidates: dependencies.serverProcessIDCandidates()
+            )
+        )
+    }
+
+    private func logMatchedWindowIfNeeded(
+        _ matchedWindow: MatchedWindow,
+        dependencies: Dependencies
+    ) {
+        let shouldLog = stateLock.withLock {
+            state.loggedInspectionFingerprints.insert(matchedWindow.decision.fingerprint).inserted
+        }
+        guard shouldLog else {
+            return
+        }
+
+        let snapshot = matchedWindow.window.snapshot
+        dependencies.logger.debug(
+            "Observed AX metadata for a matched Xcode permission dialog candidate.",
+            metadata: inspectionMetadata(
+                processID: matchedWindow.processID,
+                snapshot: snapshot,
+                agentPathCandidates: dependencies.agentPathCandidates(),
+                assistantNameCandidates: dependencies.assistantNameCandidates(),
+                serverProcessIDCandidates: dependencies.serverProcessIDCandidates()
+            )
+        )
+    }
+
+    private func inspectionMetadata(
+        processID: pid_t,
+        snapshot: XcodePermissionDialogWindowSnapshot,
+        agentPathCandidates: Set<String>,
+        assistantNameCandidates: Set<String>,
+        serverProcessIDCandidates: Set<pid_t>
+    ) -> Logger.Metadata {
+        [
+            "pid": "\(processID)",
+            "bundle_id": .string(snapshot.processBundleIdentifier ?? ""),
+            "window_identifier": .string(snapshot.windowIdentifier ?? ""),
+            "window_role": .string(snapshot.role ?? ""),
+            "window_subrole": .string(snapshot.subrole ?? ""),
+            "window_main": .string("\(snapshot.isMain ?? false)"),
+            "window_minimized": .string("\(snapshot.isMinimized ?? false)"),
+            "window_document": .string(snapshot.document ?? ""),
+            "window_children": .string("\(snapshot.childCount)"),
+            "window_has_proxy": .string("\(snapshot.hasProxy)"),
+            "default_button_identifier": .string(snapshot.defaultButton?.identifier ?? ""),
+            "default_button_role": .string(snapshot.defaultButton?.role ?? ""),
+            "cancel_button_identifier": .string(snapshot.cancelButton?.identifier ?? ""),
+            "cancel_button_role": .string(snapshot.cancelButton?.role ?? ""),
+            "agent_paths": .string(agentPathCandidates.sorted().joined(separator: " | ")),
+            "assistant_names": .string(assistantNameCandidates.sorted().joined(separator: " | ")),
+            "server_pid_candidates": .string(
+                serverProcessIDCandidates.map(String.init).sorted().joined(separator: ",")
+            ),
+        ]
+    }
+
+    private func inspectionFingerprint(
+        processID: pid_t,
+        snapshot: XcodePermissionDialogWindowSnapshot
+    ) -> String {
+        "candidate|\(XcodePermissionDialogMatcher.fingerprint(for: snapshot, processID: processID))"
+    }
+
+    private static func childProcessIDs(of parentProcessID: pid_t) -> [pid_t] {
+        let childCount = max(0, proc_listchildpids(parentProcessID, nil, 0))
+        guard childCount > 0 else {
+            return []
+        }
+
+        var childProcessIDs = Array<pid_t>(repeating: 0, count: Int(childCount))
+        let copiedCount = unsafe childProcessIDs.withUnsafeMutableBufferPointer { buffer in
+            unsafe proc_listchildpids(
+                parentProcessID,
+                buffer.baseAddress,
+                Int32(buffer.count * MemoryLayout<pid_t>.stride)
+            )
+        }
+        guard copiedCount > 0 else {
+            return []
+        }
+
+        return childProcessIDs.prefix(Int(copiedCount)).filter { $0 > 0 }
     }
 }
 

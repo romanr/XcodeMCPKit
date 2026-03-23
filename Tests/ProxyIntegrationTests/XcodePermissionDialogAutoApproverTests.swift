@@ -6,87 +6,200 @@ import Testing
 
 @Suite(.serialized)
 struct XcodePermissionDialogAutoApproverTests {
-    @Test func matcherRecognizesXcodePermissionDialogAndChoosesDefaultButton() {
-        let snapshot = XcodePermissionDialogWindowSnapshot(
-            title: "Allow “XcodeMCPKit” to access Xcode?",
+    @Test func matcherMatchesWhenSingleTextNodeContainsAssistantNameAndPID() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Access",
             textValues: [
-                "The agent “XcodeMCPKit” at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."
-            ],
-            isModal: true,
-            defaultButtonTitle: "Allow",
-            cancelButtonTitle: "Don't Allow"
+                "The agent XcodeMCPKit, PID 6119 wants to use Xcode's tools."
+            ]
         )
 
         let decision = XcodePermissionDialogMatcher.decision(
             for: snapshot,
-            processID: 6119,
-            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
-            assistantNameCandidates: []
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
         )
 
-        #expect(decision?.defaultButtonTitle == "allow")
         #expect(decision?.fingerprint.isEmpty == false)
+        #expect(decision?.defaultButtonTitle == "allow")
     }
 
-    @Test func matcherRecognizesDialogWhenPathContainsFormatCharactersAndCancelButtonIsUnavailable() {
-        let snapshot = XcodePermissionDialogWindowSnapshot(
-            title: "",
+    @Test func matcherMatchesWhenConfiguredAssistantNameAndPIDShareATextNode() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.ExternalViewService",
+            title: "許可",
             textValues: [
-                "Allow “XcodeMCPKit” to access Xcode?",
-                "The agent “XcodeMCPKit” at /\u{200B}tmp/\u{200B}build/\u{200B}xcode-mcp-proxy-server wants to use Xcode's tools."
-            ],
-            isModal: true,
-            defaultButtonTitle: "Allow",
-            cancelButtonTitle: nil
+                "The agent Custom MCP, PID 4317 wants to use Xcode's tools."
+            ]
         )
 
         let decision = XcodePermissionDialogMatcher.decision(
             for: snapshot,
-            processID: 4317,
-            agentPathCandidates: ["/tmp/build/xcode-mcp-proxy-server"],
-            assistantNameCandidates: []
+            processID: 500,
+            assistantNameCandidates: ["Custom MCP"],
+            serverProcessIDCandidates: [4317]
         )
 
         #expect(decision?.defaultButtonTitle == "allow")
     }
 
-    @Test func matcherRecognizesDialogFromAssistantNameWhenExecutablePathIsUnavailable() {
-        let snapshot = XcodePermissionDialogWindowSnapshot(
-            title: "Allow “XcodeMCPKit” to access Xcode?",
+    @Test func matcherRejectsLocalizedDialogThatContainsAssistantNameWithoutPID() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
             textValues: [
-                "The agent “XcodeMCPKit” wants to use Xcode's tools."
-            ],
-            isModal: true,
-            defaultButtonTitle: "Allow",
-            cancelButtonTitle: nil
+                "エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"
+            ]
         )
 
         let decision = XcodePermissionDialogMatcher.decision(
             for: snapshot,
             processID: 4317,
-            agentPathCandidates: [],
-            assistantNameCandidates: ["XcodeMCPKit"]
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test func matcherRejectsDialogThatContainsPIDWithoutAssistantName() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "The agent, PID 6119 wants to use Xcode's tools."
+            ]
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test func matcherMatchesDialogWhenAssistantNameAndPIDAppearInDifferentNodes() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "The agent XcodeMCPKit wants to use Xcode's tools.",
+                "PID 6119"
+            ]
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
         )
 
         #expect(decision?.defaultButtonTitle == "allow")
     }
 
-    @Test func matcherIgnoresUnrelatedXcodeDialogWithoutAgentPath() {
-        let snapshot = XcodePermissionDialogWindowSnapshot(
-            title: "Xcode",
+    @Test func matcherMatchesWhenAnyPIDCandidateSharesAWindowWithAssistantName() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
             textValues: [
-                "A build destination could not be found."
-            ],
-            isModal: true,
-            defaultButtonTitle: "OK",
-            cancelButtonTitle: "Cancel"
+                "The agent XcodeMCPKit wants to use Xcode's tools.",
+                "PID 7001"
+            ]
         )
 
         let decision = XcodePermissionDialogMatcher.decision(
             for: snapshot,
-            processID: 42,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119, 7001]
+        )
+
+        #expect(decision?.defaultButtonTitle == "allow")
+    }
+
+    @Test func matcherMatchesWhenAssistantNameAndAgentPathAppearWithoutPID() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "The agent XcodeMCPKit at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."
+            ]
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
             agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
-            assistantNameCandidates: []
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision?.defaultButtonTitle == "allow")
+    }
+
+    @Test func matcherMatchesWhenAgentPathAppearsAndAssistantNameCandidatesAreEmpty() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "The agent at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."
+            ]
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
+            assistantNameCandidates: [],
+            serverProcessIDCandidates: []
+        )
+
+        #expect(decision?.defaultButtonTitle == "allow")
+    }
+
+    @Test func matcherRejectsEnglishCopyWithoutAssistantNameAndPID() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow access",
+            textValues: [
+                "The agent wants to use Xcode's tools."
+            ]
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test func matcherRejectsNormalWorkspaceWindowEvenWhenTextContainsAssistantNameAndPID() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Project",
+            textValues: [
+                "XcodeMCPKit PID 6119"
+            ],
+            subrole: "AXStandardWindow",
+            isMain: true,
+            document: "file:///tmp/Project.xcodeproj",
+            hasProxy: true
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
         )
 
         #expect(decision == nil)
@@ -122,6 +235,7 @@ struct XcodePermissionDialogAutoApproverTests {
                 axClient: axClient,
                 agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
                 assistantNameCandidates: { ["XcodeMCPKit"] },
+                serverProcessIDCandidates: { [6119] },
                 sleep: { _ in },
                 pollInterval: .milliseconds(1),
                 logger: ProxyLogging.make("tests.permission")
@@ -136,6 +250,54 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(snapshot.promptCalls == 1)
         #expect(snapshot.windowScanCalls == 0)
     }
+}
+
+private func makeSnapshot(
+    processBundleIdentifier: String,
+    title: String,
+    textValues: [String],
+    role: String = "AXWindow",
+    subrole: String = "AXDialog",
+    windowIdentifier: String? = nil,
+    isModal: Bool = true,
+    isMain: Bool? = false,
+    isMinimized: Bool? = false,
+    document: String? = nil,
+    childCount: Int = 3,
+    hasProxy: Bool = false,
+    defaultButton: XcodePermissionDialogButtonSnapshot? = makeButton(title: "Allow"),
+    cancelButton: XcodePermissionDialogButtonSnapshot? = makeButton(title: "Cancel")
+) -> XcodePermissionDialogWindowSnapshot {
+    XcodePermissionDialogWindowSnapshot(
+        processBundleIdentifier: processBundleIdentifier,
+        title: title,
+        textValues: textValues,
+        role: role,
+        subrole: subrole,
+        windowIdentifier: windowIdentifier,
+        isModal: isModal,
+        isMain: isMain,
+        isMinimized: isMinimized,
+        document: document,
+        childCount: childCount,
+        hasProxy: hasProxy,
+        defaultButton: defaultButton,
+        cancelButton: cancelButton
+    )
+}
+
+private func makeButton(
+    title: String,
+    role: String = "AXButton",
+    subrole: String? = nil,
+    identifier: String? = nil
+) -> XcodePermissionDialogButtonSnapshot {
+    XcodePermissionDialogButtonSnapshot(
+        title: title,
+        role: role,
+        subrole: subrole,
+        identifier: identifier
+    )
 }
 
 private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialogAXAccessing {

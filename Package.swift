@@ -80,6 +80,7 @@ let package = Package(
                 "ProxyCore",
                 "ProxyRuntime",
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
             ],
             path: "Sources/ProxyFeatureXcode",

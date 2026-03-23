@@ -249,7 +249,10 @@ public final class ProxyServer {
 
         if let xcrunInvocation = xcrunInvocation(from: config) {
             candidates.append(xcrunInvocation.commandPath)
-            if let toolResolution = resolvedXcrunTool(from: xcrunInvocation.arguments) {
+            if let toolResolution = resolvedXcrunTool(
+                from: xcrunInvocation.arguments,
+                xcrunCommandPath: xcrunInvocation.commandPath
+            ) {
                 candidates.append(toolResolution)
             }
         }
@@ -281,11 +284,15 @@ public final class ProxyServer {
         return (resolvedCommand, remainingArguments)
     }
 
-    private static func resolvedXcrunTool(from upstreamArgs: [String]) -> String? {
+    private static func resolvedXcrunTool(
+        from upstreamArgs: [String],
+        xcrunCommandPath: String
+    ) -> String? {
         guard let selection = firstXcrunToolSelection(from: upstreamArgs) else {
             return nil
         }
         return resolvedXcrunToolPath(
+            xcrunCommandPath: xcrunCommandPath,
             toolName: selection.toolName,
             preToolArguments: selection.preToolArguments
         )
@@ -351,9 +358,22 @@ public final class ProxyServer {
         return nil
     }
 
-    private static func resolvedXcrunToolPath(toolName: String, preToolArguments: [String]) -> String? {
+    private static func resolvedXcrunToolPath(
+        xcrunCommandPath: String,
+        toolName: String,
+        preToolArguments: [String]
+    ) -> String? {
+        let executablePath: String
+        if xcrunCommandPath.contains("/") {
+            executablePath = URL(fileURLWithPath: xcrunCommandPath).standardizedFileURL.path
+        } else if let resolvedCommandPath = resolvedExecutablePath(for: xcrunCommandPath) {
+            executablePath = resolvedCommandPath
+        } else {
+            executablePath = "/usr/bin/xcrun"
+        }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = preToolArguments + ["--find", toolName]
         let stdout = Pipe()
         process.standardOutput = stdout

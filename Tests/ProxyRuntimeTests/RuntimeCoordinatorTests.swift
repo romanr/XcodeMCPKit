@@ -72,8 +72,22 @@ struct RuntimeCoordinatorTests {
         let response = try makeInitializeResponse(id: upstreamID)
         await upstream.yield(.message(response))
 
-        let response1 = try decodeJSON(from: try await future1.get())
-        let response2 = try decodeJSON(from: try await future2.get())
+        let response1 = try decodeJSON(
+            from: try await waitWithTimeout(
+                "waiting for first queued initialize response",
+                timeout: .seconds(2)
+            ) {
+                try await future1.get()
+            }
+        )
+        let response2 = try decodeJSON(
+            from: try await waitWithTimeout(
+                "waiting for second queued initialize response",
+                timeout: .seconds(2)
+            ) {
+                try await future2.get()
+            }
+        )
         let id1 = (response1["id"] as? NSNumber)?.intValue
         let id2 = (response2["id"] as? NSNumber)?.intValue
         #expect(id1 == 1)
@@ -140,8 +154,14 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
+        let timeoutClock = TestClock()
         let config = makeConfig(requestTimeout: 0.3)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+        )
         defer { manager.shutdown() }
 
         let future = manager.registerInitialize(
@@ -149,26 +169,44 @@ struct RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
-        let initialInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+
+        try await spinUntilSentCount(
+            upstream,
+            count: 1,
+            description: "waiting for initial initialize request"
+        )
+        let initialInitialize = try #require(await upstream.sentValue(at: 0))
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
 
         await upstream.overloadNextInitializedNotificationSend()
-        try await Task.sleep(for: .milliseconds(150))
+        await timeoutClock.sleep(untilSuspendedBy: 1)
+        timeoutClock.advance(by: .milliseconds(150))
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let retriedInitialize = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream,
+            count: 2,
+            description: "waiting for overloaded initialized notification send"
+        )
+        try await spinUntilSentCount(
+            upstream,
+            count: 3,
+            description: "waiting for retried initialize request"
+        )
+        let retriedInitialize = try #require(await upstream.sentValue(at: 2))
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
-        try await Task.sleep(for: .milliseconds(180))
+        await timeoutClock.sleep(untilSuspendedBy: 1)
+        timeoutClock.advance(by: .milliseconds(180))
         await upstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+        try await spinUntilSentCount(
+            upstream,
+            count: 4,
+            description: "waiting for retried initialized notification send"
+        )
 
-        _ = try await waitWithTimeout(
-            "retry initialize should still succeed after original timeout window passes",
-            timeout: .seconds(2)
-        ) {
-            try await future.get()
-        }
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil, "initializeResponse=\(response)")
     }
 
     @Test func sessionManagerRunsSecondaryWarmupAfterRecoveredInitializedNotification()
@@ -521,8 +559,14 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let timeoutClock = TestClock()
         let config = makeConfig(requestTimeout: 1)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+        )
         defer { manager.shutdown() }
 
         let request = makeInitializeRequest(id: 1)
@@ -531,19 +575,21 @@ struct RuntimeCoordinatorTests {
             requestObject: request,
             on: eventLoop
         )
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+
+        try await spinUntilSentCount(
+            upstream,
+            count: 1,
+            description: "waiting for initial initialize request"
+        )
         #expect((await upstream.sent()).count == 1)
 
-        do {
-            _ = try await waitWithTimeout(
-                "initialize request should fail with TimeoutError",
-                timeout: .seconds(2)
-            ) {
-                try await future.get()
-            }
-            #expect(Bool(false))
-        } catch {
-            #expect(error is TimeoutError)
+        await timeoutClock.sleep(untilSuspendedBy: 1)
+        timeoutClock.advance(by: .seconds(1))
+        try await spinUntil("waiting for initialize timeout state reset") {
+            manager.testStateSnapshot().initInFlight == false
+        }
+        await #expect(throws: TimeoutError.self) {
+            try await future.get()
         }
 
         _ = manager.registerInitialize(
@@ -551,7 +597,11 @@ struct RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
-        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        try await spinUntilSentCount(
+            upstream,
+            count: 2,
+            description: "waiting for second initialize request after timeout reset"
+        )
         #expect((await upstream.sent()).count == 2)
     }
 
@@ -854,18 +904,31 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let timeoutClock = TestClock()
         var config = makeConfig(requestTimeout: 0.1)
         config.configPath = configPath
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+        )
         defer { manager.shutdown() }
 
-        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                let snapshot = manager.testStateSnapshot()
-                return snapshot.initInFlight == false && snapshot.hasInitResult == false
-            }
+        try await spinUntilSentCount(
+            upstream,
+            count: 1,
+            description: "waiting for eager initialize request"
         )
+        await timeoutClock.sleep(untilSuspendedBy: 1)
+        timeoutClock.advance(by: .milliseconds(100))
+        try await spinUntil("waiting for eager initialize timeout") {
+            let snapshot = manager.testStateSnapshot()
+            return snapshot.initInFlight == false && snapshot.hasInitResult == false
+        }
+        let snapshot = manager.testStateSnapshot()
+        #expect(snapshot.initInFlight == false)
+        #expect(snapshot.hasInitResult == false)
 
         _ = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -885,7 +948,12 @@ struct RuntimeCoordinatorTests {
             on: eventLoop
         )
 
-        let resent = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream,
+            count: 2,
+            description: "waiting for resent initialize request"
+        )
+        let resent = try #require(await upstream.sentValue(at: 1))
         let object = try JSONSerialization.jsonObject(with: resent, options: []) as? [String: Any]
         let params = try #require(object?["params"] as? [String: Any])
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
@@ -1747,8 +1815,14 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let uptimeClock = TestUptimeClock(nowUptimeNanoseconds: 20_000_000_000)
         let config = makeConfig(requestTimeout: 2)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: { uptimeClock.now() }
+        )
         defer { manager.shutdown() }
 
         let initFuture = manager.registerInitialize(
@@ -1756,11 +1830,20 @@ struct RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
-        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream,
+            count: 1,
+            description: "waiting for eager initialize request"
+        )
+        let initRequest = try #require(await upstream.sentValue(at: 0))
         let initUpstreamID = try extractUpstreamID(from: initRequest)
         await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
         _ = try await initFuture.get()
-        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        try await spinUntilSentCount(
+            upstream,
+            count: 2,
+            description: "waiting for initialized notification"
+        )
 
         _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
         _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
@@ -1786,7 +1869,12 @@ struct RuntimeCoordinatorTests {
             try await future.get()
         }
 
-        let probe = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream,
+            count: 3,
+            description: "waiting for recovery probe request"
+        )
+        let probe = try #require(await upstream.sentValue(at: 2))
         #expect(methodName(from: probe) == "tools/list")
     }
 
@@ -1796,11 +1884,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let uptimeClock = TestUptimeClock(nowUptimeNanoseconds: 20_000_000_000)
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            nowUptimeNanoseconds: { uptimeClock.now() }
         )
         defer { manager.shutdown() }
 
@@ -1809,13 +1899,27 @@ struct RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
-        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream0,
+            count: 1,
+            description: "waiting for primary initialize request"
+        )
+        let init0 = try #require(await upstream0.sentValue(at: 0))
         let init0ID = try extractUpstreamID(from: init0)
         await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
         _ = try await initFuture.get()
-        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+        try await spinUntilSentCount(
+            upstream0,
+            count: 2,
+            description: "waiting for primary initialized notification"
+        )
 
-        let warmInitialize = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream1,
+            count: 1,
+            description: "waiting for secondary warm initialize request"
+        )
+        let warmInitialize = try #require(await upstream1.sentValue(at: 0))
         let warmInitID = try extractUpstreamID(from: warmInitialize)
 
         let activeDescriptor = SessionPipelineRequestDescriptor(
@@ -1843,8 +1947,12 @@ struct RuntimeCoordinatorTests {
         _ = activeFuture
 
         await upstream1.yield(.message(try makeInitializeResponse(id: warmInitID)))
-        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
-        let initializedNotification = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream1,
+            count: 2,
+            description: "waiting for secondary initialized notification"
+        )
+        let initializedNotification = try #require(await upstream1.sentValue(at: 1))
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
 
         _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
@@ -1882,11 +1990,16 @@ struct RuntimeCoordinatorTests {
             return eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
+        try await spinUntil("waiting for queued request to be visible") {
             manager.debugSnapshot().queuedRequestCount == 1
         }
 
-        let probeRequest = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream1,
+            count: 3,
+            description: "waiting for recovery probe request"
+        )
+        let probeRequest = try #require(await upstream1.sentValue(at: 2))
         #expect(methodName(from: probeRequest) == "tools/list")
         let probeID = try extractUpstreamID(from: probeRequest)
         let probeResponse: [String: Any] = [
@@ -1901,7 +2014,12 @@ struct RuntimeCoordinatorTests {
         )
 
         _ = try await queuedFuture.get()
-        let queuedRequest = try await sentValue(from: upstream1, at: 3, timeout: .seconds(2))
+        try await spinUntilSentCount(
+            upstream1,
+            count: 4,
+            description: "waiting for queued request dispatch after probe recovery"
+        )
+        let queuedRequest = try #require(await upstream1.sentValue(at: 3))
         #expect(methodName(from: queuedRequest) == "tools/list")
         #expect(try extractUpstreamID(from: queuedRequest) == 99)
 
@@ -3975,6 +4093,44 @@ private func waitForSentCount(
     } catch {
         let actual = await upstream.sentCount()
         throw WaitForSentCountError.timeout(expected: count, actual: actual)
+    }
+}
+
+private func makeDeterministicRuntimeTimeoutScheduler(
+    clock: TestClock
+) -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
+    { amount, operation in
+        let task = Task {
+            do {
+                try await clock.sleep(for: .nanoseconds(amount.nanoseconds))
+                operation()
+            } catch {
+                return
+            }
+        }
+        return RuntimeScheduledTimeout {
+            task.cancel()
+        }
+    }
+}
+
+private func spinUntilSentCount(
+    _ upstream: TestUpstreamClient,
+    count: Int,
+    description: String
+) async throws {
+    try await spinUntil(description, maxIterations: 1_000) {
+        await upstream.sentCount() >= count
+    }
+}
+
+private func spinUntilSentCount(
+    _ upstream: ToggleableOverloadUpstreamClient,
+    count: Int,
+    description: String
+) async throws {
+    try await spinUntil(description, maxIterations: 1_000) {
+        await upstream.sentCount() >= count
     }
 }
 

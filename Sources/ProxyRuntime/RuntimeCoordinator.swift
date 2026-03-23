@@ -149,6 +149,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package let upstreamSelectionPolicy: UpstreamSelectionPolicy
     package let upstreamSlotScheduler: UpstreamSlotScheduler
+    package let nowUptimeNanoseconds: @Sendable () -> UInt64
+    package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
+        RuntimeScheduledTimeout
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
@@ -157,9 +160,27 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.init(config: config, eventLoop: eventLoop, upstreams: upstreams)
     }
 
-    package init(config: ProxyConfig, eventLoop: EventLoop, upstreams: [any UpstreamSlotControlling]) {
+    package init(
+        config: ProxyConfig,
+        eventLoop: EventLoop,
+        upstreams: [any UpstreamSlotControlling],
+        nowUptimeNanoseconds: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
+            RuntimeScheduledTimeout)? = nil
+    ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
+        let uptimeProvider = nowUptimeNanoseconds
+        let timeoutScheduler = scheduleRuntimeTimeout
+            ?? { delay, operation in
+                RuntimeScheduledTimeout.schedule(
+                    on: eventLoop,
+                    in: delay,
+                    operation: operation
+                )
+            }
         self.config = config
         self.eventLoop = eventLoop
         self.upstreams = upstreams
@@ -168,11 +189,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.requestLeaseRegistry = RequestLeaseRegistry()
         self.responseCorrelationStore = ResponseCorrelationStore(upstreamCount: upstreams.count)
         self.upstreamSelectionPolicy = UpstreamSelectionPolicy(upstreamCount: upstreams.count)
+        self.nowUptimeNanoseconds = nowUptimeNanoseconds
+        self.scheduleRuntimeTimeout = timeoutScheduler
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             upstreamCount: upstreams.count,
             defaultCapacity: 1,
             canUseUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] upstreamIndex in
-                let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+                let nowUptimeNs = uptimeProvider()
                 guard let upstreamSelectionPolicy else { return false }
                 let evaluation = upstreamSelectionPolicy.evaluateUsableInitialized(
                     index: upstreamIndex,
@@ -186,7 +209,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 return evaluation.0
             },
             selectUpstream: { [weak upstreamSelectionPolicy = self.upstreamSelectionPolicy] occupied in
-                let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+                let nowUptimeNs = uptimeProvider()
                 let chooseResult = upstreamSelectionPolicy?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
                     occupiedUpstreams: occupied
@@ -340,7 +363,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package func chooseUpstreamIndex() -> Int? {
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let nowUptimeNs = nowUptimeNanoseconds()
         let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
 
         let chooseResult = upstreamSelectionPolicy.chooseBestInitializedUpstream(

@@ -576,7 +576,7 @@ extension RuntimeCoordinator {
         upstreamIndex: Int
     ) {
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
-        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let nowUptimeNs = nowUptimeNanoseconds()
         let initSnapshot = initializeGate.snapshot()
         let transition = upstreamSelectionPolicy.markProtocolViolation(
             upstreamIndex: upstreamIndex,

@@ -11,7 +11,7 @@ import XcodeMCPTestSupport
 
 @testable import ProxyHTTPTransport
 
-@Suite
+@Suite(.serialized)
 struct HTTPHandlerTests {
     @Test func httpHealthCheck() async throws {
         let config = makeConfig()
@@ -215,7 +215,7 @@ struct HTTPHandlerTests {
                 )
             }
 
-            await firstSent.wait()
+            try await firstSent.wait(description: "waiting for navigator issues request to start")
 
             let (httpResponse, data) = try await getHTTPData(url: makeDebugSnapshotURL(from: server.url))
             #expect(httpResponse.statusCode == 200)
@@ -1771,223 +1771,6 @@ struct HTTPHandlerTests {
         #expect(result?["resources"] == nil)
     }
 
-    @Test func httpRefreshCodeIssuesSerializesRequestsForSameTabIdentifier() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator()
-        let firstEntered = AsyncSignal()
-        let releaseFirst = AsyncSignal()
-        let secondEntered = NIOLockedValueBox(false)
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
-                await firstEntered.signal()
-                await releaseFirst.wait()
-            }
-        }
-        await firstEntered.wait()
-
-        let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
-                secondEntered.withLockedValue { value in
-                    value = true
-                }
-            }
-        }
-
-        await Task.yield()
-        await Task.yield()
-        #expect(secondEntered.withLockedValue { $0 } == false)
-
-        await releaseFirst.signal()
-        _ = await firstTask.value
-        _ = await secondTask.value
-        #expect(secondEntered.withLockedValue { $0 } == true)
-    }
-
-    @Test func httpRefreshCodeIssuesKeepsDifferentTabIdentifiersConcurrent() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator()
-        let firstEntered = AsyncSignal()
-        let secondEntered = AsyncSignal()
-        let releaseFirst = AsyncSignal()
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-a") { _ in
-                await firstEntered.signal()
-                await releaseFirst.wait()
-            }
-        }
-        await firstEntered.wait()
-
-        let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-b") { _ in
-                await secondEntered.signal()
-            }
-        }
-
-        await secondEntered.wait()
-        await releaseFirst.signal()
-        _ = await firstTask.value
-        _ = await secondTask.value
-        #expect(Bool(true))
-    }
-
-    @Test func httpRefreshCodeIssuesRejectsWhenPerKeyQueueLimitIsExceeded() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 8,
-            queueWaitTimeout: 5
-        )
-        let firstEntered = AsyncSignal()
-        let releaseFirst = AsyncSignal()
-        let secondEntered = AsyncSignal()
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
-                await firstEntered.signal()
-                await releaseFirst.wait()
-            }
-        }
-        await firstEntered.wait()
-
-        let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
-                await secondEntered.signal()
-            }
-        }
-
-        await Task.yield()
-        await Task.yield()
-
-        do {
-            _ = try await coordinator.withPermit(key: "windowtab-same") { _ in
-                ()
-            }
-            #expect(Bool(false))
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueLimitExceeded {
-            #expect(Bool(true))
-        }
-
-        await releaseFirst.signal()
-        await secondEntered.wait()
-        _ = await firstTask.value
-        _ = await secondTask.value
-    }
-
-    @Test func httpRefreshCodeIssuesRejectsWhenGlobalQueueLimitIsExceeded() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 4,
-            maxPendingTotal: 0,
-            queueWaitTimeout: 5
-        )
-        let firstEntered = AsyncSignal()
-        let releaseFirst = AsyncSignal()
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-a") { _ in
-                await firstEntered.signal()
-                await releaseFirst.wait()
-            }
-        }
-        await firstEntered.wait()
-
-        do {
-            _ = try await coordinator.withPermit(key: "windowtab-a") { _ in
-                ()
-            }
-            #expect(Bool(false))
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueLimitExceeded {
-            #expect(Bool(true))
-        }
-
-        await releaseFirst.signal()
-        _ = await firstTask.value
-    }
-
-    @Test func httpRefreshCodeIssuesTimeoutRemovesQueuedWaiter() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 4,
-            queueWaitTimeout: 0.05
-        )
-        let firstEntered = AsyncSignal()
-        let releaseFirst = AsyncSignal()
-        let thirdEntered = AsyncSignal()
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-timeout") { _ in
-                await firstEntered.signal()
-                await releaseFirst.wait()
-            }
-        }
-        await firstEntered.wait()
-
-        do {
-            _ = try await coordinator.withPermit(key: "windowtab-timeout") { _ in
-                ()
-            }
-            #expect(Bool(false))
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
-            #expect(Bool(true))
-        }
-
-        let thirdTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-timeout") { _ in
-                await thirdEntered.signal()
-            }
-        }
-
-        await Task.yield()
-        await releaseFirst.signal()
-        await thirdEntered.wait()
-        _ = await firstTask.value
-        _ = await thirdTask.value
-    }
-
-    @Test func httpRefreshCodeIssuesCancellationRemovesQueuedWaiter() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 4,
-            queueWaitTimeout: 5
-        )
-        let firstEntered = AsyncSignal()
-        let releaseFirst = AsyncSignal()
-        let thirdEntered = AsyncSignal()
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-cancel") { _ in
-                await firstEntered.signal()
-                await releaseFirst.wait()
-            }
-        }
-        await firstEntered.wait()
-
-        let cancelledTask = Task<Void, Error> {
-            _ = try await coordinator.withPermit(key: "windowtab-cancel") { _ in
-                ()
-            }
-        }
-        await Task.yield()
-        cancelledTask.cancel()
-        let cancelledResult = await cancelledTask.result
-        switch cancelledResult {
-        case .failure(let error):
-            #expect(error is CancellationError)
-        case .success:
-            #expect(Bool(false))
-        }
-
-        let thirdTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-cancel") { _ in
-                await thirdEntered.signal()
-            }
-        }
-
-        await Task.yield()
-        await releaseFirst.signal()
-        await thirdEntered.wait()
-        _ = await firstTask.value
-        _ = await thirdTask.value
-    }
-
     @Test func httpRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
@@ -2855,7 +2638,7 @@ struct HTTPHandlerTests {
                 return response.statusCode
             }
 
-            await firstSent.wait()
+            try await firstSent.wait(description: "waiting for first upstream refresh request")
 
             let (secondResponse, secondBody) = try await postHTTPJSON(
                 url: server.url,
@@ -2966,7 +2749,7 @@ struct HTTPHandlerTests {
                 return response.statusCode
             }
 
-            await firstSent.wait()
+            try await firstSent.wait(description: "waiting for first proxy refresh request")
 
             let (secondResponse, secondBody) = try await postHTTPJSON(
                 url: server.url,
@@ -3037,7 +2820,7 @@ struct HTTPHandlerTests {
                 return response.statusCode
             }
 
-            await firstSent.wait()
+            try await firstSent.wait(description: "waiting for first upstream timeout refresh request")
 
             let (secondResponse, secondBody) = try await postHTTPJSON(
                 url: server.url,
@@ -3148,7 +2931,7 @@ struct HTTPHandlerTests {
                 return response.statusCode
             }
 
-            await firstSent.wait()
+            try await firstSent.wait(description: "waiting for first proxy timeout refresh request")
 
             let (secondResponse, secondBody) = try await postHTTPJSON(
                 url: server.url,
@@ -4100,14 +3883,16 @@ private func postHTTPJSON(
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
 
-    let (responseData, response) = try await URLSession.shared.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse else {
-        throw HTTPTestError.missingResponseHead
+    return try await withTestURLSession { session in
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HTTPTestError.missingResponseHead
+        }
+        let object =
+            (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
+            ?? [:]
+        return (httpResponse, object)
     }
-    let object =
-        (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
-        ?? [:]
-    return (httpResponse, object)
 }
 
 private func postHTTPData(
@@ -4123,19 +3908,23 @@ private func postHTTPData(
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
 
-    let (responseData, response) = try await URLSession.shared.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse else {
-        throw HTTPTestError.missingResponseHead
+    return try await withTestURLSession { session in
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HTTPTestError.missingResponseHead
+        }
+        return RawHTTPResponse(statusCode: httpResponse.statusCode, bodyData: responseData)
     }
-    return RawHTTPResponse(statusCode: httpResponse.statusCode, bodyData: responseData)
 }
 
 private func getHTTPData(url: URL) async throws -> (HTTPURLResponse, Data) {
-    let (data, response) = try await URLSession.shared.data(from: url)
-    guard let httpResponse = response as? HTTPURLResponse else {
-        throw HTTPTestError.missingResponseHead
+    try await withTestURLSession { session in
+        let (data, response) = try await session.data(from: url)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HTTPTestError.missingResponseHead
+        }
+        return (httpResponse, data)
     }
-    return (httpResponse, data)
 }
 
 private func makeDebugSnapshotURL(from mcpURL: URL) -> URL {
@@ -4145,71 +3934,8 @@ private func makeDebugSnapshotURL(from mcpURL: URL) -> URL {
     return components.url!
 }
 
-private actor AsyncSignal {
-    private var signaled = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func wait() async {
-        if signaled {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
-    }
-
-    func signal() {
-        guard signaled == false else { return }
-        signaled = true
-        let continuations = waiters
-        waiters.removeAll()
-        for continuation in continuations {
-            continuation.resume()
-        }
-    }
-}
-
-private final class SyncSignal: @unchecked Sendable {
-    private struct State {
-        var signaled = false
-        var waiters: [CheckedContinuation<Void, Never>] = []
-    }
-
-    private let state = NIOLockedValueBox(State())
-
-    func wait() async {
-        if state.withLockedValue({ $0.signaled }) {
-            return
-        }
-
-        await withCheckedContinuation { continuation in
-            let shouldResume = state.withLockedValue { state in
-                if state.signaled {
-                    return true
-                }
-                state.waiters.append(continuation)
-                return false
-            }
-            if shouldResume {
-                continuation.resume()
-            }
-        }
-    }
-
-    func signal() {
-        let continuations = state.withLockedValue { state -> [CheckedContinuation<Void, Never>] in
-            guard state.signaled == false else { return [] }
-            state.signaled = true
-            let waiters = state.waiters
-            state.waiters.removeAll()
-            return waiters
-        }
-
-        for continuation in continuations {
-            continuation.resume()
-        }
-    }
-}
+private typealias AsyncSignal = TestSignal
+private typealias SyncSignal = TestSignal
 
 private func makeToolSuccessResponse(id: RPCID, text: String) throws -> Data {
     let response: [String: Any] = [

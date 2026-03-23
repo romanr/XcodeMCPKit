@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 package actor RefreshCodeIssuesCoordinator {
     package struct Permit: Sendable {
@@ -20,7 +21,8 @@ package actor RefreshCodeIssuesCoordinator {
 
     package nonisolated let maxPendingPerKey: Int
     package nonisolated let maxPendingTotal: Int
-    package nonisolated let queueWaitTimeoutNanoseconds: UInt64
+    package nonisolated let queueWaitTimeout: Duration
+    package nonisolated let queueWaitClock: any Clock<Duration> & Sendable
     private var nextWaiterID: UInt64 = 0
     private var busyKeys: Set<String> = []
     private var pendingWaiterCount = 0
@@ -41,13 +43,28 @@ package actor RefreshCodeIssuesCoordinator {
         maxPendingTotal: Int = 32,
         queueWaitTimeout: TimeInterval = 30
     ) {
+        self.init(
+            maxPendingPerKey: maxPendingPerKey,
+            maxPendingTotal: maxPendingTotal,
+            queueWaitTimeout: Self.duration(from: queueWaitTimeout),
+            queueWaitClock: ContinuousClock()
+        )
+    }
+
+    package init(
+        maxPendingPerKey: Int = 4,
+        maxPendingTotal: Int = 32,
+        queueWaitTimeout: Duration,
+        queueWaitClock: any Clock<Duration> & Sendable = ContinuousClock()
+    ) {
         self.maxPendingPerKey = max(0, maxPendingPerKey)
         self.maxPendingTotal = max(0, maxPendingTotal)
-        self.queueWaitTimeoutNanoseconds = Self.nanoseconds(from: queueWaitTimeout)
+        self.queueWaitTimeout = queueWaitTimeout
+        self.queueWaitClock = queueWaitClock
     }
 
     package nonisolated var queueWaitTimeoutSeconds: Double {
-        Double(queueWaitTimeoutNanoseconds) / 1_000_000_000
+        Self.seconds(from: queueWaitTimeout)
     }
 
     package func withPermit<T: Sendable>(
@@ -88,18 +105,16 @@ package actor RefreshCodeIssuesCoordinator {
             pendingTotal: pendingWaiterCount + 1
         )
 
-        let timeoutTask = Task { [queueWaitTimeoutNanoseconds] in
-            do {
-                try await Task.sleep(nanoseconds: queueWaitTimeoutNanoseconds)
-                self.timeoutWaiter(key: key, waiterID: waiterID)
-            } catch {
-                return
-            }
-        }
+        let timeoutTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
         return try await withTaskCancellationHandler(
             operation: {
-                defer { timeoutTask.cancel() }
+                defer {
+                    timeoutTaskBox.withLockedValue { task in
+                        task?.cancel()
+                        task = nil
+                    }
+                }
 
                 return try await withCheckedThrowingContinuation { continuation in
                     waitersByKey[key, default: []].append(
@@ -111,6 +126,18 @@ package actor RefreshCodeIssuesCoordinator {
                     )
                     pendingWaiterCount += 1
 
+                    let timeoutTask = Task { [queueWaitClock, queueWaitTimeout] in
+                        do {
+                            try await queueWaitClock.sleep(for: queueWaitTimeout)
+                            self.timeoutWaiter(key: key, waiterID: waiterID)
+                        } catch {
+                            return
+                        }
+                    }
+                    timeoutTaskBox.withLockedValue { task in
+                        task = timeoutTask
+                    }
+
                     if Task.isCancelled {
                         failWaiter(
                             key: key,
@@ -121,7 +148,10 @@ package actor RefreshCodeIssuesCoordinator {
                 }
             },
             onCancel: {
-                timeoutTask.cancel()
+                timeoutTaskBox.withLockedValue { task in
+                    task?.cancel()
+                    task = nil
+                }
                 Task {
                     await self.cancelWaiter(key: key, waiterID: waiterID)
                 }
@@ -182,5 +212,16 @@ package actor RefreshCodeIssuesCoordinator {
             return UInt64.max
         }
         return UInt64(nanoseconds.rounded(.up))
+    }
+
+    private static func seconds(from duration: Duration) -> Double {
+        let components = duration.components
+        return Double(components.seconds)
+            + (Double(components.attoseconds) / 1_000_000_000_000_000_000)
+    }
+
+    private static func duration(from interval: TimeInterval) -> Duration {
+        let clampedNanoseconds = min(nanoseconds(from: interval), UInt64(Int64.max))
+        return .nanoseconds(Int64(clampedNanoseconds))
     }
 }

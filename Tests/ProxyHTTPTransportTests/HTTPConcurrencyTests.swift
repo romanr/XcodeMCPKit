@@ -316,12 +316,14 @@ struct HTTPConcurrencyTests {
             async let first = postJSON(
                 url: url,
                 sessionID: sessionID,
-                payload: toolListPayload(id: 400)
+                payload: toolListPayload(id: 400),
+                timeout: 10
             )
             async let notification = postStatusOnly(
                 url: url,
                 sessionID: sessionID,
-                payload: notificationPayload(method: "notifications/test-progress")
+                payload: notificationPayload(method: "notifications/test-progress"),
+                timeout: 10
             )
 
             #expect(
@@ -361,12 +363,14 @@ struct HTTPConcurrencyTests {
             async let first = postJSON(
                 url: url,
                 sessionID: sessionID,
-                payload: toolListPayload(id: 600)
+                payload: toolListPayload(id: 600),
+                timeout: 10
             )
             async let second = postJSON(
                 url: url,
                 sessionID: sessionID,
-                payload: toolListPayload(id: 601)
+                payload: toolListPayload(id: 601),
+                timeout: 10
             )
 
             #expect(
@@ -645,19 +649,21 @@ struct HTTPConcurrencyTests {
             request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
 
             let sseTask = Task<(HTTPURLResponse, String), Error> {
-                let (bytes, response) = try await URLSession.shared.bytes(for: request)
-                guard let httpResponse = response as? HTTPURLResponse else {
+                try await withTestURLSession { session in
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        throw ConcurrencyTestError.invalidResponse
+                    }
+
+                    var iterator = bytes.lines.makeAsyncIterator()
+                    while let line = try await iterator.next() {
+                        if line.hasPrefix("data: ") {
+                            return (httpResponse, String(line.dropFirst(6)))
+                        }
+                    }
+
                     throw ConcurrencyTestError.invalidResponse
                 }
-
-                var iterator = bytes.lines.makeAsyncIterator()
-                while let line = try await iterator.next() {
-                    if line.hasPrefix("data: ") {
-                        return (httpResponse, String(line.dropFirst(6)))
-                    }
-                }
-
-                throw ConcurrencyTestError.invalidResponse
             }
             defer { sseTask.cancel() }
 
@@ -1362,36 +1368,23 @@ private func postJSON(
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
     }
 
-    let session: URLSession
-    if let timeout {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
-        session = URLSession(configuration: configuration)
-    } else {
-        session = URLSession.shared
-    }
-
-    defer {
-        if session !== URLSession.shared {
-            session.finishTasksAndInvalidate()
+    return try await withTestURLSession(timeout: timeout ?? 5) { session in
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConcurrencyTestError.invalidResponse
         }
+        let object =
+            (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
+            ?? [:]
+        return (httpResponse, object)
     }
-
-    let (responseData, response) = try await session.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse else {
-        throw ConcurrencyTestError.invalidResponse
-    }
-    let object =
-        (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
-        ?? [:]
-    return (httpResponse, object)
 }
 
 private func postStatusOnly(
     url: URL,
     sessionID: String?,
-    payload: [String: Any]
+    payload: [String: Any],
+    timeout: TimeInterval? = nil
 ) async throws -> HTTPURLResponse {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
@@ -1399,15 +1392,20 @@ private func postStatusOnly(
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let timeout {
+        request.timeoutInterval = timeout
+    }
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
     }
 
-    let (_, response) = try await URLSession.shared.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse else {
-        throw ConcurrencyTestError.invalidResponse
+    return try await withTestURLSession(timeout: timeout ?? 5) { session in
+        let (_, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConcurrencyTestError.invalidResponse
+        }
+        return httpResponse
     }
-    return httpResponse
 }
 
 private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyConfig {

@@ -9,14 +9,14 @@ package struct HealthProbeRequest: Sendable {
 
 package struct ProtocolViolationTransition: Sendable {
     package let quarantineUntil: UInt64
-    package let cancelledInitTimeout: Scheduled<Void>?
+    package let cancelledInitTimeout: RuntimeScheduledTimeout?
 }
 
 package final class UpstreamSelectionPolicy: Sendable {
     package struct UpstreamState: Sendable {
         package var isInitialized = false
         package var initInFlight = false
-        package var initTimeout: Scheduled<Void>?
+        package var initTimeout: RuntimeScheduledTimeout?
         package var didSendInitialized = false
         package var initUpstreamID: Int64?
         package var healthState: UpstreamHealthState = .healthy
@@ -50,9 +50,9 @@ package final class UpstreamSelectionPolicy: Sendable {
         state.withLockedValue { $0.upstreamStates.count }
     }
 
-    package func clearInitTimeoutsForShutdown() -> [Scheduled<Void>?] {
-        state.withLockedValue { state -> [Scheduled<Void>?] in
-            var timeouts: [Scheduled<Void>?] = []
+    package func clearInitTimeoutsForShutdown() -> [RuntimeScheduledTimeout?] {
+        state.withLockedValue { state -> [RuntimeScheduledTimeout?] in
+            var timeouts: [RuntimeScheduledTimeout?] = []
             timeouts.reserveCapacity(state.upstreamStates.count)
             for index in 0..<state.upstreamStates.count {
                 timeouts.append(state.upstreamStates[index].initTimeout)
@@ -299,7 +299,7 @@ package final class UpstreamSelectionPolicy: Sendable {
         }
     }
 
-    package func resetForDebug() -> [Scheduled<Void>?] {
+    package func resetForDebug() -> [RuntimeScheduledTimeout?] {
         state.withLockedValue { state in
             let timeouts = state.upstreamStates.map(\.initTimeout)
             state.upstreamStates = Array(repeating: UpstreamState(), count: state.upstreamStates.count)
@@ -326,7 +326,10 @@ package final class UpstreamSelectionPolicy: Sendable {
         }
     }
 
-    package func replaceInitTimeout(_ timeout: Scheduled<Void>, upstreamIndex: Int) -> Scheduled<Void>? {
+    package func replaceInitTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        upstreamIndex: Int
+    ) -> RuntimeScheduledTimeout? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             let existing = state.upstreamStates[upstreamIndex].initTimeout
@@ -366,7 +369,7 @@ package final class UpstreamSelectionPolicy: Sendable {
     }
 
     package func clearUpstreamState(upstreamIndex: Int) -> (
-        timeout: Scheduled<Void>?,
+        timeout: RuntimeScheduledTimeout?,
         initUpstreamID: Int64?
     )? {
         state.withLockedValue { state in
@@ -389,7 +392,7 @@ package final class UpstreamSelectionPolicy: Sendable {
         }
     }
 
-    package func markInitialized(upstreamIndex: Int) -> Scheduled<Void>? {
+    package func markInitialized(upstreamIndex: Int) -> RuntimeScheduledTimeout? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             state.upstreamStates[upstreamIndex].isInitialized = true

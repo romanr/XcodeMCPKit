@@ -1,9 +1,10 @@
 import Foundation
 import Testing
+import XcodeMCPTestSupport
 
 @testable import ProxyRuntime
 
-@Suite
+@Suite(.serialized)
 struct ProcessRunnerTests {
     @Test func dispatchGroupLeaveGuardLeavesOnlyOnce() {
         let group = DispatchGroup()
@@ -17,14 +18,19 @@ struct ProcessRunnerTests {
 
     @Test func processRunnerDrainsLargeStdoutWithoutHanging() async throws {
         let runner = ProcessRunner()
-        let output = try await runner.run(
-            ProcessRequest(
-                label: "large-stdout",
-                executablePath: "/bin/sh",
-                arguments: ["-c", "yes x | head -c 200000"],
-                input: nil
+        let output = try await waitWithTimeout(
+            "ProcessRunner should finish draining large stdout",
+            timeout: .seconds(5)
+        ) {
+            try await runner.run(
+                ProcessRequest(
+                    label: "large-stdout",
+                    executablePath: "/bin/sh",
+                    arguments: ["-c", "yes x | head -c 200000"],
+                    input: nil
+                )
             )
-        )
+        }
 
         #expect(output.terminationStatus == 0)
         #expect(output.stdout.utf8.count == 200000)
@@ -38,14 +44,19 @@ struct ProcessRunnerTests {
             return prefix + String(repeating: Character(scalar), count: 2048)
         }
         let expected = segments.joined()
-        let output = try await runner.run(
-            ProcessRequest(
-                label: "ordered-large-stdout",
-                executablePath: "/usr/bin/python3",
-                arguments: makePythonSegmentEmitterArgs(segments: segments, pauseSeconds: 0.0005),
-                input: nil
+        let output = try await waitWithTimeout(
+            "ProcessRunner should preserve large chunk ordering",
+            timeout: .seconds(5)
+        ) {
+            try await runner.run(
+                ProcessRequest(
+                    label: "ordered-large-stdout",
+                    executablePath: "/usr/bin/python3",
+                    arguments: makePythonSegmentEmitterArgs(segments: segments, pauseSeconds: 0.0005),
+                    input: nil
+                )
             )
-        )
+        }
 
         #expect(output.terminationStatus == 0)
         #expect(output.stdout == expected)

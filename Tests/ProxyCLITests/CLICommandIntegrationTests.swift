@@ -41,14 +41,19 @@ struct CLICommandIntegrationTests {
             inputPipe.fileHandleForWriting.write(request)
             inputPipe.fileHandleForWriting.closeFile()
 
-            let exitCode = await command.run(
-                args: [
-                    "xcode-mcp-proxy",
-                    "--url",
-                    server.url.absoluteString,
-                ],
-                environment: [:]
-            )
+            let exitCode = try await waitWithTimeout(
+                "CLI command should finish after stdin closes",
+                timeout: .seconds(5)
+            ) {
+                await command.run(
+                    args: [
+                        "xcode-mcp-proxy",
+                        "--url",
+                        server.url.absoluteString,
+                    ],
+                    environment: [:]
+                )
+            }
             outputPipe.fileHandleForWriting.closeFile()
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
 
@@ -178,3 +183,5 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         }
     }
 }
+
+extension XcodeMCPProxyCLICommand: @unchecked Sendable {}

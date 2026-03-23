@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 
 package struct AsyncTestTimeoutError: Error, CustomStringConvertible {
     package let description: String
@@ -125,6 +126,20 @@ package func waitUntil(
     return await condition()
 }
 
+package func spinUntil(
+    _ description: String = "condition was not satisfied",
+    maxIterations: Int = 200,
+    _ condition: @escaping @Sendable () async -> Bool
+) async throws {
+    for _ in 0..<maxIterations {
+        if await condition() {
+            return
+        }
+        await Task.yield()
+    }
+    throw AsyncTestTimeoutError(description: description)
+}
+
 package func waitUntilCount(
     _ expectedCount: Int,
     count: @escaping @Sendable () async -> Int,
@@ -186,4 +201,265 @@ package func shutdownAndWait(_ group: EventLoopGroup) {
         semaphore.signal()
     }
     semaphore.wait()
+}
+
+package func makeTestURLSession(
+    timeout: TimeInterval = 5,
+    waitsForConnectivity: Bool = false
+) -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.waitsForConnectivity = waitsForConnectivity
+    configuration.timeoutIntervalForRequest = timeout
+    configuration.timeoutIntervalForResource = timeout
+    return URLSession(configuration: configuration)
+}
+
+package func withTestURLSession<T>(
+    timeout: TimeInterval = 5,
+    waitsForConnectivity: Bool = false,
+    operation: (URLSession) async throws -> T
+) async throws -> T {
+    let session = makeTestURLSession(
+        timeout: timeout,
+        waitsForConnectivity: waitsForConnectivity
+    )
+
+    do {
+        let result = try await operation(session)
+        session.finishTasksAndInvalidate()
+        return result
+    } catch {
+        session.invalidateAndCancel()
+        throw error
+    }
+}
+
+package final class TestSignal: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private struct State {
+        var signaled = false
+        var waiters: [Waiter] = []
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    package init() {}
+
+    package func wait(
+        timeout: Duration = .seconds(2),
+        description: String
+    ) async throws {
+        if state.withLockedValue({ $0.signaled }) {
+            return
+        }
+
+        let waiterID = UUID()
+        try await waitWithTimeout(description, timeout: timeout) {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    let shouldResume = self.state.withLockedValue { state in
+                        if state.signaled {
+                            return true
+                        }
+                        state.waiters.append(Waiter(id: waiterID, continuation: continuation))
+                        return false
+                    }
+                    if shouldResume {
+                        continuation.resume(returning: ())
+                    }
+                }
+            } onCancel: {
+                self.cancelWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func signal() {
+        let waiters = state.withLockedValue { state -> [Waiter] in
+            guard state.signaled == false else {
+                return []
+            }
+            state.signaled = true
+            let waiters = state.waiters
+            state.waiters.removeAll()
+            return waiters
+        }
+
+        for waiter in waiters {
+            waiter.continuation.resume(returning: ())
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        let waiter = state.withLockedValue { state -> Waiter? in
+            guard let index = state.waiters.firstIndex(where: { $0.id == id }) else {
+                return nil
+            }
+            return state.waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(throwing: CancellationError())
+    }
+}
+
+package final class TestClock: Clock, @unchecked Sendable {
+    package typealias Instant = ContinuousClock.Instant
+    package typealias Duration = Swift.Duration
+
+    private struct SleepWaiter {
+        let deadline: Instant
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private struct SuspensionWaiter {
+        let minimumSleepers: Int
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private struct State {
+        var now: Instant
+        var sleepers: [UInt64: SleepWaiter] = [:]
+        var nextSleepToken: UInt64 = 0
+        var suspensionWaiters: [UInt64: SuspensionWaiter] = [:]
+        var nextSuspensionToken: UInt64 = 0
+    }
+
+    private let state: NIOLockedValueBox<State>
+
+    package init(now: Instant = ContinuousClock().now) {
+        self.state = NIOLockedValueBox(State(now: now))
+    }
+
+    package var now: Instant {
+        state.withLockedValue { $0.now }
+    }
+
+    package var minimumResolution: Duration {
+        .zero
+    }
+
+    package func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        _ = tolerance
+        let token = state.withLockedValue { state -> UInt64? in
+            guard deadline > state.now else {
+                return nil
+            }
+            let token = state.nextSleepToken
+            state.nextSleepToken &+= 1
+            return token
+        }
+
+        guard let token else {
+            return
+        }
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let continuations = state.withLockedValue { state -> [CheckedContinuation<Void, Never>] in
+                    state.sleepers[token] = SleepWaiter(deadline: deadline, continuation: continuation)
+                    return Self.resumeReadySuspensionWaiters(state: &state)
+                }
+                for continuation in continuations {
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            let waiter = state.withLockedValue { state in
+                state.sleepers.removeValue(forKey: token)
+            }
+            waiter?.continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    package func advance(by duration: Duration) {
+        let continuations = state.withLockedValue { state -> [CheckedContinuation<Void, Error>] in
+            state.now = state.now.advanced(by: duration)
+            let readyTokens = state.sleepers.compactMap { token, waiter in
+                waiter.deadline <= state.now ? token : nil
+            }
+            let readyWaiters = readyTokens.compactMap { state.sleepers.removeValue(forKey: $0) }
+            return readyWaiters.map(\.continuation)
+        }
+
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    package func sleep(untilSuspendedBy minimumSleepers: Int) async {
+        let token = state.withLockedValue { state -> UInt64? in
+            guard state.sleepers.count < minimumSleepers else {
+                return nil
+            }
+            let token = state.nextSuspensionToken
+            state.nextSuspensionToken &+= 1
+            return token
+        }
+
+        guard let token else {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            let shouldResume = state.withLockedValue { state in
+                if state.sleepers.count >= minimumSleepers {
+                    return true
+                }
+                state.suspensionWaiters[token] = SuspensionWaiter(
+                    minimumSleepers: minimumSleepers,
+                    continuation: continuation
+                )
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+
+    private static func resumeReadySuspensionWaiters(
+        state: inout State
+    ) -> [CheckedContinuation<Void, Never>] {
+        let readyTokens = state.suspensionWaiters.compactMap { token, waiter in
+            state.sleepers.count >= waiter.minimumSleepers ? token : nil
+        }
+        return readyTokens.compactMap { state.suspensionWaiters.removeValue(forKey: $0)?.continuation }
+    }
+}
+
+package final class TestUptimeClock: @unchecked Sendable {
+    private let value: NIOLockedValueBox<UInt64>
+
+    package init(nowUptimeNanoseconds: UInt64 = 0) {
+        self.value = NIOLockedValueBox(nowUptimeNanoseconds)
+    }
+
+    package func now() -> UInt64 {
+        value.withLockedValue { $0 }
+    }
+
+    package func advance(by duration: Duration) {
+        let delta = durationToNanoseconds(duration)
+        value.withLockedValue { current in
+            current &+= delta
+        }
+    }
+}
+
+private func durationToNanoseconds(_ duration: Duration) -> UInt64 {
+    let components = duration.components
+    let seconds = max(0, components.seconds)
+    let attoseconds = max(0, components.attoseconds)
+    let secondsComponent = UInt64(seconds).multipliedReportingOverflow(by: 1_000_000_000)
+    if secondsComponent.overflow {
+        return UInt64.max
+    }
+
+    let attosecondsComponent = UInt64(attoseconds / 1_000_000_000)
+    let total = secondsComponent.partialValue.addingReportingOverflow(attosecondsComponent)
+    return total.overflow ? UInt64.max : total.partialValue
 }

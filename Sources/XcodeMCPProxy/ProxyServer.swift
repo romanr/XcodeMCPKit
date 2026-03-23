@@ -279,11 +279,10 @@ public final class ProxyServer {
         )
     }
 
-    private static func firstXcrunToolSelection(from args: [String]) -> (toolName: String, preToolArguments: [String])? {
+    package static func firstXcrunToolSelection(from args: [String]) -> (toolName: String, preToolArguments: [String])? {
         let flagsWithValues: Set<String> = [
             "-sdk", "--sdk",
             "-toolchain", "--toolchain",
-            "-log", "--log",
         ]
 
         var index = 0

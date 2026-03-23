@@ -123,6 +123,25 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(decision?.defaultButtonTitle == "allow")
     }
 
+    @Test func matcherRejectsPIDSubstringMatchesInsideLargerNumbers() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "The agent XcodeMCPKit, PID 16119 wants to use Xcode's tools."
+            ]
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
     @Test func matcherMatchesWhenAssistantNameAndAgentPathAppearWithoutPID() {
         let snapshot = makeSnapshot(
             processBundleIdentifier: "com.apple.dt.Xcode",

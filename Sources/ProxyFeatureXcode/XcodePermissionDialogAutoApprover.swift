@@ -200,7 +200,7 @@ package enum XcodePermissionDialogMatcher {
         }
 
         let sameNodeMatch = normalizedTextNodes.contains { text in
-            serverProcessIDCandidates.contains(where: { text.contains($0) })
+            serverProcessIDCandidates.contains(where: { containsNumericToken($0, in: text) })
                 && assistantNameCandidates.contains(where: { text.contains($0) })
         }
         if sameNodeMatch {
@@ -211,7 +211,7 @@ package enum XcodePermissionDialogMatcher {
             assistantNameCandidates.contains(where: { text.contains($0) })
         }
         let containsPID = normalizedTextNodes.contains { text in
-            serverProcessIDCandidates.contains(where: { text.contains($0) })
+            serverProcessIDCandidates.contains(where: { containsNumericToken($0, in: text) })
         }
         if containsAssistantName && containsPID {
             return true
@@ -245,6 +245,28 @@ package enum XcodePermissionDialogMatcher {
 
     private static func normalizedPIDCandidates(_ candidates: Set<pid_t>) -> Set<String> {
         Set(candidates.map(String.init))
+    }
+
+    private static func containsNumericToken(_ candidate: String, in text: String) -> Bool {
+        guard candidate.isEmpty == false else {
+            return false
+        }
+
+        var currentDigits = ""
+        currentDigits.reserveCapacity(candidate.count)
+
+        for scalar in text.unicodeScalars {
+            if CharacterSet.decimalDigits.contains(scalar) {
+                currentDigits.unicodeScalars.append(scalar)
+                continue
+            }
+            if currentDigits == candidate {
+                return true
+            }
+            currentDigits.removeAll(keepingCapacity: true)
+        }
+
+        return currentDigits == candidate
     }
 
     private static func normalizedText(_ text: String?) -> String? {

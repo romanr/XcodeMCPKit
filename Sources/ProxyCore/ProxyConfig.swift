@@ -31,6 +31,7 @@ public struct ProxyConfig: Sendable {
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
     public var prewarmToolsList: Bool
+    public var autoApproveXcodeDialog: Bool
     public var refreshCodeIssuesMode: RefreshCodeIssuesMode
 
     public init(
@@ -47,6 +48,7 @@ public struct ProxyConfig: Sendable {
         stdioUpstreamURL: URL? = nil,
         stdioUpstreamSource: StdioUpstreamSource? = nil,
         prewarmToolsList: Bool = true,
+        autoApproveXcodeDialog: Bool = false,
         refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
     ) {
         self.listenHost = listenHost
@@ -62,6 +64,7 @@ public struct ProxyConfig: Sendable {
         self.stdioUpstreamURL = stdioUpstreamURL
         self.stdioUpstreamSource = stdioUpstreamSource
         self.prewarmToolsList = prewarmToolsList
+        self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
     }
 }
@@ -107,6 +110,7 @@ public struct CLIParser {
         var configPath: String?
         var stdioUpstreamURL: URL?
         var stdioUpstreamSource: StdioUpstreamSource?
+        var autoApproveXcodeDialog = false
         var refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
         var hasExplicitRefreshCodeIssuesMode = false
 
@@ -196,6 +200,9 @@ public struct CLIParser {
                 }
                 configPath = args[index + 1]
                 index += 2
+            case "--auto-approve":
+                autoApproveXcodeDialog = true
+                index += 1
             case "--refresh-code-issues-mode":
                 guard index + 1 < args.count else {
                     throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
@@ -259,6 +266,7 @@ public struct CLIParser {
             transport: transport,
             stdioUpstreamURL: stdioUpstreamURL,
             stdioUpstreamSource: stdioUpstreamSource,
+            autoApproveXcodeDialog: autoApproveXcodeDialog,
             refreshCodeIssuesMode: refreshCodeIssuesMode
         )
     }
@@ -279,6 +287,7 @@ public struct CLIParser {
           --max-body-bytes n         Max request body size (default: 1048576)
           --request-timeout seconds  Request timeout (default: 300, 0 disables non-initialize timeouts)
           --config path              Path to proxy config TOML (env \(configPathEnv))
+          --auto-approve             Auto-approve the Xcode permission dialog
           --refresh-code-issues-mode proxy|upstream
                                      Refresh implementation (default: proxy; env \(refreshCodeIssuesModeEnv))
           --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)

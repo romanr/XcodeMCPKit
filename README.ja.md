@@ -129,6 +129,7 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 | `--max-body-bytes n` | リクエストボディの最大サイズ |
 | `--request-timeout seconds` | リクエストタイムアウト設定（`0` で初期化以外のタイムアウトを無効化。`initialize` 時のハンドシェイクには固定のタイムアウトが適用されます） |
 | `--config path` | アップストリームのハンドシェイクを上書きするためのプロキシ設定（TOML）のパス |
+| `--auto-approve` | Xcode の許可ダイアログ自動承認を有効化する opt-in フラグ |
 | `--refresh-code-issues-mode mode` | `XcodeRefreshCodeIssuesInFile` の提供モード。プロキシ側のナビゲーター問題として処理（`proxy`、デフォルト）、または Xcode のライブ診断へパススルー（`upstream`） |
 | `--force-restart` | ポートが使用中の場合、既存の `xcode-mcp-proxy-server` を終了して再起動 |
 

@@ -10,6 +10,7 @@ struct ServerCommandTests {
             "xcode-mcp-proxy-server",
             "--listen",
             "127.0.0.1:9000",
+            "--auto-approve",
             "--refresh-code-issues-mode",
             "upstream",
             "--force-restart",
@@ -18,11 +19,13 @@ struct ServerCommandTests {
 
         #expect(options.forwardedArgs == [
             "--listen", "127.0.0.1:9000",
+            "--auto-approve",
             "--refresh-code-issues-mode", "upstream",
         ])
         #expect(options.showHelp == false)
         #expect(options.showVersion == false)
         #expect(options.hasListenFlag == true)
+        #expect(options.hasAutoApproveFlag == true)
         #expect(options.hasRefreshCodeIssuesModeFlag == true)
         #expect(options.forceRestart == true)
         #expect(options.dryRun == true)
@@ -124,6 +127,7 @@ struct ServerCommandTests {
             hasHostFlag: false,
             hasPortFlag: false,
             hasConfigFlag: false,
+            hasAutoApproveFlag: false,
             hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
@@ -155,6 +159,7 @@ struct ServerCommandTests {
             hasHostFlag: false,
             hasPortFlag: false,
             hasConfigFlag: true,
+            hasAutoApproveFlag: false,
             hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
@@ -181,6 +186,7 @@ struct ServerCommandTests {
             hasHostFlag: false,
             hasPortFlag: false,
             hasConfigFlag: false,
+            hasAutoApproveFlag: false,
             hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
@@ -431,7 +437,32 @@ struct ServerCommandTests {
         let line = try #require(output.snapshot().first)
         #expect(line.contains("--listen 127.0.0.1:9999"))
         #expect(line.contains("--config /tmp/proxy-config.toml"))
+        #expect(line.contains("--auto-approve") == false)
         #expect(line.contains("--lazy-init") == false)
+    }
+
+    @Test func serverCommandDryRunPrintsAutoApproveWhenExplicitlyEnabled() async throws {
+        let output = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { output.append($0) },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in RecordingProxyServer() },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy-server", "--auto-approve", "--dry-run"],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        let line = try #require(output.snapshot().first)
+        #expect(line.contains("--auto-approve"))
     }
 
     @Test func serverCommandTreatsHelpOnlyAsTopLevelFlag() async throws {

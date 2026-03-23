@@ -22,10 +22,10 @@ public final class ProxyServer {
         }
 
         package static func live(config: ProxyConfig) -> Self {
-            let additionalCandidates = ProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
             return Self(
                 makeAutoApprover: {
-                    XcodePermissionDialogAutoApprover(
+                    let additionalCandidates = ProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
+                    return XcodePermissionDialogAutoApprover(
                         dependencies: .live(
                             agentPathCandidates: {
                                 XcodePermissionDialogAutoApprover.defaultAgentPathCandidates(
@@ -397,9 +397,11 @@ public final class ProxyServer {
                 return true
             }
 
-            let autoApprover = dependencies.makeAutoApprover()
-            autoApprover.start()
-            permissionDialogAutoApprover = autoApprover
+            if config.autoApproveXcodeDialog {
+                let autoApprover = dependencies.makeAutoApprover()
+                autoApprover.start()
+                permissionDialogAutoApprover = autoApprover
+            }
 
             let sessionManager = dependencies.makeRuntimeCoordinator(config, group.next())
             self.sessionManager = sessionManager

@@ -19,6 +19,7 @@ package struct ProxyCLIServerScan {
     package var hasHostFlag = false
     package var hasPortFlag = false
     package var hasConfigFlag = false
+    package var hasAutoApproveFlag = false
     package var hasRefreshCodeIssuesModeFlag = false
     package var forceRestart = false
     package var dryRun = false
@@ -32,6 +33,7 @@ package struct ProxyCLIInstallScan {
 package enum ProxyCLIInvocationScanner {
     private static let serverOnlyFlags: Set<String> = [
         "--config",
+        "--auto-approve",
         "--listen",
         "--host",
         "--port",
@@ -187,6 +189,8 @@ package enum ProxyCLIInvocationScanner {
                 scan.hasPortFlag = true
             case "--config":
                 scan.hasConfigFlag = true
+            case "--auto-approve":
+                scan.hasAutoApproveFlag = true
             case "--refresh-code-issues-mode":
                 scan.hasRefreshCodeIssuesModeFlag = true
             default:

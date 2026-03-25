@@ -48,9 +48,6 @@ public final class ProxyServer {
     private let config: ProxyConfig
     private let dependencies: Dependencies
     private let group: EventLoopGroup
-    private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
-    private let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
-    private let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState
     private var channels: [Channel] = []
     private let logger: Logger = ProxyLogging.make("server")
     private let runtimeLock = NSLock()
@@ -67,15 +64,6 @@ public final class ProxyServer {
         self.config = config
         self.dependencies = dependencies
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
-            requestTimeout: config.requestTimeout
-        )
-        self.refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
-        self.refreshCodeIssuesDebugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: refreshCodeIssuesCoordinator.maxPendingPerKey,
-            maxPendingTotal: refreshCodeIssuesCoordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: refreshCodeIssuesCoordinator.queueWaitTimeoutSeconds
-        )
     }
 
     public func run() async throws {
@@ -102,16 +90,13 @@ public final class ProxyServer {
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer {
-                [runtimeHolder, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver, refreshCodeIssuesDebugState, logger] channel in
+                [runtimeHolder, config, logger] channel in
                 runtimeHolder.sessionManager(on: channel.eventLoop).flatMap { sessionManager in
                     channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                         channel.pipeline.addHandler(
                             HTTPHandler(
                                 config: config,
-                                sessionManager: sessionManager,
-                                refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                                refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-                                refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
+                                sessionManager: sessionManager
                             )
                         )
                     }

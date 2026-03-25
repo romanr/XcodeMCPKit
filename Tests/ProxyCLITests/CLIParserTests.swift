@@ -76,13 +76,23 @@ struct CLIParserTests {
         }
     }
 
-    @Test func cliParsesRefreshCodeIssuesMode() async throws {
-        let config = try CLIParser.parse(
-            args: ["xcode-mcp-proxy", "--refresh-code-issues-mode", "upstream"],
-            environment: [:]
-        )
+    @Test func cliRejectsRemovedRefreshCodeIssuesMode() async throws {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--refresh-code-issues-mode", "upstream"],
+                environment: [:]
+            )
+        }
 
-        #expect(config.refreshCodeIssuesMode == .upstream)
+        do {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--refresh-code-issues-mode", "upstream"],
+                environment: [:]
+            )
+            #expect(Bool(false))
+        } catch let error as CLIError {
+            #expect(error.description == CLIParser.removedRefreshCodeIssuesModeMessage)
+        }
     }
 
     @Test func cliParsesAutoApproveFlag() async throws {
@@ -143,13 +153,11 @@ struct CLIParserTests {
             environment: [
                 "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "MCP_XCODE_SESSION_ID": "session-xyz",
-                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
                 "MCP_XCODE_AUTO_APPROVE": "1",
             ]
         )
         #expect(config.configPath == "/tmp/proxy-config.toml")
         #expect(config.upstreamSessionID == "session-xyz")
-        #expect(config.refreshCodeIssuesMode == .upstream)
         #expect(config.autoApproveXcodeDialog == false)
     }
 
@@ -177,19 +185,27 @@ struct CLIParserTests {
         #expect(config.configPath == "/tmp/explicit.toml")
     }
 
-    @Test func cliExplicitRefreshCodeIssuesModeOverridesEnvironment() async throws {
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--refresh-code-issues-mode",
-                "proxy",
-            ],
-            environment: [
-                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream"
-            ]
-        )
+    @Test func cliRejectsRemovedRefreshCodeIssuesModeEnvironment() async throws {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy"],
+                environment: [
+                    "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream"
+                ]
+            )
+        }
 
-        #expect(config.refreshCodeIssuesMode == .proxy)
+        do {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy"],
+                environment: [
+                    "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream"
+                ]
+            )
+            #expect(Bool(false))
+        } catch let error as CLIError {
+            #expect(error.description == CLIParser.removedRefreshCodeIssuesModeEnvMessage)
+        }
     }
 
     @Test func cliParsesStdioUpstream() async throws {

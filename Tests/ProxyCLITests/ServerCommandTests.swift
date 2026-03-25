@@ -5,30 +5,35 @@ import ProxyCLI
 
 @Suite
 struct ServerCommandTests {
-    @Test func serverCommandParsesForceRestartAndDryRun() throws {
-        let options = try XcodeMCPProxyServerCommand.parseOptions(args: [
-            "xcode-mcp-proxy-server",
-            "--listen",
-            "127.0.0.1:9000",
-            "--auto-approve",
-            "--refresh-code-issues-mode",
-            "upstream",
-            "--force-restart",
-            "--dry-run",
-        ])
+    @Test func serverCommandRejectsRemovedRefreshCodeIssuesMode() throws {
+        #expect(throws: ProxyServerCommandError.self) {
+            _ = try XcodeMCPProxyServerCommand.parseOptions(args: [
+                "xcode-mcp-proxy-server",
+                "--listen",
+                "127.0.0.1:9000",
+                "--auto-approve",
+                "--refresh-code-issues-mode",
+                "upstream",
+                "--force-restart",
+                "--dry-run",
+            ])
+        }
 
-        #expect(options.forwardedArgs == [
-            "--listen", "127.0.0.1:9000",
-            "--auto-approve",
-            "--refresh-code-issues-mode", "upstream",
-        ])
-        #expect(options.showHelp == false)
-        #expect(options.showVersion == false)
-        #expect(options.hasListenFlag == true)
-        #expect(options.hasAutoApproveFlag == true)
-        #expect(options.hasRefreshCodeIssuesModeFlag == true)
-        #expect(options.forceRestart == true)
-        #expect(options.dryRun == true)
+        do {
+            _ = try XcodeMCPProxyServerCommand.parseOptions(args: [
+                "xcode-mcp-proxy-server",
+                "--listen",
+                "127.0.0.1:9000",
+                "--auto-approve",
+                "--refresh-code-issues-mode",
+                "upstream",
+                "--force-restart",
+                "--dry-run",
+            ])
+            #expect(Bool(false))
+        } catch let error as ProxyServerCommandError {
+            #expect(error.description == CLIParser.removedRefreshCodeIssuesModeMessage)
+        }
     }
 
     @Test func serverCommandPrintsVersionBeforeValidation() async throws {
@@ -128,26 +133,36 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasConfigFlag: false,
             hasAutoApproveFlag: false,
-            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )
 
-        try XcodeMCPProxyServerCommand.applyDefaults(
-            from: [
-                "HOST": "127.0.0.1",
-                "PORT": "9999",
-                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
-                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
-            ],
-            to: &options
-        )
+        #expect(throws: ProxyServerCommandError.self) {
+            try XcodeMCPProxyServerCommand.applyDefaults(
+                from: [
+                    "HOST": "127.0.0.1",
+                    "PORT": "9999",
+                    "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                    "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
+                ],
+                to: &options
+            )
+        }
 
-        #expect(options.forwardedArgs == [
-            "--listen", "127.0.0.1:9999",
-            "--config", "/tmp/proxy-config.toml",
-            "--refresh-code-issues-mode", "upstream",
-        ])
+        do {
+            try XcodeMCPProxyServerCommand.applyDefaults(
+                from: [
+                    "HOST": "127.0.0.1",
+                    "PORT": "9999",
+                    "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                    "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
+                ],
+                to: &options
+            )
+            #expect(Bool(false))
+        } catch let error as ProxyServerCommandError {
+            #expect(error.description == CLIParser.removedRefreshCodeIssuesModeEnvMessage)
+        }
     }
 
     @Test func serverCommandExplicitConfigOverridesEnvironment() throws {
@@ -160,7 +175,6 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasConfigFlag: true,
             hasAutoApproveFlag: false,
-            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )
@@ -187,7 +201,6 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasConfigFlag: false,
             hasAutoApproveFlag: false,
-            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )

@@ -7,7 +7,6 @@ import ProxyCore
 import ProxyRuntime
 import XcodeMCPTestSupport
 @testable import ProxyHTTPTransport
-import ProxyFeatureXcode
 
 @Suite(.serialized)
 struct HTTPConcurrencyTests {
@@ -753,16 +752,11 @@ private struct TestHTTPServer {
             upstreamArgs: ["mcpbridge"],
             upstreamSessionID: nil,
             maxBodyBytes: 1_048_576,
-            requestTimeout: requestTimeout,
-            refreshCodeIssuesMode: .upstream
+            requestTimeout: requestTimeout
         )
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
             config: config, eventLoop: group.next(), upstreams: [upstream])
-        let refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
-            requestTimeout: config.requestTimeout
-        )
-        let refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -772,9 +766,7 @@ private struct TestHTTPServer {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
-                            sessionManager: sessionManager,
-                            refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver
+                            sessionManager: sessionManager
                         )
                     )
                 }
@@ -1416,8 +1408,7 @@ private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyConfig {
         upstreamArgs: ["mcpbridge"],
         upstreamSessionID: nil,
         maxBodyBytes: 1_048_576,
-        requestTimeout: requestTimeout,
-        refreshCodeIssuesMode: .upstream
+        requestTimeout: requestTimeout
     )
 }
 
@@ -1428,11 +1419,7 @@ private func addEmbeddedHTTPHandler(
 ) throws {
     let handler = HTTPHandler(
         config: config,
-        sessionManager: sessionManager,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator.makeDefault(
-            requestTimeout: config.requestTimeout
-        ),
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver()
+        sessionManager: sessionManager
     )
     try channel.pipeline.addHandler(handler).wait()
 }

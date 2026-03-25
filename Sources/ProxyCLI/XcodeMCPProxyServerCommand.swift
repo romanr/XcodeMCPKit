@@ -13,7 +13,6 @@ package struct ProxyServerOptions {
     package var hasPortFlag: Bool
     package var hasConfigFlag: Bool
     package var hasAutoApproveFlag: Bool
-    package var hasRefreshCodeIssuesModeFlag: Bool
     package var forceRestart: Bool
     package var dryRun: Bool
 
@@ -26,7 +25,6 @@ package struct ProxyServerOptions {
         hasPortFlag: Bool,
         hasConfigFlag: Bool,
         hasAutoApproveFlag: Bool,
-        hasRefreshCodeIssuesModeFlag: Bool,
         forceRestart: Bool,
         dryRun: Bool
     ) {
@@ -38,7 +36,6 @@ package struct ProxyServerOptions {
         self.hasPortFlag = hasPortFlag
         self.hasConfigFlag = hasConfigFlag
         self.hasAutoApproveFlag = hasAutoApproveFlag
-        self.hasRefreshCodeIssuesModeFlag = hasRefreshCodeIssuesModeFlag
         self.forceRestart = forceRestart
         self.dryRun = dryRun
     }

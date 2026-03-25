@@ -5,7 +5,6 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import NIOHTTP1
 import ProxyCore
-import ProxyFeatureXcode
 import ProxyRuntime
 
 package enum HTTPPostResolution {
@@ -37,11 +36,6 @@ package enum HTTPPostResolution {
 package struct HTTPPostOperation {
     package let future: EventLoopFuture<HTTPPostResolution>
     package let cancellationHandle: HTTPPostCancellationHandle?
-}
-
-private struct RefreshWorkflowExecution {
-    let result: RefreshForwardAttemptResult
-    let usedDirectForwarding: Bool
 }
 
 package enum HTTPPostCancellationSource: String, Sendable {
@@ -114,38 +108,23 @@ package final class HTTPPostService: Sendable {
     private let sessionManager: any RuntimeCoordinating
     private let localResponder: LocalMCPResponder
     private let forwardingService: MCPForwardingService
-    private let windowQueryService: XcodeWindowQueryService
-    private let refreshWorkflow: RefreshCodeIssuesWorkflow
     private let requestTimeoutSeconds: TimeInterval
     private let logger: Logger
 
     package init(
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.requestTimeoutSeconds = config.requestTimeout
         self.sessionManager = sessionManager
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
-            refreshCodeIssuesMode: config.refreshCodeIssuesMode,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
             config: config,
             sessionManager: sessionManager
-        )
-        self.windowQueryService = XcodeWindowQueryService()
-        self.refreshWorkflow = RefreshCodeIssuesWorkflow(
-            mode: config.refreshCodeIssuesMode,
-            requestTimeout: config.requestTimeout,
-            coordinator: refreshCodeIssuesCoordinator,
-            targetResolver: refreshCodeIssuesTargetResolver,
-            debugState: refreshCodeIssuesDebugState,
-            logger: ProxyLogging.make("http.refresh")
         )
         self.logger = logger
     }
@@ -245,25 +224,6 @@ package final class HTTPPostService: Sendable {
             requestIDKeys: requestIDs.map(\.key)
         )
         let session = sessionManager.session(id: sessionID)
-        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
-        if refreshRequest != nil, requestIDs.isEmpty == false {
-            return HTTPPostOperation(
-                future: makeTopLevelRequestFuture(
-                    bodyData: bodyData,
-                    sessionID: sessionID,
-                    headerSessionID: headerSessionID,
-                    requestIDs: requestIDs,
-                    requestIsBatch: requestIsBatch,
-                    prefersEventStream: prefersEventStream,
-                    eventLoop: eventLoop,
-                    session: session,
-                    leaseID: leaseID,
-                    upstreamIndex: -1,
-                    cancellationHandle: cancellationHandle
-                ),
-                cancellationHandle: cancellationHandle
-            )
-        }
         let future = sessionManager.enqueueOnUpstreamSlot(
             leaseID: leaseID,
             descriptor: descriptor,
@@ -346,71 +306,18 @@ package final class HTTPPostService: Sendable {
         } catch {
             return makeImmediateLeaseResolution(
                 .mcpError(
-                id: nil,
-                ids: [],
-                code: -32700,
-                message: "invalid json",
-                forceBatchArray: false,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
+                    id: nil,
+                    ids: [],
+                    code: -32700,
+                    message: "invalid json",
+                    forceBatchArray: false,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
                 ),
                 leaseID: leaseID,
                 eventLoop: eventLoop,
                 cancellationHandle: cancellationHandle
             )
-        }
-
-        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
-
-        if let refreshRequest, requestIDs.isEmpty == false {
-            if headerSessionID == nil {
-                return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: requestIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                    ),
-                    leaseID: leaseID,
-                    eventLoop: eventLoop,
-                    cancellationHandle: cancellationHandle
-                )
-            }
-
-            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
-            Task { [self] in
-                let execution = await forwardRefreshCodeIssuesRequest(
-                    refreshRequest,
-                    bodyData: bodyData,
-                    sessionID: sessionID,
-                    requestIDs: requestIDs,
-                    requestIsBatch: requestIsBatch,
-                    eventLoop: eventLoop,
-                    leaseID: leaseID,
-                    cancellationHandle: cancellationHandle
-                )
-                eventLoop.execute {
-                    cancellationHandle?.markCompleted()
-                    promise.succeed(
-                        self.makeResolution(
-                            from: execution.result,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
-                    )
-                    if execution.usedDirectForwarding {
-                        if case .success = execution.result {
-                            self.sessionManager.completeRequestLease(leaseID)
-                        }
-                    } else {
-                        self.sessionManager.completeRequestLease(leaseID)
-                    }
-                }
-            }
-            return promise.futureResult
         }
 
         let prepared: MCPForwardingService.PreparedRequest
@@ -745,221 +652,6 @@ package final class HTTPPostService: Sendable {
         }
     }
 
-    private func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssuesRequest? {
-        guard let object = requestJSON as? [String: Any],
-            let method = object["method"] as? String,
-            method == "tools/call",
-            let params = object["params"] as? [String: Any],
-            let toolName = params["name"] as? String,
-            toolName == RefreshCodeIssuesRequest.toolName
-        else {
-            return nil
-        }
-
-        let arguments = params["arguments"] as? [String: Any]
-        let tabIdentifier = arguments?["tabIdentifier"] as? String
-        let filePath = arguments?["filePath"] as? String
-        return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier, filePath: filePath)
-    }
-
-    private func callInternalTool(
-        name: String,
-        arguments: [String: Any],
-        sessionID: String,
-        eventLoop: EventLoop,
-        upstreamIndexOverride: Int? = nil,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshInternalToolResult {
-        await forwardingService.callInternalTool(
-            name: name,
-            arguments: arguments,
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            upstreamIndexOverride: upstreamIndexOverride,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
-    }
-
-    private func listXcodeWindows(
-        sessionID: String,
-        eventLoop: EventLoop,
-        upstreamIndexOverride: Int? = nil,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> [XcodeWindowInfo]? {
-        await windowQueryService.listWindows(
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            toolCaller: { name, arguments, sessionID, eventLoop in
-                switch await self.callInternalTool(
-                    name: name,
-                    arguments: arguments,
-                    sessionID: sessionID,
-                    eventLoop: eventLoop,
-                    upstreamIndexOverride: upstreamIndexOverride,
-                    requestTimeoutOverride: requestTimeoutOverride
-                ) {
-                case .success(let result):
-                    return result
-                case .timeout, .unavailable:
-                    return nil
-                }
-            }
-        )
-    }
-
-    private func forwardOnce(
-        bodyData: Data,
-        sessionID: String,
-        requestIDs: [RPCID],
-        requestIsBatch: Bool,
-        eventLoop: EventLoop,
-        leaseID: RequestLeaseID,
-        cancellationHandle: HTTPPostCancellationHandle?,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshForwardAttemptResult {
-        let parsedRequestJSON: Any
-        do {
-            parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
-        } catch {
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .invalidUpstreamResponse
-            )
-            return .invalidRequest
-        }
-
-        let descriptor = Self.topLevelRequestDescriptor(
-            sessionID: sessionID,
-            parsedRequestJSON: parsedRequestJSON,
-            requestIsBatch: requestIsBatch,
-            requestIDs: requestIDs
-        )
-
-        do {
-            let session = sessionManager.session(id: sessionID)
-            let resolution = try await sessionManager.enqueueOnUpstreamSlot(
-                leaseID: leaseID,
-                descriptor: descriptor,
-                on: eventLoop,
-                preferredUpstreamIndex: nil
-            ) { selectedUpstreamIndex in
-                cancellationHandle?.activate(upstreamIndex: selectedUpstreamIndex)
-
-                let parsedAttemptRequestJSON: Any
-                do {
-                    parsedAttemptRequestJSON = try JSONSerialization.jsonObject(
-                        with: bodyData,
-                        options: []
-                    )
-                } catch {
-                    return eventLoop.makeSucceededFuture(
-                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
-                    )
-                }
-
-                let prepared: MCPForwardingService.PreparedRequest
-                do {
-                    guard let candidate = try self.forwardingService.prepareRequest(
-                        bodyData: bodyData,
-                        parsedRequestJSON: parsedAttemptRequestJSON,
-                        sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex
-                    ) else {
-                        return eventLoop.makeSucceededFuture(
-                            MCPForwardingService.ResponseResolution.invalidUpstreamResponse
-                        )
-                    }
-                    prepared = candidate
-                } catch {
-                    return eventLoop.makeSucceededFuture(
-                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
-                    )
-                }
-
-                let started: MCPForwardingService.StartedRequest
-                do {
-                    started = try self.forwardingService.startRequest(
-                        prepared,
-                        session: session,
-                        on: eventLoop,
-                        requestTimeoutOverride: requestTimeoutOverride,
-                        leaseID: leaseID,
-                        onTimeout: {
-                            self.sessionManager.handleRequestLeaseTimeout(
-                                leaseID,
-                                sessionID: sessionID,
-                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
-                                upstreamIndex: prepared.upstreamIndex
-                            )
-                        }
-                    )
-                    cancellationHandle?.bindRouterPendingToken(started.routerPendingToken)
-                } catch {
-                    return eventLoop.makeSucceededFuture(
-                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
-                    )
-                }
-
-                return started.future.map { buffer in
-                    self.forwardingService.resolveResponse(
-                        .success(buffer),
-                        started: started,
-                        sessionID: sessionID,
-                        accountTimeout: false
-                    )
-                }.flatMapErrorThrowing { error in
-                    self.forwardingService.resolveResponse(
-                        .failure(error),
-                        started: started,
-                        sessionID: sessionID,
-                        accountTimeout: false
-                    )
-                }
-            }.get()
-
-            switch resolution {
-            case .success(let responseData):
-                if RefreshCodeIssuesWorkflow.isRetryableRefreshCodeIssuesFailure(responseData) {
-                    sessionManager.requeueRequestLease(leaseID)
-                }
-                return .success(responseData)
-            case .timeout:
-                sessionManager.failRequestLease(
-                    leaseID,
-                    terminalState: .timedOut,
-                    reason: .timedOut
-                )
-                return .timeout(
-                    responseIDs: requestIDs,
-                    isBatch: requestIsBatch
-                )
-            case .invalidUpstreamResponse:
-                sessionManager.failRequestLease(
-                    leaseID,
-                    terminalState: .failed,
-                    reason: .invalidUpstreamResponse
-                )
-                return .invalidUpstreamResponse
-            }
-        } catch is CancellationError {
-            return .timeout(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
-        } catch {
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .upstreamUnavailable
-            )
-            return .upstreamUnavailable(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
-        }
-    }
-
     private static func requestLabel(from requestJSON: Any) -> String {
         if let object = requestJSON as? [String: Any] {
             let method = (object["method"] as? String) ?? "unknown"
@@ -990,142 +682,6 @@ package final class HTTPPostService: Sendable {
             expectsResponse: requestIDs.isEmpty == false,
             isTopLevelClientRequest: true
         )
-    }
-
-    private func forwardRefreshCodeIssuesRequest(
-        _ refreshRequest: RefreshCodeIssuesRequest,
-        bodyData: Data,
-        sessionID: String,
-        requestIDs: [RPCID],
-        requestIsBatch: Bool,
-        eventLoop: EventLoop,
-        leaseID: RequestLeaseID,
-        cancellationHandle: HTTPPostCancellationHandle?
-    ) async -> RefreshWorkflowExecution {
-        let usedDirectForwarding = NIOLockedValueBox(false)
-        let result = await refreshWorkflow.run(
-            refreshRequest: refreshRequest,
-            bodyData: bodyData,
-            sessionID: sessionID,
-            requestIDs: requestIDs,
-            requestIsBatch: requestIsBatch,
-            eventLoop: eventLoop,
-            windowsProvider: { sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
-                await self.listXcodeWindows(
-                    sessionID: sessionID,
-                    eventLoop: eventLoop,
-                    upstreamIndexOverride: upstreamIndexOverride,
-                    requestTimeoutOverride: requestTimeoutOverride
-                )
-            },
-            internalUpstreamChooser: { _ in
-                self.sessionManager.chooseUpstreamIndex()
-            },
-            internalToolCaller: {
-                name, arguments, sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
-                await self.callInternalTool(
-                    name: name,
-                    arguments: arguments,
-                    sessionID: sessionID,
-                    eventLoop: eventLoop,
-                    upstreamIndexOverride: upstreamIndexOverride,
-                    requestTimeoutOverride: requestTimeoutOverride
-                )
-            },
-            forwarder: {
-                bodyData, sessionID, requestIDs, requestIsBatch, eventLoop, requestTimeoutOverride in
-                usedDirectForwarding.withLockedValue { $0 = true }
-                return await self.forwardOnce(
-                    bodyData: bodyData,
-                    sessionID: sessionID,
-                    requestIDs: requestIDs,
-                    requestIsBatch: requestIsBatch,
-                    eventLoop: eventLoop,
-                    leaseID: leaseID,
-                    cancellationHandle: cancellationHandle,
-                    requestTimeoutOverride: requestTimeoutOverride
-                )
-            }
-        )
-        return RefreshWorkflowExecution(
-            result: result,
-            usedDirectForwarding: usedDirectForwarding.withLockedValue { $0 }
-        )
-    }
-
-    private func makeResolution(
-        from result: RefreshForwardAttemptResult,
-        sessionID: String,
-        prefersEventStream: Bool
-    ) -> HTTPPostResolution {
-        switch result {
-        case .success(let responseData):
-            return .responseData(
-                data: responseData,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
-        case .timeout(let responseIDs, let isBatch):
-            return .mcpError(
-                id: nil,
-                ids: responseIDs,
-                code: -32000,
-                message: "upstream timeout",
-                forceBatchArray: isBatch,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
-        case .upstreamUnavailable(let responseIDs, let isBatch):
-            if responseIDs.isEmpty {
-                return .plain(
-                    status: .serviceUnavailable,
-                    body: "upstream unavailable",
-                    sessionID: sessionID
-                )
-            }
-            return .mcpError(
-                id: nil,
-                ids: responseIDs,
-                code: -32001,
-                message: "upstream unavailable",
-                forceBatchArray: isBatch,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
-        case .overloaded(let responseIDs, let isBatch):
-            if responseIDs.isEmpty {
-                return .plain(
-                    status: .tooManyRequests,
-                    body: "refresh queue overloaded",
-                    sessionID: sessionID
-                )
-            }
-            return .mcpError(
-                id: nil,
-                ids: responseIDs,
-                code: -32003,
-                message: "refresh queue overloaded",
-                forceBatchArray: isBatch,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
-        case .invalidRequest:
-            return .mcpError(
-                id: nil,
-                ids: [],
-                code: -32700,
-                message: "invalid json",
-                forceBatchArray: false,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
-        case .invalidUpstreamResponse:
-            return .plain(
-                status: .badGateway,
-                body: "invalid upstream response",
-                sessionID: sessionID
-            )
-        }
     }
 
     private func makeImmediateLeaseResolution(

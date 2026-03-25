@@ -2745,6 +2745,48 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpDisabledToolCallReturnsLocalToolErrorWhenNoUpstreamIsAvailable() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { _, _ in
+                Issue.record("disabled tool call should not reach upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndex(nil)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-disabled-tool-no-upstream",
+                payload: toolsCallPayload(
+                    id: 111,
+                    name: "RunAllTests",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) == true)
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpDisabledToolNotificationReturnsAcceptedWithoutUpstream() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.disabledToolNames = ["RunAllTests"]
@@ -2778,6 +2820,73 @@ struct HTTPHandlerTests {
             #expect(rawResponse.statusCode == 202)
             #expect(rawResponse.bodyData.isEmpty)
             #expect(sessionManager.sentToolNames().isEmpty)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolBatchReturnsLocalAndQueueErrorsWhenNoUpstreamIsAvailable() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { _, _, _ in
+                Issue.record("batch should fail before reaching upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndex(nil)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-disabled-batch-no-upstream",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 211,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunAllTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 212,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "XcodeListWindows",
+                            "arguments": [:],
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+
+            let blocked = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 211 }
+            let blockedResult = blocked?["result"] as? [String: Any]
+            let blockedContent = blockedResult?["content"] as? [[String: Any]]
+            #expect((blockedResult?["isError"] as? Bool) == true)
+            #expect(blockedContent?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+
+            let forwarded = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 212 }
+            let forwardedError = forwarded?["error"] as? [String: Any]
+            #expect((forwardedError?["code"] as? NSNumber)?.intValue == -32001)
+            #expect(forwardedError?["message"] as? String == "upstream unavailable")
+
+            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
         } catch {
             await server.shutdown()
             throw error

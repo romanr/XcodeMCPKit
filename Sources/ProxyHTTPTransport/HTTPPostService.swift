@@ -111,10 +111,9 @@ package final class HTTPPostCancellationHandle: @unchecked Sendable {
 }
 
 package final class HTTPPostService: Sendable {
-    private struct FilteredToolCallRequest {
+    private struct FilteredToolCallRequest: Sendable {
         let bodyData: Data?
-        let requestJSON: Any?
-        let localResponseObjects: [[String: Any]]
+        let localResponseData: Data?
         let forwardedResponseIDs: [RPCID]
         let forceBatchArray: Bool
     }
@@ -258,27 +257,86 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        let filteredRequest: FilteredToolCallRequest
+        do {
+            filteredRequest = try filterDisabledToolCalls(
+                bodyData: bodyData,
+                parsedRequestJSON: parsedRequestJSON,
+                forceBatchArray: requestIsBatch
+            )
+        } catch {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: [],
+                        code: -32700,
+                        message: "invalid json",
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        guard let forwardedBodyData = filteredRequest.bodyData else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    Self.makeLocalResponseResolution(
+                        responseData: filteredRequest.localResponseData,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream,
+                        emptyStatus: .accepted
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        let forwardedRequestJSON: Any
+        do {
+            forwardedRequestJSON = try JSONSerialization.jsonObject(with: forwardedBodyData, options: [])
+        } catch {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: [],
+                        code: -32700,
+                        message: "invalid json",
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        let forwardedRequestIDs = filteredRequest.forwardedResponseIDs
+        let localResponseData = filteredRequest.localResponseData
         let descriptor = Self.topLevelRequestDescriptor(
             sessionID: sessionID,
-            parsedRequestJSON: parsedRequestJSON,
+            parsedRequestJSON: forwardedRequestJSON,
             requestIsBatch: requestIsBatch,
-            requestIDs: requestIDs
+            requestIDs: forwardedRequestIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
         let cancellationHandle = HTTPPostCancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
-            requestIDKeys: requestIDs.map(\.key)
+            requestIDKeys: forwardedRequestIDs.map(\.key)
         )
         let session = sessionManager.session(id: sessionID)
-        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
-        if refreshRequest != nil, requestIDs.isEmpty == false {
+        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: forwardedRequestJSON)
+        if refreshRequest != nil, forwardedRequestIDs.isEmpty == false {
             return HTTPPostOperation(
                 future: makeTopLevelRequestFuture(
-                    bodyData: bodyData,
+                    filteredRequest: filteredRequest,
                     sessionID: sessionID,
                     headerSessionID: headerSessionID,
-                    requestIDs: requestIDs,
                     requestIsBatch: requestIsBatch,
                     prefersEventStream: prefersEventStream,
                     eventLoop: eventLoop,
@@ -304,10 +362,9 @@ package final class HTTPPostService: Sendable {
                 timeout: nil
             )
             return self.makeTopLevelRequestFuture(
-                bodyData: bodyData,
+                filteredRequest: filteredRequest,
                 sessionID: sessionID,
                 headerSessionID: headerSessionID,
-                requestIDs: requestIDs,
                 requestIsBatch: requestIsBatch,
                 prefersEventStream: prefersEventStream,
                 eventLoop: eventLoop,
@@ -326,7 +383,22 @@ package final class HTTPPostService: Sendable {
                 terminalState: .failed,
                 reason: .upstreamOverloaded
             )
-            if requestIDs.isEmpty {
+            if localResponseData != nil {
+                return eventLoop.makeSucceededFuture(
+                    Self.makePartialBatchErrorResolution(
+                        localResponseData: localResponseData,
+                        responseIDs: forwardedRequestIDs,
+                        code: -32001,
+                        message: "upstream unavailable",
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream,
+                        forceBatchArray: filteredRequest.forceBatchArray,
+                        fallbackStatus: .serviceUnavailable,
+                        fallbackBody: "upstream unavailable"
+                    )
+                )
+            }
+            if forwardedRequestIDs.isEmpty {
                 return eventLoop.makeSucceededFuture(
                     .plain(
                         status: .serviceUnavailable,
@@ -338,7 +410,7 @@ package final class HTTPPostService: Sendable {
             return eventLoop.makeSucceededFuture(
                 .mcpError(
                     id: nil,
-                    ids: requestIDs,
+                    ids: forwardedRequestIDs,
                     code: -32001,
                     message: "upstream unavailable",
                     forceBatchArray: requestIsBatch,
@@ -354,10 +426,9 @@ package final class HTTPPostService: Sendable {
     }
 
     private func makeTopLevelRequestFuture(
-        bodyData: Data,
+        filteredRequest: FilteredToolCallRequest,
         sessionID: String,
         headerSessionID: String?,
-        requestIDs: [RPCID],
         requestIsBatch: Bool,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
@@ -366,19 +437,14 @@ package final class HTTPPostService: Sendable {
         upstreamIndex: Int,
         cancellationHandle: HTTPPostCancellationHandle?
     ) -> EventLoopFuture<HTTPPostResolution> {
-        let parsedRequestJSON: Any
-        do {
-            parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
-        } catch {
+        guard let forwardedBodyData = filteredRequest.bodyData
+        else {
             return makeImmediateLeaseResolution(
-                .mcpError(
-                id: nil,
-                ids: [],
-                code: -32700,
-                message: "invalid json",
-                forceBatchArray: false,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
+                Self.makeLocalResponseResolution(
+                    responseData: filteredRequest.localResponseData,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream,
+                    emptyStatus: .accepted
                 ),
                 leaseID: leaseID,
                 eventLoop: eventLoop,
@@ -386,13 +452,9 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        let filteredRequest: FilteredToolCallRequest
+        let forwardedRequestJSON: Any
         do {
-            filteredRequest = try filterDisabledToolCalls(
-                bodyData: bodyData,
-                parsedRequestJSON: parsedRequestJSON,
-                forceBatchArray: requestIsBatch
-            )
+            forwardedRequestJSON = try JSONSerialization.jsonObject(with: forwardedBodyData, options: [])
         } catch {
             return makeImmediateLeaseResolution(
                 .mcpError(
@@ -410,35 +472,15 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        guard let forwardedRequestJSON = filteredRequest.requestJSON,
-            let forwardedBodyData = filteredRequest.bodyData
-        else {
-            return makeImmediateLeaseResolution(
-                Self.makeLocalToolResponseResolution(
-                    localResponseObjects: filteredRequest.localResponseObjects,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream,
-                    forceBatchArray: filteredRequest.forceBatchArray
-                ),
-                leaseID: leaseID,
-                eventLoop: eventLoop,
-                cancellationHandle: cancellationHandle
-            )
-        }
-
-        let localResponseObjects = filteredRequest.localResponseObjects
-        let localResponseData = Self.makeToolResponseData(
-            from: localResponseObjects,
-            forceBatchArray: requestIsBatch
-        )
+        let localResponseData = filteredRequest.localResponseData
         let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: forwardedRequestJSON)
 
-        if let refreshRequest, requestIDs.isEmpty == false {
+        if let refreshRequest, filteredRequest.forwardedResponseIDs.isEmpty == false {
             if headerSessionID == nil {
                 return makeImmediateLeaseResolution(
                     .mcpError(
                     id: nil,
-                    ids: requestIDs,
+                    ids: filteredRequest.forwardedResponseIDs,
                     code: -32000,
                     message: "expected initialize request",
                     forceBatchArray: requestIsBatch,
@@ -457,7 +499,7 @@ package final class HTTPPostService: Sendable {
                     refreshRequest,
                     bodyData: forwardedBodyData,
                     sessionID: sessionID,
-                    requestIDs: requestIDs,
+                    requestIDs: filteredRequest.forwardedResponseIDs,
                     requestIsBatch: requestIsBatch,
                     eventLoop: eventLoop,
                     leaseID: leaseID,
@@ -492,7 +534,7 @@ package final class HTTPPostService: Sendable {
                 sessionID: sessionID,
                 upstreamIndexOverride: upstreamIndex
             ) else {
-                if localResponseObjects.isEmpty == false {
+                if localResponseData != nil {
                     return makeImmediateLeaseResolution(
                         Self.makePartialBatchErrorResolution(
                             localResponseData: localResponseData,
@@ -510,7 +552,7 @@ package final class HTTPPostService: Sendable {
                         cancellationHandle: cancellationHandle
                     )
                 }
-                if requestIDs.isEmpty {
+                if filteredRequest.forwardedResponseIDs.isEmpty {
                     return makeImmediateLeaseResolution(
                         .plain(
                         status: .serviceUnavailable,
@@ -525,7 +567,7 @@ package final class HTTPPostService: Sendable {
                 return makeImmediateLeaseResolution(
                     .mcpError(
                     id: nil,
-                    ids: requestIDs,
+                    ids: filteredRequest.forwardedResponseIDs,
                     code: -32001,
                     message: "upstream unavailable",
                     forceBatchArray: requestIsBatch,
@@ -763,11 +805,11 @@ package final class HTTPPostService: Sendable {
             ensureRunning: false
         )
         return makeImmediateLeaseResolution(
-            Self.makeNotificationResolution(
-                localResponseObjects: localResponseObjects,
+            Self.makeLocalResponseResolution(
+                responseData: localResponseData,
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream,
-                forceBatchArray: filteredRequest.forceBatchArray
+                emptyStatus: .accepted
             ),
             leaseID: leaseID,
             eventLoop: eventLoop,
@@ -852,8 +894,7 @@ package final class HTTPPostService: Sendable {
         guard disabledToolNames.isEmpty == false else {
             return FilteredToolCallRequest(
                 bodyData: bodyData,
-                requestJSON: parsedRequestJSON,
-                localResponseObjects: [],
+                localResponseData: nil,
                 forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
                 forceBatchArray: forceBatchArray
             )
@@ -863,21 +904,21 @@ package final class HTTPPostService: Sendable {
             guard let toolName = blockedToolName(from: object) else {
                 return FilteredToolCallRequest(
                     bodyData: bodyData,
-                    requestJSON: parsedRequestJSON,
-                    localResponseObjects: [],
+                    localResponseData: nil,
                     forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
                     forceBatchArray: forceBatchArray
                 )
             }
 
-            let localResponseObjects = Self.makeBlockedToolResponseObjects(
-                requestObject: object,
-                toolName: toolName
-            )
             return FilteredToolCallRequest(
                 bodyData: nil,
-                requestJSON: nil,
-                localResponseObjects: localResponseObjects,
+                localResponseData: Self.makeToolResponseData(
+                    from: Self.makeBlockedToolResponseObjects(
+                        requestObject: object,
+                        toolName: toolName
+                    ),
+                    forceBatchArray: forceBatchArray
+                ),
                 forwardedResponseIDs: [],
                 forceBatchArray: forceBatchArray
             )
@@ -886,8 +927,7 @@ package final class HTTPPostService: Sendable {
         guard let array = parsedRequestJSON as? [Any] else {
             return FilteredToolCallRequest(
                 bodyData: bodyData,
-                requestJSON: parsedRequestJSON,
-                localResponseObjects: [],
+                localResponseData: nil,
                 forwardedResponseIDs: [],
                 forceBatchArray: forceBatchArray
             )
@@ -913,21 +953,24 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        let localResponseData = Self.makeToolResponseData(
+            from: localResponseObjects,
+            forceBatchArray: forceBatchArray
+        )
+
         guard forwardedObjects.isEmpty == false else {
             return FilteredToolCallRequest(
                 bodyData: nil,
-                requestJSON: nil,
-                localResponseObjects: localResponseObjects,
+                localResponseData: localResponseData,
                 forwardedResponseIDs: [],
                 forceBatchArray: forceBatchArray
             )
         }
 
-        if localResponseObjects.isEmpty {
+        if localResponseData == nil {
             return FilteredToolCallRequest(
                 bodyData: bodyData,
-                requestJSON: parsedRequestJSON,
-                localResponseObjects: [],
+                localResponseData: nil,
                 forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
                 forceBatchArray: forceBatchArray
             )
@@ -939,8 +982,7 @@ package final class HTTPPostService: Sendable {
         )
         return FilteredToolCallRequest(
             bodyData: filteredBodyData,
-            requestJSON: forwardedObjects,
-            localResponseObjects: localResponseObjects,
+            localResponseData: localResponseData,
             forwardedResponseIDs: Self.extractResponseIDs(from: forwardedObjects),
             forceBatchArray: forceBatchArray
         )
@@ -1417,39 +1459,19 @@ package final class HTTPPostService: Sendable {
         return false
     }
 
-    private static func makeLocalToolResponseResolution(
-        localResponseObjects: [[String: Any]],
+    private static func makeLocalResponseResolution(
+        responseData: Data?,
         sessionID: String,
         prefersEventStream: Bool,
-        forceBatchArray: Bool
+        emptyStatus: HTTPResponseStatus
     ) -> HTTPPostResolution {
-        guard let responseData = makeToolResponseData(
-            from: localResponseObjects,
-            forceBatchArray: forceBatchArray
-        ) else {
-            return .empty(status: .accepted, sessionID: sessionID)
+        guard let responseData else {
+            return .empty(status: emptyStatus, sessionID: sessionID)
         }
         return .responseData(
             data: responseData,
             sessionID: sessionID,
             prefersEventStream: prefersEventStream
-        )
-    }
-
-    private static func makeNotificationResolution(
-        localResponseObjects: [[String: Any]],
-        sessionID: String,
-        prefersEventStream: Bool,
-        forceBatchArray: Bool
-    ) -> HTTPPostResolution {
-        guard localResponseObjects.isEmpty == false else {
-            return .empty(status: .accepted, sessionID: sessionID)
-        }
-        return makeLocalToolResponseResolution(
-            localResponseObjects: localResponseObjects,
-            sessionID: sessionID,
-            prefersEventStream: prefersEventStream,
-            forceBatchArray: forceBatchArray
         )
     }
 

@@ -329,6 +329,27 @@ package enum XcodePermissionDialogAXError: Error, CustomStringConvertible {
     }
 }
 
+package enum XcodePermissionDialogAXFailureClassifier {
+    private static let externalViewServiceBundleIdentifier = "com.apple.dt.ExternalViewService"
+    private static let windowsAttribute = kAXWindowsAttribute as String
+
+    package static func isBenignOpenWindowsFailure(
+        _ error: Error,
+        processBundleIdentifier: String?
+    ) -> Bool {
+        guard processBundleIdentifier == externalViewServiceBundleIdentifier else {
+            return false
+        }
+        guard let error = error as? XcodePermissionDialogAXError else {
+            return false
+        }
+        guard case .copyAttributeFailed(let attribute, let axError) = error else {
+            return false
+        }
+        return attribute == windowsAttribute && axError == .cannotComplete
+    }
+}
+
 package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessing {
     private let maxDescendantCount = 128
 
@@ -728,10 +749,24 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         let nowUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
 
         for processID in processIDs {
+            let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
             let windows: [XcodePermissionDialogAXWindow]
             do {
                 windows = try dependencies.axClient.openWindows(for: processID)
             } catch {
+                if XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
+                    error,
+                    processBundleIdentifier: processBundleIdentifier
+                ) {
+                    dependencies.logger.debug(
+                        "Ignoring benign AX window inspection failure for ExternalViewService.",
+                        metadata: [
+                            "pid": "\(processID)",
+                            "error": "\(error)",
+                        ]
+                    )
+                    continue
+                }
                 dependencies.logger.warning(
                     "Failed to inspect AX windows for a running Xcode-related process.",
                     metadata: [

@@ -25,10 +25,12 @@ package struct MCPForwardingService: Sendable {
     }
 
     private let config: ProxyConfig
+    private let disabledToolNames: Set<String>
     private let sessionManager: any RuntimeCoordinating
 
     package init(config: ProxyConfig, sessionManager: any RuntimeCoordinating) {
         self.config = config
+        self.disabledToolNames = config.disabledToolNames
         self.sessionManager = sessionManager
     }
 
@@ -136,13 +138,22 @@ package struct MCPForwardingService: Sendable {
                 originalID: started.transform.originalID,
                 upstreamData: data
             )
-            let responseData = Self.rewriteToolsListResponseIfNeeded(
+            let cacheableToolsListData = Self.rewriteToolsListResponseIfNeeded(
                 method: started.transform.method,
                 upstreamData: rewrittenResourcesData,
                 mode: config.refreshCodeIssuesMode
             )
+            let responseData = Self.rewriteToolsListResponseIfNeeded(
+                method: started.transform.method,
+                upstreamData: cacheableToolsListData,
+                mode: config.refreshCodeIssuesMode,
+                hiddenToolNames: disabledToolNames
+            )
             if started.transform.isCacheableToolsListRequest,
-                let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
+                let object = try? JSONSerialization.jsonObject(
+                    with: cacheableToolsListData,
+                    options: []
+                )
                     as? [String: Any],
                 let resultAny = object["result"],
                 let result = JSONValue(any: resultAny)
@@ -437,14 +448,16 @@ package struct MCPForwardingService: Sendable {
     private static func rewriteToolsListResponseIfNeeded(
         method: String?,
         upstreamData: Data,
-        mode: RefreshCodeIssuesMode
+        mode: RefreshCodeIssuesMode,
+        hiddenToolNames: Set<String> = []
     ) -> Data {
         guard method == "tools/list" else {
             return upstreamData
         }
         return RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
             upstreamData,
-            mode: mode
+            mode: mode,
+            hiddenToolNames: hiddenToolNames
         )
     }
 

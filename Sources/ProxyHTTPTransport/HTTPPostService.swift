@@ -111,7 +111,15 @@ package final class HTTPPostCancellationHandle: @unchecked Sendable {
 }
 
 package final class HTTPPostService: Sendable {
+    private struct FilteredToolCallRequest: Sendable {
+        let bodyData: Data?
+        let localResponseData: Data?
+        let forwardedResponseIDs: [RPCID]
+        let forceBatchArray: Bool
+    }
+
     private let sessionManager: any RuntimeCoordinating
+    private let disabledToolNames: Set<String>
     private let localResponder: LocalMCPResponder
     private let forwardingService: MCPForwardingService
     private let windowQueryService: XcodeWindowQueryService
@@ -129,9 +137,11 @@ package final class HTTPPostService: Sendable {
     ) {
         self.requestTimeoutSeconds = config.requestTimeout
         self.sessionManager = sessionManager
+        self.disabledToolNames = config.disabledToolNames
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
             refreshCodeIssuesMode: config.refreshCodeIssuesMode,
+            disabledToolNames: config.disabledToolNames,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
@@ -232,27 +242,101 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        if headerSessionID == nil,
+            let initializeResolution = Self.makeMissingInitializeResolution(
+                parsedRequestJSON: parsedRequestJSON,
+                requestIDs: requestIDs,
+                requestIsBatch: requestIsBatch,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream
+            )
+        {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(initializeResolution),
+                cancellationHandle: nil
+            )
+        }
+
+        let filteredRequest: FilteredToolCallRequest
+        do {
+            filteredRequest = try filterDisabledToolCalls(
+                bodyData: bodyData,
+                parsedRequestJSON: parsedRequestJSON,
+                forceBatchArray: requestIsBatch
+            )
+        } catch {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: [],
+                        code: -32700,
+                        message: "invalid json",
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        guard let forwardedBodyData = filteredRequest.bodyData else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    Self.makeLocalResponseResolution(
+                        responseData: filteredRequest.localResponseData,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream,
+                        emptyStatus: .accepted
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        let forwardedRequestJSON: Any
+        do {
+            forwardedRequestJSON = try JSONSerialization.jsonObject(with: forwardedBodyData, options: [])
+        } catch {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: [],
+                        code: -32700,
+                        message: "invalid json",
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        let forwardedRequestIDs = filteredRequest.forwardedResponseIDs
+        let localResponseData = filteredRequest.localResponseData
         let descriptor = Self.topLevelRequestDescriptor(
             sessionID: sessionID,
-            parsedRequestJSON: parsedRequestJSON,
+            parsedRequestJSON: forwardedRequestJSON,
             requestIsBatch: requestIsBatch,
-            requestIDs: requestIDs
+            requestIDs: forwardedRequestIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
         let cancellationHandle = HTTPPostCancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
-            requestIDKeys: requestIDs.map(\.key)
+            requestIDKeys: forwardedRequestIDs.map(\.key)
         )
         let session = sessionManager.session(id: sessionID)
-        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
-        if refreshRequest != nil, requestIDs.isEmpty == false {
+        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: forwardedRequestJSON)
+        if refreshRequest != nil, forwardedRequestIDs.isEmpty == false {
             return HTTPPostOperation(
                 future: makeTopLevelRequestFuture(
-                    bodyData: bodyData,
+                    filteredRequest: filteredRequest,
                     sessionID: sessionID,
                     headerSessionID: headerSessionID,
-                    requestIDs: requestIDs,
                     requestIsBatch: requestIsBatch,
                     prefersEventStream: prefersEventStream,
                     eventLoop: eventLoop,
@@ -278,10 +362,9 @@ package final class HTTPPostService: Sendable {
                 timeout: nil
             )
             return self.makeTopLevelRequestFuture(
-                bodyData: bodyData,
+                filteredRequest: filteredRequest,
                 sessionID: sessionID,
                 headerSessionID: headerSessionID,
-                requestIDs: requestIDs,
                 requestIsBatch: requestIsBatch,
                 prefersEventStream: prefersEventStream,
                 eventLoop: eventLoop,
@@ -300,7 +383,22 @@ package final class HTTPPostService: Sendable {
                 terminalState: .failed,
                 reason: .upstreamOverloaded
             )
-            if requestIDs.isEmpty {
+            if localResponseData != nil {
+                return eventLoop.makeSucceededFuture(
+                    Self.makePartialBatchErrorResolution(
+                        localResponseData: localResponseData,
+                        responseIDs: forwardedRequestIDs,
+                        code: -32001,
+                        message: "upstream unavailable",
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream,
+                        forceBatchArray: filteredRequest.forceBatchArray,
+                        fallbackStatus: .serviceUnavailable,
+                        fallbackBody: "upstream unavailable"
+                    )
+                )
+            }
+            if forwardedRequestIDs.isEmpty {
                 return eventLoop.makeSucceededFuture(
                     .plain(
                         status: .serviceUnavailable,
@@ -312,7 +410,7 @@ package final class HTTPPostService: Sendable {
             return eventLoop.makeSucceededFuture(
                 .mcpError(
                     id: nil,
-                    ids: requestIDs,
+                    ids: forwardedRequestIDs,
                     code: -32001,
                     message: "upstream unavailable",
                     forceBatchArray: requestIsBatch,
@@ -328,10 +426,9 @@ package final class HTTPPostService: Sendable {
     }
 
     private func makeTopLevelRequestFuture(
-        bodyData: Data,
+        filteredRequest: FilteredToolCallRequest,
         sessionID: String,
         headerSessionID: String?,
-        requestIDs: [RPCID],
         requestIsBatch: Bool,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
@@ -340,19 +437,14 @@ package final class HTTPPostService: Sendable {
         upstreamIndex: Int,
         cancellationHandle: HTTPPostCancellationHandle?
     ) -> EventLoopFuture<HTTPPostResolution> {
-        let parsedRequestJSON: Any
-        do {
-            parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
-        } catch {
+        guard let forwardedBodyData = filteredRequest.bodyData
+        else {
             return makeImmediateLeaseResolution(
-                .mcpError(
-                id: nil,
-                ids: [],
-                code: -32700,
-                message: "invalid json",
-                forceBatchArray: false,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
+                Self.makeLocalResponseResolution(
+                    responseData: filteredRequest.localResponseData,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream,
+                    emptyStatus: .accepted
                 ),
                 leaseID: leaseID,
                 eventLoop: eventLoop,
@@ -360,14 +452,35 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
+        let forwardedRequestJSON: Any
+        do {
+            forwardedRequestJSON = try JSONSerialization.jsonObject(with: forwardedBodyData, options: [])
+        } catch {
+            return makeImmediateLeaseResolution(
+                .mcpError(
+                    id: nil,
+                    ids: [],
+                    code: -32700,
+                    message: "invalid json",
+                    forceBatchArray: false,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                ),
+                leaseID: leaseID,
+                eventLoop: eventLoop,
+                cancellationHandle: cancellationHandle
+            )
+        }
 
-        if let refreshRequest, requestIDs.isEmpty == false {
+        let localResponseData = filteredRequest.localResponseData
+        let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: forwardedRequestJSON)
+
+        if let refreshRequest, filteredRequest.forwardedResponseIDs.isEmpty == false {
             if headerSessionID == nil {
                 return makeImmediateLeaseResolution(
                     .mcpError(
                     id: nil,
-                    ids: requestIDs,
+                    ids: filteredRequest.forwardedResponseIDs,
                     code: -32000,
                     message: "expected initialize request",
                     forceBatchArray: requestIsBatch,
@@ -384,9 +497,9 @@ package final class HTTPPostService: Sendable {
             Task { [self] in
                 let execution = await forwardRefreshCodeIssuesRequest(
                     refreshRequest,
-                    bodyData: bodyData,
+                    bodyData: forwardedBodyData,
                     sessionID: sessionID,
-                    requestIDs: requestIDs,
+                    requestIDs: filteredRequest.forwardedResponseIDs,
                     requestIsBatch: requestIsBatch,
                     eventLoop: eventLoop,
                     leaseID: leaseID,
@@ -416,12 +529,30 @@ package final class HTTPPostService: Sendable {
         let prepared: MCPForwardingService.PreparedRequest
         do {
             guard let candidate = try forwardingService.prepareRequest(
-                bodyData: bodyData,
-                parsedRequestJSON: parsedRequestJSON,
+                bodyData: forwardedBodyData,
+                parsedRequestJSON: forwardedRequestJSON,
                 sessionID: sessionID,
                 upstreamIndexOverride: upstreamIndex
             ) else {
-                if requestIDs.isEmpty {
+                if localResponseData != nil {
+                    return makeImmediateLeaseResolution(
+                        Self.makePartialBatchErrorResolution(
+                            localResponseData: localResponseData,
+                            responseIDs: filteredRequest.forwardedResponseIDs,
+                            code: -32001,
+                            message: "upstream unavailable",
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream,
+                            forceBatchArray: filteredRequest.forceBatchArray,
+                            fallbackStatus: .serviceUnavailable,
+                            fallbackBody: "upstream unavailable"
+                        ),
+                        leaseID: leaseID,
+                        eventLoop: eventLoop,
+                        cancellationHandle: cancellationHandle
+                    )
+                }
+                if filteredRequest.forwardedResponseIDs.isEmpty {
                     return makeImmediateLeaseResolution(
                         .plain(
                         status: .serviceUnavailable,
@@ -436,7 +567,7 @@ package final class HTTPPostService: Sendable {
                 return makeImmediateLeaseResolution(
                     .mcpError(
                     id: nil,
-                    ids: requestIDs,
+                    ids: filteredRequest.forwardedResponseIDs,
                     code: -32001,
                     message: "upstream unavailable",
                     forceBatchArray: requestIsBatch,
@@ -468,7 +599,7 @@ package final class HTTPPostService: Sendable {
 
         if prepared.transform.method == "tools/list" {
             let hasCache = sessionManager.cachedToolsListResult() != nil
-            let params = (parsedRequestJSON as? [String: Any])?["params"]
+            let params = (forwardedRequestJSON as? [String: Any])?["params"]
             let hasParams = params != nil && !(params is NSNull)
             logger.debug(
                 "tools/list cache miss; forwarding upstream",
@@ -526,7 +657,7 @@ package final class HTTPPostService: Sendable {
                     metadata: [
                         "lease_id": .string(leaseID.uuidString),
                         "session": .string(sessionID),
-                        "label": .string(Self.requestLabel(from: parsedRequestJSON)),
+                        "label": .string(Self.requestLabel(from: forwardedRequestJSON)),
                         "upstream": .string("\(prepared.upstreamIndex)"),
                         "timeout_ms": .string(
                             requestTimeoutOverride.map { "\($0.nanoseconds / 1_000_000)" }
@@ -592,7 +723,10 @@ package final class HTTPPostService: Sendable {
                     )
                     promise.succeed(
                         .responseData(
-                            data: responseData,
+                            data: Self.mergeLocalBatchResponses(
+                                into: responseData,
+                                localResponseData: localResponseData
+                            ),
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
@@ -639,14 +773,16 @@ package final class HTTPPostService: Sendable {
                         ]
                     )
                     promise.succeed(
-                        .mcpError(
-                            id: nil,
-                            ids: started.transform.responseIDs,
+                        Self.makePartialBatchErrorResolution(
+                            localResponseData: localResponseData,
+                            responseIDs: started.transform.responseIDs,
                             code: -32000,
                             message: "upstream timeout",
-                            forceBatchArray: started.transform.isBatch,
                             sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
+                            prefersEventStream: prefersEventStream,
+                            forceBatchArray: started.transform.isBatch,
+                            fallbackStatus: .ok,
+                            fallbackBody: ""
                         )
                     )
                 }
@@ -669,7 +805,12 @@ package final class HTTPPostService: Sendable {
             ensureRunning: false
         )
         return makeImmediateLeaseResolution(
-            .empty(status: .accepted, sessionID: sessionID),
+            Self.makeLocalResponseResolution(
+                responseData: localResponseData,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream,
+                emptyStatus: .accepted
+            ),
             leaseID: leaseID,
             eventLoop: eventLoop,
             cancellationHandle: cancellationHandle
@@ -743,6 +884,120 @@ package final class HTTPPostService: Sendable {
                 )
             )
         }
+    }
+
+    private func filterDisabledToolCalls(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        forceBatchArray: Bool
+    ) throws -> FilteredToolCallRequest {
+        guard disabledToolNames.isEmpty == false else {
+            return FilteredToolCallRequest(
+                bodyData: bodyData,
+                localResponseData: nil,
+                forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
+                forceBatchArray: forceBatchArray
+            )
+        }
+
+        if let object = parsedRequestJSON as? [String: Any] {
+            guard let toolName = blockedToolName(from: object) else {
+                return FilteredToolCallRequest(
+                    bodyData: bodyData,
+                    localResponseData: nil,
+                    forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
+                    forceBatchArray: forceBatchArray
+                )
+            }
+
+            return FilteredToolCallRequest(
+                bodyData: nil,
+                localResponseData: Self.makeToolResponseData(
+                    from: Self.makeBlockedToolResponseObjects(
+                        requestObject: object,
+                        toolName: toolName
+                    ),
+                    forceBatchArray: forceBatchArray
+                ),
+                forwardedResponseIDs: [],
+                forceBatchArray: forceBatchArray
+            )
+        }
+
+        guard let array = parsedRequestJSON as? [Any] else {
+            return FilteredToolCallRequest(
+                bodyData: bodyData,
+                localResponseData: nil,
+                forwardedResponseIDs: [],
+                forceBatchArray: forceBatchArray
+            )
+        }
+
+        var forwardedObjects: [Any] = []
+        forwardedObjects.reserveCapacity(array.count)
+        var localResponseObjects: [[String: Any]] = []
+        localResponseObjects.reserveCapacity(array.count)
+
+        for item in array {
+            guard let object = item as? [String: Any],
+                let toolName = blockedToolName(from: object)
+            else {
+                forwardedObjects.append(item)
+                continue
+            }
+            localResponseObjects.append(
+                contentsOf: Self.makeBlockedToolResponseObjects(
+                    requestObject: object,
+                    toolName: toolName
+                )
+            )
+        }
+
+        let localResponseData = Self.makeToolResponseData(
+            from: localResponseObjects,
+            forceBatchArray: forceBatchArray
+        )
+
+        guard forwardedObjects.isEmpty == false else {
+            return FilteredToolCallRequest(
+                bodyData: nil,
+                localResponseData: localResponseData,
+                forwardedResponseIDs: [],
+                forceBatchArray: forceBatchArray
+            )
+        }
+
+        if localResponseData == nil {
+            return FilteredToolCallRequest(
+                bodyData: bodyData,
+                localResponseData: nil,
+                forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
+                forceBatchArray: forceBatchArray
+            )
+        }
+
+        let filteredBodyData = try JSONSerialization.data(
+            withJSONObject: forwardedObjects,
+            options: []
+        )
+        return FilteredToolCallRequest(
+            bodyData: filteredBodyData,
+            localResponseData: localResponseData,
+            forwardedResponseIDs: Self.extractResponseIDs(from: forwardedObjects),
+            forceBatchArray: forceBatchArray
+        )
+    }
+
+    private func blockedToolName(from requestObject: [String: Any]) -> String? {
+        guard let method = requestObject["method"] as? String,
+            method == "tools/call",
+            let params = requestObject["params"] as? [String: Any],
+            let toolName = params["name"] as? String,
+            disabledToolNames.contains(toolName)
+        else {
+            return nil
+        }
+        return toolName
     }
 
     private func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssuesRequest? {
@@ -1160,5 +1415,278 @@ package final class HTTPPostService: Sendable {
         defaultSeconds: TimeInterval
     ) -> TimeAmount? {
         MCPMethodDispatcher.timeoutForMethod(method, defaultSeconds: defaultSeconds)
+    }
+
+    private static func makeMissingInitializeResolution(
+        parsedRequestJSON: Any,
+        requestIDs: [RPCID],
+        requestIsBatch: Bool,
+        sessionID: String,
+        prefersEventStream: Bool
+    ) -> HTTPPostResolution? {
+        guard requestRequiresInitialize(parsedRequestJSON) else {
+            return nil
+        }
+
+        if requestIDs.isEmpty {
+            return .plain(
+                status: .unprocessableEntity,
+                body: "expected initialize request",
+                sessionID: sessionID
+            )
+        }
+
+        return .mcpError(
+            id: nil,
+            ids: requestIDs,
+            code: -32000,
+            message: "expected initialize request",
+            forceBatchArray: requestIsBatch,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
+        )
+    }
+
+    private static func requestRequiresInitialize(_ parsedRequestJSON: Any) -> Bool {
+        if let object = parsedRequestJSON as? [String: Any] {
+            let method = object["method"] as? String
+            let expectsResponse = object["id"] != nil
+            return method != "initialize" || !expectsResponse
+        }
+        if parsedRequestJSON is [Any] {
+            return true
+        }
+        return false
+    }
+
+    private static func makeLocalResponseResolution(
+        responseData: Data?,
+        sessionID: String,
+        prefersEventStream: Bool,
+        emptyStatus: HTTPResponseStatus
+    ) -> HTTPPostResolution {
+        guard let responseData else {
+            return .empty(status: emptyStatus, sessionID: sessionID)
+        }
+        return .responseData(
+            data: responseData,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
+        )
+    }
+
+    private static func makePartialBatchErrorResolution(
+        localResponseData: Data?,
+        responseIDs: [RPCID],
+        code: Int,
+        message: String,
+        sessionID: String,
+        prefersEventStream: Bool,
+        forceBatchArray: Bool,
+        fallbackStatus: HTTPResponseStatus,
+        fallbackBody: String
+    ) -> HTTPPostResolution {
+        guard let localResponseData else {
+            if responseIDs.isEmpty {
+                return .plain(
+                    status: fallbackStatus,
+                    body: fallbackBody,
+                    sessionID: sessionID
+                )
+            }
+            return .mcpError(
+                id: nil,
+                ids: responseIDs,
+                code: code,
+                message: message,
+                forceBatchArray: forceBatchArray,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream
+            )
+        }
+
+        guard let localPayload = try? JSONSerialization.jsonObject(
+            with: localResponseData,
+            options: []
+        ) else {
+            if responseIDs.isEmpty {
+                return .plain(
+                    status: fallbackStatus,
+                    body: fallbackBody,
+                    sessionID: sessionID
+                )
+            }
+            return .mcpError(
+                id: nil,
+                ids: responseIDs,
+                code: code,
+                message: message,
+                forceBatchArray: forceBatchArray,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream
+            )
+        }
+
+        let localResponseObjects: [Any]
+        if let array = localPayload as? [Any] {
+            localResponseObjects = array
+        } else if let object = localPayload as? [String: Any] {
+            localResponseObjects = [object]
+        } else {
+            localResponseObjects = []
+        }
+
+        let mergedObjects =
+            localResponseObjects
+            + responseIDs.map { makeJSONRPCErrorResponseObject(id: $0, code: code, message: message) }
+        guard JSONSerialization.isValidJSONObject(mergedObjects),
+            let responseData = try? JSONSerialization.data(
+                withJSONObject: mergedObjects,
+                options: []
+            )
+        else {
+            if responseIDs.isEmpty {
+                return .plain(
+                    status: fallbackStatus,
+                    body: fallbackBody,
+                    sessionID: sessionID
+                )
+            }
+            return .mcpError(
+                id: nil,
+                ids: responseIDs,
+                code: code,
+                message: message,
+                forceBatchArray: forceBatchArray,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream
+            )
+        }
+
+        return .responseData(
+            data: responseData,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
+        )
+    }
+
+    private static func mergeLocalBatchResponses(
+        into responseData: Data,
+        localResponseData: Data?
+    ) -> Data {
+        guard let localResponseData,
+            let localPayload = try? JSONSerialization.jsonObject(
+                with: localResponseData,
+                options: []
+            )
+        else {
+            return responseData
+        }
+
+        guard let any = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
+            return responseData
+        }
+
+        let mergedObjects: [Any]
+        let localResponseObjects: [Any]
+        if let array = localPayload as? [Any] {
+            localResponseObjects = array
+        } else if let object = localPayload as? [String: Any] {
+            localResponseObjects = [object]
+        } else {
+            localResponseObjects = []
+        }
+
+        if let array = any as? [Any] {
+            mergedObjects = array + localResponseObjects
+        } else if let object = any as? [String: Any] {
+            mergedObjects = [object] + localResponseObjects
+        } else {
+            return responseData
+        }
+
+        return (try? JSONSerialization.data(withJSONObject: mergedObjects, options: []))
+            ?? responseData
+    }
+
+    private static func makeBlockedToolResponseObjects(
+        requestObject: [String: Any],
+        toolName: String
+    ) -> [[String: Any]] {
+        guard let requestID = requestObject["id"], let rpcID = RPCID(any: requestID) else {
+            return []
+        }
+        return [makeToolResultErrorResponseObject(id: rpcID, toolName: toolName)]
+    }
+
+    private static func makeToolResultErrorResponseObject(
+        id: RPCID,
+        toolName: String
+    ) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "tool '\(toolName)' is disabled by proxy config",
+                    ]
+                ],
+                "isError": true,
+            ],
+        ]
+    }
+
+    private static func makeJSONRPCErrorResponseObject(
+        id: RPCID,
+        code: Int,
+        message: String
+    ) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "error": [
+                "code": code,
+                "message": message,
+            ],
+        ]
+    }
+
+    private static func makeToolResponseData(
+        from responseObjects: [[String: Any]],
+        forceBatchArray: Bool
+    ) -> Data? {
+        guard responseObjects.isEmpty == false else {
+            return nil
+        }
+        let payload: Any = (forceBatchArray || responseObjects.count > 1)
+            ? responseObjects
+            : responseObjects[0]
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            return nil
+        }
+        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    private static func extractResponseIDs(from requestJSON: Any) -> [RPCID] {
+        if let object = requestJSON as? [String: Any] {
+            guard let rawID = object["id"], let rpcID = RPCID(any: rawID) else {
+                return []
+            }
+            return [rpcID]
+        }
+
+        guard let array = requestJSON as? [Any] else {
+            return []
+        }
+        return array.compactMap { item in
+            guard let object = item as? [String: Any],
+                let rawID = object["id"]
+            else {
+                return nil
+            }
+            return RPCID(any: rawID)
+        }
     }
 }

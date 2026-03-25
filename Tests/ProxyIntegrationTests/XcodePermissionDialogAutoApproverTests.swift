@@ -1,3 +1,4 @@
+import ApplicationServices
 import Foundation
 import Testing
 
@@ -222,6 +223,54 @@ struct XcodePermissionDialogAutoApproverTests {
         )
 
         #expect(decision == nil)
+    }
+
+    @Test func openWindowsFailureClassifierTreatsExternalViewServiceAXWindowsCannotCompleteAsBenign() {
+        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialogAXError.copyAttributeFailed(
+                attribute: kAXWindowsAttribute as String,
+                error: .cannotComplete
+            ),
+            processBundleIdentifier: "com.apple.dt.ExternalViewService"
+        )
+
+        #expect(isBenign)
+    }
+
+    @Test func openWindowsFailureClassifierRejectsXcodeAXWindowsCannotComplete() {
+        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialogAXError.copyAttributeFailed(
+                attribute: kAXWindowsAttribute as String,
+                error: .cannotComplete
+            ),
+            processBundleIdentifier: "com.apple.dt.Xcode"
+        )
+
+        #expect(isBenign == false)
+    }
+
+    @Test func openWindowsFailureClassifierRejectsExternalViewServiceForDifferentAttribute() {
+        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialogAXError.copyAttributeFailed(
+                attribute: kAXTitleAttribute as String,
+                error: .cannotComplete
+            ),
+            processBundleIdentifier: "com.apple.dt.ExternalViewService"
+        )
+
+        #expect(isBenign == false)
+    }
+
+    @Test func openWindowsFailureClassifierRejectsExternalViewServiceForDifferentAXError() {
+        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialogAXError.copyAttributeFailed(
+                attribute: kAXWindowsAttribute as String,
+                error: .attributeUnsupported
+            ),
+            processBundleIdentifier: "com.apple.dt.ExternalViewService"
+        )
+
+        #expect(isBenign == false)
     }
 
     @Test func defaultAgentPathCandidatesIncludeRawAndResolvedExecutablePaths() throws {

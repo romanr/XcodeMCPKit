@@ -1148,6 +1148,112 @@ struct HTTPHandlerTests {
         #expect(description == "original description")
     }
 
+    @Test func httpToolsListHidesDisabledToolsOnForwardedMiss() async throws {
+        var config = makeConfig()
+        config.disabledToolNames = ["RunAllTests", "RunSomeTests"]
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config) { method, originalID in
+            #expect(method == "tools/list")
+            let response: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": originalID.value.foundationObject,
+                "result": [
+                    "tools": [
+                        [
+                            "name": "RunAllTests",
+                            "description": "blocked",
+                        ],
+                        [
+                            "name": "RunSomeTests",
+                            "description": "blocked",
+                        ],
+                        [
+                            "name": "XcodeRefreshCodeIssuesInFile",
+                            "description": "original description",
+                        ],
+                    ]
+                ],
+            ]
+            return try JSONSerialization.data(withJSONObject: response, options: [])
+        }
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let sessionID = try initializeHTTPChannel(channel)
+        try postJSON(
+            [
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+            ],
+            sessionID: sessionID,
+            to: channel
+        )
+
+        let response = try collectResponse(from: channel)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+                as? [String: Any]
+        )
+        let result = try #require(object["result"] as? [String: Any])
+        let tools = try #require(result["tools"] as? [[String: Any]])
+        #expect(tools.map { $0["name"] as? String } == ["XcodeRefreshCodeIssuesInFile"])
+        #expect(tools.first?["description"] as? String == "original description")
+
+        let cachedResult = try #require(sessionManager.cachedToolsListResult())
+        let cachedObject = try #require(cachedResult.foundationObject as? [String: Any])
+        let cachedTools = try #require(cachedObject["tools"] as? [[String: Any]])
+        #expect(cachedTools.count == 3)
+    }
+
+    @Test func httpToolsListHidesDisabledToolsOnCachedResponse() async throws {
+        var config = makeConfig()
+        config.disabledToolNames = ["RunAllTests", "RunSomeTests"]
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [
+                    [
+                        "name": "RunAllTests",
+                        "description": "blocked",
+                    ],
+                    [
+                        "name": "RunSomeTests",
+                        "description": "blocked",
+                    ],
+                    [
+                        "name": "XcodeRefreshCodeIssuesInFile",
+                        "description": "original description",
+                    ],
+                ]
+            ])!
+        )
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let sessionID = try initializeHTTPChannel(channel)
+        try postJSON(
+            [
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+            ],
+            sessionID: sessionID,
+            to: channel
+        )
+
+        let response = try collectResponse(from: channel)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+                as? [String: Any]
+        )
+        let result = try #require(object["result"] as? [String: Any])
+        let tools = try #require(result["tools"] as? [[String: Any]])
+        #expect(tools.map { $0["name"] as? String } == ["XcodeRefreshCodeIssuesInFile"])
+        #expect(tools.first?["description"] as? String == "original description")
+    }
+
     @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -1658,7 +1764,6 @@ struct HTTPHandlerTests {
     #if false
     @Test func httpRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -1782,7 +1887,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenWindowLookupFailsAfterPreviousSuccess() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -1927,7 +2031,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenResolverCannotFindTarget() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2003,7 +2106,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesFails() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2197,7 +2299,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWithUnlimitedTimeout() async throws {
         var config = makeConfig(requestTimeout: 0)
-        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2285,7 +2386,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -2340,7 +2440,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesRetriesShortSourceEditorErrorFiveText() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -2395,7 +2494,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesDoesNotRetryNonRetryableToolError() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamPlanResponder: { method, originalID in
@@ -2482,9 +2580,433 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpDisabledToolCallReturnsLocalToolErrorWithoutUpstream() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { _, _ in
+                Issue.record("disabled tool call should not reach upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-disabled-tool",
+                payload: toolsCallPayload(
+                    id: 101,
+                    name: "RunAllTests",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) == true)
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            #expect(sessionManager.sentToolNames().isEmpty)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolCallReturnsLocalToolErrorWhenNoUpstreamIsAvailable() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { _, _ in
+                Issue.record("disabled tool call should not reach upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndex(nil)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-disabled-tool-no-upstream",
+                payload: toolsCallPayload(
+                    id: 111,
+                    name: "RunAllTests",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) == true)
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolNotificationReturnsAcceptedWithoutUpstream() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { _, _ in
+                Issue.record("disabled tool notification should not reach upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let rawResponse = try await postHTTPData(
+                url: server.url,
+                sessionID: "session-disabled-notification",
+                payload: [
+                    "jsonrpc": "2.0",
+                    "method": "tools/call",
+                    "params": [
+                        "name": "RunAllTests",
+                        "arguments": [:],
+                    ],
+                ]
+            )
+
+            #expect(rawResponse.statusCode == 202)
+            #expect(rawResponse.bodyData.isEmpty)
+            #expect(sessionManager.sentToolNames().isEmpty)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolBatchReturnsLocalAndQueueErrorsWhenNoUpstreamIsAvailable() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { _, _, _ in
+                Issue.record("batch should fail before reaching upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndex(nil)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-disabled-batch-no-upstream",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 211,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunAllTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 212,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "XcodeListWindows",
+                            "arguments": [:],
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+
+            let blocked = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 211 }
+            let blockedResult = blocked?["result"] as? [String: Any]
+            let blockedContent = blockedResult?["content"] as? [[String: Any]]
+            #expect((blockedResult?["isError"] as? Bool) == true)
+            #expect(blockedContent?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+
+            let forwarded = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 212 }
+            let forwardedError = forwarded?["error"] as? [String: Any]
+            #expect((forwardedError?["code"] as? NSNumber)?.intValue == -32001)
+            #expect(forwardedError?["message"] as? String == "upstream unavailable")
+
+            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolBatchReturnsLocalErrorsAndForwardsAllowedRequests() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests", "RunSomeTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(try makeToolSuccessResponse(id: originalID, text: "allowed"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-disabled-batch",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 201,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunAllTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunSomeTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 202,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "XcodeListWindows",
+                            "arguments": [:],
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+            let blocked = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 201 }
+            let blockedResult = blocked?["result"] as? [String: Any]
+            let blockedContent = blockedResult?["content"] as? [[String: Any]]
+            #expect((blockedResult?["isError"] as? Bool) == true)
+            #expect(blockedContent?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            let allowed = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 202 }
+            let allowedResult = allowed?["result"] as? [String: Any]
+            let allowedContent = allowedResult?["content"] as? [[String: Any]]
+            #expect(allowedContent?.first?["text"] as? String == "allowed")
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolBatchReturnsLocalOnlyResponseWhenAllRequestsAreBlocked() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests", "RunSomeTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { _, _ in
+                Issue.record("all-blocked batch should not reach upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-disabled-all-blocked",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 301,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunAllTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunSomeTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 1)
+            let blocked = bodyArray.first
+            let result = blocked?["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect((blocked?["id"] as? NSNumber)?.intValue == 301)
+            #expect((result?["isError"] as? Bool) == true)
+            #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            #expect(sessionManager.sentToolNames().isEmpty)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolNamesDoNotBlockInternalRefreshWorkflowCalls() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["XcodeListWindows"]
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-disabled-internal, workspacePath: \(workspacePath)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                    ]
+                                ],
+                                "structuredContent": [
+                                    "issues": [
+                                        [
+                                            "path": target.path,
+                                            "message": "target warning",
+                                            "line": 12,
+                                            "severity": "warning",
+                                        ]
+                                    ],
+                                    "totalFound": 1,
+                                    "truncated": false,
+                                ],
+                            ]
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-disabled-internal",
+                payload: toolsCallPayload(
+                    id: 401,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-disabled-internal",
+                        "filePath": "App/Sources/App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let issues = structuredContent?["issues"] as? [[String: Any]]
+            #expect(issues?.count == 1)
+            #expect(issues?.first?["path"] as? String == target.path)
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorWhenQueueIsFull() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 0,
             maxPendingTotal: 8,
@@ -2556,7 +3078,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshProxyReturnsBackpressureErrorWhenQueueIsFull() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 0,
             maxPendingTotal: 8,
@@ -2666,7 +3187,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 4,
             maxPendingTotal: 8,
@@ -2738,7 +3258,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshProxyReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 4,
             maxPendingTotal: 8,
@@ -2848,7 +3367,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshProxyInternalToolCallsDoNotResetUpstreamSuccessState() async throws {
         var config = makeConfig(requestTimeout: 0.2)
-        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2973,7 +3491,6 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -3135,6 +3652,64 @@ struct HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             #expect((result?["isError"] as? Bool) == true)
             #expect(sessionManager.sentUpstreamCount() == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpDisabledToolBatchDropsBlockedNotificationsBeforeForwarding() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(try makeToolSuccessResponse(id: originalID, text: "allowed"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-disabled-batch-notification",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunAllTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 401,
+                        "method": "tools/call",
+                        "params": [
+                            "name": "XcodeListWindows",
+                            "arguments": [:],
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 1)
+            let allowed = bodyArray.first
+            let allowedResult = allowed?["result"] as? [String: Any]
+            let allowedContent = allowedResult?["content"] as? [[String: Any]]
+            #expect((allowed?["id"] as? NSNumber)?.intValue == 401)
+            #expect(allowedContent?.first?["text"] as? String == "allowed")
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
         } catch {
             await server.shutdown()
             throw error
@@ -3399,10 +3974,20 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             state.upstreamSendCount += 1
         }
 
-        guard
-            let object = try? JSONSerialization.jsonObject(with: data, options: [])
-                as? [String: Any],
-            let method = object["method"] as? String,
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return
+        }
+        if let object = json as? [String: Any] {
+            handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
+            return
+        }
+        if let array = json as? [Any] {
+            handleBatchUpstreamRequest(array, upstreamIndex: upstreamIndex)
+        }
+    }
+
+    private func handleSingleUpstreamRequest(_ object: [String: Any], upstreamIndex: Int) {
+        guard let method = object["method"] as? String,
             let upstreamIDValue = object["id"]
         else {
             return
@@ -3424,23 +4009,11 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             return
         }
 
-        let responsePlan: UpstreamResponsePlan
-        if let upstreamRequestResponder,
-            let planned = try? upstreamRequestResponder(method, toolName, mapping.originalID)
-        {
-            responsePlan = planned
-        } else if let upstreamResponder,
-            let planned = try? upstreamResponder(method, mapping.originalID)
-        {
-            responsePlan = planned
-        } else if let legacyUpstreamResponder,
-            let responseData = try? legacyUpstreamResponder(method, mapping.originalID)
-        {
-            responsePlan = .immediate(responseData)
-        } else {
-            return
-        }
-
+        let responsePlan = responsePlan(
+            method: method,
+            toolName: toolName,
+            originalID: mapping.originalID
+        )
         let deliverResponse = { [self] in
             let session = self.session(id: mapping.sessionID)
             session.router.handleIncoming(responsePlan.data)
@@ -3462,6 +4035,92 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         } else {
             deliverResponse()
         }
+    }
+
+    private func handleBatchUpstreamRequest(_ array: [Any], upstreamIndex: Int) {
+        var sessionID: String?
+        var responseObjects: [Any] = []
+
+        for item in array {
+            guard let object = item as? [String: Any],
+                let method = object["method"] as? String
+            else {
+                continue
+            }
+            let toolName = ((object["params"] as? [String: Any])?["name"] as? String)
+            state.withLockedValue { state in
+                state.sentRequests.append(
+                    SentRequest(
+                        method: method,
+                        toolName: toolName,
+                        upstreamIndex: upstreamIndex
+                    )
+                )
+            }
+
+            guard let upstreamIDValue = object["id"] else {
+                continue
+            }
+            let upstreamID =
+                (upstreamIDValue as? NSNumber)?.int64Value ?? (upstreamIDValue as? Int64)
+            guard let upstreamID,
+                let mapping = state.withLockedValue({ $0.upstreamIDMapping[upstreamID] })
+            else {
+                continue
+            }
+            sessionID = mapping.sessionID
+
+            let planned = responsePlan(
+                method: method,
+                toolName: toolName,
+                originalID: mapping.originalID
+            )
+            guard planned.deliverManually == false, planned.delayNanos == nil,
+                let responseObject = try? JSONSerialization.jsonObject(
+                    with: planned.data,
+                    options: []
+                )
+            else {
+                return
+            }
+            responseObjects.append(responseObject)
+        }
+
+        guard let sessionID,
+            responseObjects.isEmpty == false,
+            let responseData = try? JSONSerialization.data(
+                withJSONObject: responseObjects,
+                options: []
+            )
+        else {
+            return
+        }
+
+        let session = self.session(id: sessionID)
+        session.router.handleIncoming(responseData)
+    }
+
+    private func responsePlan(
+        method: String,
+        toolName: String?,
+        originalID: RPCID
+    ) -> UpstreamResponsePlan {
+        if let upstreamRequestResponder,
+            let planned = try? upstreamRequestResponder(method, toolName, originalID)
+        {
+            return planned
+        }
+        if let upstreamResponder,
+            let planned = try? upstreamResponder(method, originalID)
+        {
+            return planned
+        }
+        if let legacyUpstreamResponder,
+            let responseData = try? legacyUpstreamResponder(method, originalID)
+        {
+            return .immediate(responseData)
+        }
+        return .immediate(Data())
     }
 
     func debugSnapshot() -> ProxyDebugSnapshot {
@@ -3853,6 +4512,29 @@ private func postHTTPJSON(
     }
 }
 
+private func postHTTPAnyJSON(
+    url: URL,
+    sessionID: String,
+    payload: [Any]
+) async throws -> (HTTPURLResponse, Any) {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+
+    return try await withTestURLSession { session in
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HTTPTestError.missingResponseHead
+        }
+        let object = try JSONSerialization.jsonObject(with: responseData, options: [])
+        return (httpResponse, object)
+    }
+}
+
 private func postHTTPData(
     url: URL,
     sessionID: String,
@@ -3894,6 +4576,29 @@ private func makeDebugSnapshotURL(from mcpURL: URL) -> URL {
 
 private typealias AsyncSignal = TestSignal
 private typealias SyncSignal = TestSignal
+
+private func initializeHTTPChannel(_ channel: EmbeddedChannel) throws -> String {
+    let initPayload: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": [
+            "capabilities": [String: Any]()
+        ],
+    ]
+    let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
+    var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Content-Type", value: "application/json")
+    var initBody = channel.allocator.buffer(capacity: initData.count)
+    initBody.writeBytes(initData)
+    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+    let initResponse = try collectResponse(from: channel)
+    return try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
+}
 
 private func makeToolSuccessResponse(id: RPCID, text: String) throws -> Data {
     let response: [String: Any] = [

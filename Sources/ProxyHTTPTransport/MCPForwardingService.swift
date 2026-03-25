@@ -24,10 +24,12 @@ package struct MCPForwardingService: Sendable {
     }
 
     private let config: ProxyConfig
+    private let disabledToolNames: Set<String>
     private let sessionManager: any RuntimeCoordinating
 
     package init(config: ProxyConfig, sessionManager: any RuntimeCoordinating) {
         self.config = config
+        self.disabledToolNames = config.disabledToolNames
         self.sessionManager = sessionManager
     }
 
@@ -135,9 +137,17 @@ package struct MCPForwardingService: Sendable {
                 originalID: started.transform.originalID,
                 upstreamData: data
             )
-            let responseData = rewrittenResourcesData
+            let cacheableToolsListData = rewrittenResourcesData
+            let responseData = Self.rewriteToolsListResponseIfNeeded(
+                method: started.transform.method,
+                upstreamData: cacheableToolsListData,
+                hiddenToolNames: disabledToolNames
+            )
             if started.transform.isCacheableToolsListRequest,
-                let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
+                let object = try? JSONSerialization.jsonObject(
+                    with: cacheableToolsListData,
+                    options: []
+                )
                     as? [String: Any],
                 let resultAny = object["result"],
                 let result = JSONValue(any: resultAny)
@@ -276,6 +286,20 @@ package struct MCPForwardingService: Sendable {
             return nil
         }
         return try? JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private static func rewriteToolsListResponseIfNeeded(
+        method: String?,
+        upstreamData: Data,
+        hiddenToolNames: Set<String> = []
+    ) -> Data {
+        guard method == "tools/list" else {
+            return upstreamData
+        }
+        return ToolsListFilter.rewriteResponseDataIfNeeded(
+            upstreamData,
+            hiddenToolNames: hiddenToolNames
+        )
     }
 
     private static func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

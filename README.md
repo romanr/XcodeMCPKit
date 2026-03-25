@@ -155,8 +155,21 @@ Logs are written to stderr.
 | `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
 | `upstream_handshake.clientVersion` | string | `"dev"` |
 | `upstream_handshake.capabilities` | table | `{}` |
+| `tools.disabled` | array of strings | `[]` |
 
 If `clientVersion` is omitted, the proxy auto-resolves it from the Xcode `IDEChat*Version` entry matching `clientName` when available.
+
+Example:
+
+```toml
+[upstream_handshake]
+clientName = "XcodeMCPKit"
+
+[tools]
+disabled = ["RunAllTests", "RunSomeTests"]
+```
+
+Disabled tools are removed from `tools/list` and rejected on direct `tools/call` requests with a tool error. The config is loaded when the proxy starts; restart `xcode-mcp-proxy-server` after editing the file.
 
 ### Adapter: `xcode-mcp-proxy`
 

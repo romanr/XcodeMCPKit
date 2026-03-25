@@ -16,13 +16,16 @@ package enum LocalPostHandling {
 
 package struct LocalMCPResponder {
     private let sessionManager: any RuntimeCoordinating
+    private let disabledToolNames: Set<String>
     private let logger: Logger
 
     package init(
         sessionManager: any RuntimeCoordinating,
+        disabledToolNames: Set<String>,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
+        self.disabledToolNames = disabledToolNames
         self.logger = logger
     }
 
@@ -112,10 +115,14 @@ package struct LocalMCPResponder {
                     "has_params": .string(hasParams ? "true" : "false"),
                 ]
             )
+            let filteredResult = ToolsListFilter.rewriteResult(
+                cachedResult,
+                hiddenToolNames: disabledToolNames
+            )
             let response: [String: Any] = [
                 "jsonrpc": "2.0",
                 "id": originalID.value.foundationObject,
-                "result": cachedResult.foundationObject,
+                "result": filteredResult.foundationObject,
             ]
             guard JSONSerialization.isValidJSONObject(response),
                 let data = try? JSONSerialization.data(withJSONObject: response, options: [])

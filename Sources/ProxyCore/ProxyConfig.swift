@@ -21,12 +21,20 @@ public struct ProxyConfig: Sendable {
     public var upstreamSessionID: String?
     public var maxBodyBytes: Int
     public var requestTimeout: TimeInterval
-    public var configPath: String?
+    public var configPath: String? {
+        didSet {
+            disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
+                configPath: configPath,
+                logger: ProxyLogging.make("config")
+            )
+        }
+    }
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
     public var prewarmToolsList: Bool
     public var autoApproveXcodeDialog: Bool
+    public var disabledToolNames: Set<String>
 
     public init(
         listenHost: String,
@@ -42,7 +50,8 @@ public struct ProxyConfig: Sendable {
         stdioUpstreamURL: URL? = nil,
         stdioUpstreamSource: StdioUpstreamSource? = nil,
         prewarmToolsList: Bool = true,
-        autoApproveXcodeDialog: Bool = false
+        autoApproveXcodeDialog: Bool = false,
+        disabledToolNames: Set<String>? = nil
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -58,6 +67,11 @@ public struct ProxyConfig: Sendable {
         self.stdioUpstreamSource = stdioUpstreamSource
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
+        self.disabledToolNames = disabledToolNames
+            ?? ProxyFileConfigLoader.loadDisabledToolNames(
+                configPath: configPath,
+                logger: ProxyLogging.make("config")
+            )
     }
 }
 

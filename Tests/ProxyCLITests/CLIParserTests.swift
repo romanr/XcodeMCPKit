@@ -113,6 +113,57 @@ struct CLIParserTests {
         #expect(config.configPath == "/tmp/proxy-config.toml")
     }
 
+    @Test func cliLoadsDisabledToolNamesFromConfig() async throws {
+        let configPath = try makeTempConfigFile(
+            """
+            [tools]
+            disabled = ["RunAllTests", "RunSomeTests"]
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--config", configPath],
+            environment: [:]
+        )
+
+        #expect(config.disabledToolNames == ["RunAllTests", "RunSomeTests"])
+    }
+
+    @Test func cliNormalizesDisabledToolNamesFromConfig() async throws {
+        let configPath = try makeTempConfigFile(
+            """
+            [tools]
+            disabled = [" RunAllTests ", "", "RunAllTests", "RunSomeTests "]
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--config", configPath],
+            environment: [:]
+        )
+
+        #expect(config.disabledToolNames == ["RunAllTests", "RunSomeTests"])
+    }
+
+    @Test func cliIgnoresInvalidDisabledToolNamesConfig() async throws {
+        let configPath = try makeTempConfigFile(
+            """
+            [tools]
+            disabled = 123
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--config", configPath],
+            environment: [:]
+        )
+
+        #expect(config.disabledToolNames.isEmpty)
+    }
+
     @Test func cliParsesUpstreamProcesses() async throws {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--upstream-processes", "10"],
@@ -332,4 +383,12 @@ struct CLIParserTests {
         #expect(config.stdioUpstreamURL == nil)
         #expect(config.listenPort == 0)
     }
+}
+
+private func makeTempConfigFile(_ contents: String) throws -> String {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("toml")
+    try contents.write(to: url, atomically: true, encoding: .utf8)
+    return url.path
 }

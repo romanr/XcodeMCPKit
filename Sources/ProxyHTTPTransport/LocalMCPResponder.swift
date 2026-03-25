@@ -18,15 +18,18 @@ package enum LocalPostHandling {
 package struct LocalMCPResponder {
     private let sessionManager: any RuntimeCoordinating
     private let refreshCodeIssuesMode: RefreshCodeIssuesMode
+    private let disabledToolNames: Set<String>
     private let logger: Logger
 
     package init(
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesMode: RefreshCodeIssuesMode,
+        disabledToolNames: Set<String>,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
+        self.disabledToolNames = disabledToolNames
         self.logger = logger
     }
 
@@ -118,7 +121,8 @@ package struct LocalMCPResponder {
             )
             let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
                 cachedResult,
-                mode: refreshCodeIssuesMode
+                mode: refreshCodeIssuesMode,
+                hiddenToolNames: disabledToolNames
             )
             let response: [String: Any] = [
                 "jsonrpc": "2.0",

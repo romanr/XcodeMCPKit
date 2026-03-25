@@ -4,7 +4,8 @@ import ProxyCore
 package enum RefreshCodeIssuesToolsListRewriter {
     package static func rewriteResult(
         _ result: JSONValue,
-        mode: RefreshCodeIssuesMode
+        mode: RefreshCodeIssuesMode,
+        hiddenToolNames: Set<String> = []
     ) -> JSONValue {
         guard case .object(var resultObject) = result,
             case .array(let tools) = resultObject["tools"]
@@ -12,11 +13,17 @@ package enum RefreshCodeIssuesToolsListRewriter {
             return result
         }
 
-        let rewrittenTools = tools.map { toolValue in
-            guard case .object(var toolObject) = toolValue,
-                case .string(let name) = toolObject["name"],
-                name == RefreshCodeIssuesRequest.toolName
-            else {
+        let rewrittenTools = tools.compactMap { toolValue -> JSONValue? in
+            guard case .object(var toolObject) = toolValue else {
+                return toolValue
+            }
+            guard case .string(let name) = toolObject["name"] else {
+                return toolValue
+            }
+            guard hiddenToolNames.contains(name) == false else {
+                return nil
+            }
+            guard name == RefreshCodeIssuesRequest.toolName else {
                 return toolValue
             }
             toolObject["description"] = .string(description(for: mode))
@@ -28,7 +35,8 @@ package enum RefreshCodeIssuesToolsListRewriter {
 
     package static func rewriteResponseDataIfNeeded(
         _ responseData: Data,
-        mode: RefreshCodeIssuesMode
+        mode: RefreshCodeIssuesMode,
+        hiddenToolNames: Set<String> = []
     ) -> Data {
         guard
             let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
@@ -39,7 +47,11 @@ package enum RefreshCodeIssuesToolsListRewriter {
             return responseData
         }
 
-        let rewrittenResult = rewriteResult(resultValue, mode: mode)
+        let rewrittenResult = rewriteResult(
+            resultValue,
+            mode: mode,
+            hiddenToolNames: hiddenToolNames
+        )
         guard rewrittenResult.foundationObject as? [String: Any] != nil else {
             return responseData
         }

@@ -7,37 +7,16 @@ package enum ProxyFileConfigLoader {
         configPath: String?,
         logger: Logger
     ) -> [String: JSONValue]? {
-        guard let rawPath = nonEmpty(configPath) else { return nil }
-        let expandedPath = NSString(string: rawPath).expandingTildeInPath
-        let url = URL(fileURLWithPath: expandedPath)
-
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            logger.warning(
-                "Failed to read proxy config; using built-in initialize params",
-                metadata: [
-                    "path": .string(expandedPath),
-                    "error": .string(String(describing: error)),
-                ]
-            )
+        guard let loaded = loadRootTable(
+            configPath: configPath,
+            logger: logger,
+            readFailureMessage: "Failed to read proxy config; using built-in initialize params",
+            decodeFailureMessage: "Failed to decode proxy config; using built-in initialize params"
+        ) else {
             return nil
         }
-
-        let rootTable: TOMLTable
-        do {
-            rootTable = try TOMLTable(source: data)
-        } catch {
-            logger.warning(
-                "Failed to decode proxy config; using built-in initialize params",
-                metadata: [
-                    "path": .string(expandedPath),
-                    "error": .string(String(describing: error)),
-                ]
-            )
-            return nil
-        }
+        let expandedPath = loaded.path
+        let rootTable = loaded.table
 
         let handshakeTable: TOMLTable
         do {
@@ -143,6 +122,87 @@ package enum ProxyFileConfigLoader {
         return params.isEmpty ? nil : params
     }
 
+    package static func loadDisabledToolNames(
+        configPath: String?,
+        logger: Logger
+    ) -> Set<String> {
+        guard let loaded = loadRootTable(
+            configPath: configPath,
+            logger: logger,
+            readFailureMessage: "Failed to read proxy config; ignoring disabled tools",
+            decodeFailureMessage: "Failed to decode proxy config; ignoring disabled tools"
+        ) else {
+            return []
+        }
+        let expandedPath = loaded.path
+        let rootTable = loaded.table
+
+        guard rootTable.contains(key: "tools") else {
+            return []
+        }
+
+        let toolsTable: TOMLTable
+        do {
+            toolsTable = try rootTable.table(forKey: "tools")
+        } catch {
+            logger.warning(
+                "Proxy config tools is invalid; ignoring disabled tools",
+                metadata: [
+                    "path": .string(expandedPath),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return []
+        }
+
+        guard toolsTable.contains(key: "disabled") else {
+            return []
+        }
+
+        let toolsObject: [String: Any]
+        do {
+            toolsObject = try Dictionary(toolsTable)
+        } catch {
+            logger.warning(
+                "Failed to materialize proxy config tools; ignoring disabled tools",
+                metadata: [
+                    "path": .string(expandedPath),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return []
+        }
+
+        guard let rawDisabled = toolsObject["disabled"] else {
+            return []
+        }
+        guard let disabledArray = rawDisabled as? [Any] else {
+            logger.warning(
+                "Proxy config tools.disabled is invalid; ignoring disabled tools",
+                metadata: ["path": .string(expandedPath)]
+            )
+            return []
+        }
+
+        var disabledToolNames = Set<String>()
+        for value in disabledArray {
+            guard let rawName = value as? String else {
+                logger.warning(
+                    "Proxy config tools.disabled must contain only strings; ignoring disabled tools",
+                    metadata: ["path": .string(expandedPath)]
+                )
+                return []
+            }
+            let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard normalizedName.isEmpty == false else {
+                continue
+            }
+            disabledToolNames.insert(normalizedName)
+        }
+
+        return disabledToolNames
+    }
+
     package static func mergeJSONObjects(
         _ base: [String: JSONValue],
         overriding override: [String: JSONValue]
@@ -168,5 +228,46 @@ package enum ProxyFileConfigLoader {
             return nil
         }
         return raw
+    }
+
+    private static func loadRootTable(
+        configPath: String?,
+        logger: Logger,
+        readFailureMessage: String,
+        decodeFailureMessage: String
+    ) -> (path: String, table: TOMLTable)? {
+        guard let rawPath = nonEmpty(configPath) else { return nil }
+        let expandedPath = NSString(string: rawPath).expandingTildeInPath
+        let url = URL(fileURLWithPath: expandedPath)
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            logger.warning(
+                "\(readFailureMessage)",
+                metadata: [
+                    "path": .string(expandedPath),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return nil
+        }
+
+        let rootTable: TOMLTable
+        do {
+            rootTable = try TOMLTable(source: data)
+        } catch {
+            logger.warning(
+                "\(decodeFailureMessage)",
+                metadata: [
+                    "path": .string(expandedPath),
+                    "error": .string(String(describing: error)),
+                ]
+            )
+            return nil
+        }
+
+        return (expandedPath, rootTable)
     }
 }

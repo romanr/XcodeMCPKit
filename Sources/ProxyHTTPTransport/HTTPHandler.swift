@@ -6,7 +6,6 @@ import NIOHTTP1
 import NIOConcurrencyHelpers
 import ProxyCore
 import ProxyRuntime
-import ProxyFeatureXcode
 
 package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package typealias InboundIn = HTTPServerRequestPart
@@ -37,34 +36,13 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     package init(
         config: ProxyConfig,
-        sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
+        sessionManager: any RuntimeCoordinating
     ) {
-        let refreshCoordinator =
-            refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault(
-                requestTimeout: config.requestTimeout
-            )
-        let refreshDebugState =
-            refreshCodeIssuesDebugState
-            ?? RefreshCodeIssuesDebugState(
-                maxPendingPerKey: refreshCoordinator.maxPendingPerKey,
-                maxPendingTotal: refreshCoordinator.maxPendingTotal,
-                queueWaitTimeoutSeconds: refreshCoordinator.queueWaitTimeoutSeconds
-            )
         self.config = config
-        self.controlService = HTTPControlService(
-            runtimeCoordinator: sessionManager,
-            refreshCodeIssuesDebugState: refreshDebugState
-        )
+        self.controlService = HTTPControlService(runtimeCoordinator: sessionManager)
         self.postService = HTTPPostService(
             config: config,
             sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: refreshCoordinator,
-            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-            refreshCodeIssuesDebugState: refreshDebugState,
             logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))

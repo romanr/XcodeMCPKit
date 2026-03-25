@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import ProxyFeatureXcode
 import ProxyRuntime
 
 package struct HTTPDebugSnapshot: Codable, Sendable {
@@ -13,12 +12,8 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let sessions: [SessionDebugSnapshot]
     package let leases: [RequestLeaseDebugSnapshot]
     package let queuedRequestCount: Int
-    package let refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
-
-    package init(
-        base: ProxyDebugSnapshot,
-        refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
-    ) {
+    
+    package init(base: ProxyDebugSnapshot) {
         self.generatedAt = base.generatedAt
         self.proxyInitialized = base.proxyInitialized
         self.cachedToolsListAvailable = base.cachedToolsListAvailable
@@ -28,7 +23,6 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.sessions = base.sessions
         self.leases = base.leases
         self.queuedRequestCount = base.queuedRequestCount
-        self.refreshCodeIssues = refreshCodeIssues
     }
 }
 
@@ -42,14 +36,9 @@ package struct HTTPSSEOpenResult {
 
 package final class HTTPControlService: Sendable {
     private let runtimeCoordinator: any RuntimeCoordinating
-    private let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState?
 
-    package init(
-        runtimeCoordinator: any RuntimeCoordinating,
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
-    ) {
+    package init(runtimeCoordinator: any RuntimeCoordinating) {
         self.runtimeCoordinator = runtimeCoordinator
-        self.refreshCodeIssuesDebugState = refreshCodeIssuesDebugState
     }
 
     package func debugSnapshotData(includeSensitiveDebugPayloads: Bool = false) -> Data? {
@@ -60,8 +49,7 @@ package final class HTTPControlService: Sendable {
             HTTPDebugSnapshot(
                 base: runtimeCoordinator.debugSnapshot(
                     includeSensitiveDebugPayloads: includeSensitiveDebugPayloads
-                ),
-                refreshCodeIssues: refreshCodeIssuesDebugState?.snapshot()
+                )
             )
         )
     }

@@ -12,11 +12,6 @@ public enum StdioUpstreamSource: String, Sendable {
     case fallback
 }
 
-public enum RefreshCodeIssuesMode: String, Sendable {
-    case proxy
-    case upstream
-}
-
 public struct ProxyConfig: Sendable {
     public var listenHost: String
     public var listenPort: Int
@@ -39,7 +34,6 @@ public struct ProxyConfig: Sendable {
     public var stdioUpstreamSource: StdioUpstreamSource?
     public var prewarmToolsList: Bool
     public var autoApproveXcodeDialog: Bool
-    public var refreshCodeIssuesMode: RefreshCodeIssuesMode
     public var disabledToolNames: Set<String>
 
     public init(
@@ -57,7 +51,6 @@ public struct ProxyConfig: Sendable {
         stdioUpstreamSource: StdioUpstreamSource? = nil,
         prewarmToolsList: Bool = true,
         autoApproveXcodeDialog: Bool = false,
-        refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy,
         disabledToolNames: Set<String>? = nil
     ) {
         self.listenHost = listenHost
@@ -74,7 +67,6 @@ public struct ProxyConfig: Sendable {
         self.stdioUpstreamSource = stdioUpstreamSource
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
-        self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = disabledToolNames
             ?? ProxyFileConfigLoader.loadDisabledToolNames(
                 configPath: configPath,
@@ -97,12 +89,16 @@ public enum CLIError: Error, CustomStringConvertible {
 public struct CLIParser {
     private static let defaultStdioUpstream = "http://localhost:8765/mcp"
     private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
-    private static let refreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
+    public static let removedRefreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
     public static let configPathEnv = "MCP_XCODE_CONFIG"
     public static let removedLazyInitMessage =
         "The proxy always uses eager initialization; --lazy-init has been removed."
     public static let removedXcodePIDMessage =
         "Xcode PID support has been removed; --xcode-pid is no longer supported."
+    public static let removedRefreshCodeIssuesModeMessage =
+        "Refresh code issues mode has been removed; XcodeRefreshCodeIssuesInFile always uses Xcode's upstream live diagnostics path."
+    public static let removedRefreshCodeIssuesModeEnvMessage =
+        "\(removedRefreshCodeIssuesModeEnv) has been removed; unset it because XcodeRefreshCodeIssuesInFile always uses Xcode's upstream live diagnostics path."
 
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         return try parse(args: args, environment: environment, discoveryOverrideURL: nil)
@@ -125,8 +121,6 @@ public struct CLIParser {
         var stdioUpstreamURL: URL?
         var stdioUpstreamSource: StdioUpstreamSource?
         var autoApproveXcodeDialog = false
-        var refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
-        var hasExplicitRefreshCodeIssuesMode = false
 
         var index = 1
         while index < args.count {
@@ -218,15 +212,7 @@ public struct CLIParser {
                 autoApproveXcodeDialog = true
                 index += 1
             case "--refresh-code-issues-mode":
-                guard index + 1 < args.count else {
-                    throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
-                }
-                guard let parsed = RefreshCodeIssuesMode(rawValue: args[index + 1]) else {
-                    throw CLIError.message("--refresh-code-issues-mode must be proxy or upstream")
-                }
-                refreshCodeIssuesMode = parsed
-                hasExplicitRefreshCodeIssuesMode = true
-                index += 2
+                throw CLIError.message(Self.removedRefreshCodeIssuesModeMessage)
             case "--lazy-init":
                 throw CLIError.message(Self.removedLazyInitMessage)
             case "--stdio":
@@ -254,13 +240,8 @@ public struct CLIParser {
         if upstreamSessionID == nil, let value = environment["MCP_XCODE_SESSION_ID"], !value.isEmpty {
             upstreamSessionID = value
         }
-        if let value = environment[refreshCodeIssuesModeEnv], hasExplicitRefreshCodeIssuesMode == false {
-            guard let parsed = RefreshCodeIssuesMode(rawValue: value) else {
-                throw CLIError.message(
-                    "\(refreshCodeIssuesModeEnv) must be proxy or upstream"
-                )
-            }
-            refreshCodeIssuesMode = parsed
+        if let value = environment[removedRefreshCodeIssuesModeEnv], !value.isEmpty {
+            throw CLIError.message(Self.removedRefreshCodeIssuesModeEnvMessage)
         }
         if configPath == nil, let value = nonEmpty(environment[configPathEnv]) {
             configPath = value
@@ -280,8 +261,7 @@ public struct CLIParser {
             transport: transport,
             stdioUpstreamURL: stdioUpstreamURL,
             stdioUpstreamSource: stdioUpstreamSource,
-            autoApproveXcodeDialog: autoApproveXcodeDialog,
-            refreshCodeIssuesMode: refreshCodeIssuesMode
+            autoApproveXcodeDialog: autoApproveXcodeDialog
         )
     }
 
@@ -302,8 +282,6 @@ public struct CLIParser {
           --request-timeout seconds  Request timeout (default: 300, 0 disables non-initialize timeouts)
           --config path              Path to proxy config TOML (env \(configPathEnv))
           --auto-approve             Auto-approve the Xcode permission dialog
-          --refresh-code-issues-mode proxy|upstream
-                                     Refresh implementation (default: proxy; env \(refreshCodeIssuesModeEnv))
           --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)
           -h, --help                 Show help
         """

@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import ProxyCore
-import ProxyFeatureXcode
 import ProxyRuntime
 
 package struct MCPForwardingService: Sendable {
@@ -138,15 +137,10 @@ package struct MCPForwardingService: Sendable {
                 originalID: started.transform.originalID,
                 upstreamData: data
             )
-            let cacheableToolsListData = Self.rewriteToolsListResponseIfNeeded(
-                method: started.transform.method,
-                upstreamData: rewrittenResourcesData,
-                mode: config.refreshCodeIssuesMode
-            )
+            let cacheableToolsListData = rewrittenResourcesData
             let responseData = Self.rewriteToolsListResponseIfNeeded(
                 method: started.transform.method,
                 upstreamData: cacheableToolsListData,
-                mode: config.refreshCodeIssuesMode,
                 hiddenToolNames: disabledToolNames
             )
             if started.transform.isCacheableToolsListRequest,
@@ -195,157 +189,6 @@ package struct MCPForwardingService: Sendable {
                 }
             }
             return .timeout
-        }
-    }
-
-    package func callInternalTool(
-        name: String,
-        arguments: [String: Any],
-        sessionID: String,
-        eventLoop: EventLoop,
-        upstreamIndexOverride: Int? = nil,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshInternalToolResult {
-        let requestObject: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": "__internal-\(UUID().uuidString)",
-            "method": "tools/call",
-            "params": [
-                "name": name,
-                "arguments": arguments,
-            ],
-        ]
-
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
-        else {
-            return .unavailable
-        }
-
-        let descriptor = SessionPipelineRequestDescriptor(
-            sessionID: sessionID,
-            label: "tools/call:\(name)",
-            isBatch: false,
-            expectsResponse: true,
-            isTopLevelClientRequest: false
-        )
-        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let session = sessionManager.session(id: sessionID)
-
-        let resolution: ResponseResolution
-        do {
-            resolution = try await sessionManager.enqueueOnUpstreamSlot(
-                leaseID: leaseID,
-                descriptor: descriptor,
-                on: eventLoop,
-                preferredUpstreamIndex: upstreamIndexOverride
-            ) { selectedUpstreamIndex in
-                self.sessionManager.activateRequestLease(
-                    leaseID,
-                    requestIDKey: nil,
-                    upstreamIndex: selectedUpstreamIndex,
-                    timeout: nil
-                )
-                let parsedRequestJSON: Any
-                do {
-                    parsedRequestJSON = try JSONSerialization.jsonObject(
-                        with: bodyData,
-                        options: []
-                    )
-                } catch {
-                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                }
-                let prepared: PreparedRequest
-                do {
-                    guard let candidate = try prepareRequest(
-                        bodyData: bodyData,
-                        parsedRequestJSON: parsedRequestJSON,
-                        sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex
-                    ) else {
-                        return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                    }
-                    prepared = candidate
-                } catch {
-                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                }
-
-                let started: StartedRequest
-                do {
-                    started = try startRequest(
-                        prepared,
-                        session: session,
-                        on: eventLoop,
-                        requestTimeoutOverride: requestTimeoutOverride,
-                        leaseID: leaseID,
-                        onTimeout: {
-                            self.sessionManager.handleRequestLeaseTimeout(
-                                leaseID,
-                                sessionID: sessionID,
-                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
-                                upstreamIndex: prepared.upstreamIndex
-                            )
-                        }
-                    )
-                } catch {
-                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                }
-
-                return started.future.map { buffer in
-                    self.resolveResponse(
-                        .success(buffer),
-                        started: started,
-                        sessionID: sessionID,
-                        accountSuccess: false,
-                        accountTimeout: false
-                    )
-                }.flatMapErrorThrowing { error in
-                    self.resolveResponse(
-                        .failure(error),
-                        started: started,
-                        sessionID: sessionID,
-                        accountSuccess: false,
-                        accountTimeout: false
-                    )
-                }
-            }.get()
-        } catch is CancellationError {
-            return .timeout
-        } catch {
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .upstreamUnavailable
-            )
-            return .unavailable
-        }
-
-        switch resolution {
-        case .success(let responseData):
-            sessionManager.completeRequestLease(leaseID)
-            guard let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
-                as? [String: Any],
-                let result = object["result"] as? [String: Any]
-            else {
-                return .unavailable
-            }
-            if let isError = result["isError"] as? Bool, isError {
-                return .unavailable
-            }
-            return .success(result)
-        case .timeout:
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .timedOut,
-                reason: .timedOut
-            )
-            return .timeout
-        case .invalidUpstreamResponse:
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .invalidUpstreamResponse
-            )
-            return .unavailable
         }
     }
 
@@ -448,15 +291,13 @@ package struct MCPForwardingService: Sendable {
     private static func rewriteToolsListResponseIfNeeded(
         method: String?,
         upstreamData: Data,
-        mode: RefreshCodeIssuesMode,
         hiddenToolNames: Set<String> = []
     ) -> Data {
         guard method == "tools/list" else {
             return upstreamData
         }
-        return RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
+        return ToolsListFilter.rewriteResponseDataIfNeeded(
             upstreamData,
-            mode: mode,
             hiddenToolNames: hiddenToolNames
         )
     }

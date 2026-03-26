@@ -5029,6 +5029,48 @@ struct HTTPHandlerTests {
 
         await server.shutdown()
     }
+
+    @Test func httpDirectRefreshCancellationAbandonsActiveLease() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: nil,
+            cancelAfterStartingEnqueueRequest: true
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-direct-refresh-cancelled",
+                payload: toolsCallPayload(
+                    id: 43,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-direct-cancelled",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+            #expect(response.statusCode == 202)
+            #expect(body.isEmpty)
+            #expect(sessionManager.sentUpstreamCount() == 1)
+
+            let abandonedLease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(abandonedLease.state == .abandoned)
+            #expect(abandonedLease.releaseReason == "clientDisconnected")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+
+        await server.shutdown()
+    }
 }
 
 private enum HTTPTestError: Error {
@@ -5104,36 +5146,43 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
+    private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = RequestLeaseRegistry()
 
     init(
         config: ProxyConfig,
-        upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil
+        upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
+        cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = nil
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
+        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: ProxyConfig,
-        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
+        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = nil
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
+        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: ProxyConfig,
-        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
+        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = upstreamRequestResponder
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
+        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     func session(id: String) -> SessionContext {
@@ -5241,6 +5290,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             return eventLoop.makeFailedFuture(
                 NSError(domain: "TestRuntimeCoordinator", code: 1)
             )
+        }
+        if cancelAfterStartingEnqueueRequest {
+            _ = starter(upstreamIndex)
+            return eventLoop.makeFailedFuture(CancellationError())
         }
         return starter(upstreamIndex)
     }

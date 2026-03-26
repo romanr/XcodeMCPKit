@@ -1558,6 +1558,7 @@ package final class HTTPPostService: Sendable {
                 return .invalidUpstreamResponse
             }
         } catch is CancellationError {
+            cancellationHandle?.cancel(using: sessionManager)
             return .cancelled(
                 responseIDs: requestIDs,
                 isBatch: requestIsBatch

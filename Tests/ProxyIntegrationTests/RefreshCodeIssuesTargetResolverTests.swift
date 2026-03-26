@@ -195,6 +195,113 @@ struct RefreshCodeIssuesTargetResolverTests {
         #expect(second == nil)
     }
 
+    @Test func resolverIgnoresBrokenSuffixMatchedSymlink() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let brokenSymlink = URL(fileURLWithPath: root)
+            .appendingPathComponent("Broken/Feature/Screen/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: brokenSymlink.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: brokenSymlink.path,
+            withDestinationPath: URL(fileURLWithPath: root)
+                .appendingPathComponent("Missing/Foo.swift").path
+        )
+
+        let validFallback = URL(fileURLWithPath: root)
+            .appendingPathComponent("Real/Screen/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: validFallback.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: validFallback, atomically: true, encoding: .utf8)
+
+        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolved = await resolver.resolveAbsoluteFilePath(
+            workspacePath: root,
+            workspaceRoot: root,
+            requestedFilePath: "Feature/Screen/Foo.swift"
+        )
+
+        #expect(resolved == fileReferencePath(validFallback))
+    }
+
+    @Test func resolverIgnoresSuffixMatchedSymlinkToDirectory() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let directoryTarget = URL(fileURLWithPath: root)
+            .appendingPathComponent("DirectoryTarget")
+        try FileManager.default.createDirectory(
+            at: directoryTarget,
+            withIntermediateDirectories: true
+        )
+
+        let directorySymlink = URL(fileURLWithPath: root)
+            .appendingPathComponent("Broken/Feature/Screen/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: directorySymlink.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: directorySymlink.path,
+            withDestinationPath: directoryTarget.path
+        )
+
+        let validFallback = URL(fileURLWithPath: root)
+            .appendingPathComponent("Real/Screen/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: validFallback.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: validFallback, atomically: true, encoding: .utf8)
+
+        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolved = await resolver.resolveAbsoluteFilePath(
+            workspacePath: root,
+            workspaceRoot: root,
+            requestedFilePath: "Feature/Screen/Foo.swift"
+        )
+
+        #expect(resolved == fileReferencePath(validFallback))
+    }
+
+    @Test func resolverReturnsSuffixMatchedSymlinkAliasPath() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let target = URL(fileURLWithPath: root)
+            .appendingPathComponent("Targets/Deep/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let alias = URL(fileURLWithPath: root)
+            .appendingPathComponent("Alias/Feature/Screen/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: alias.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: alias.path,
+            withDestinationPath: target.path
+        )
+
+        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolved = await resolver.resolveAbsoluteFilePath(
+            workspacePath: root,
+            workspaceRoot: root,
+            requestedFilePath: "Feature/Screen/Foo.swift"
+        )
+
+        #expect(resolved == fileReferencePath(alias))
+    }
+
     @Test func resolverDoesNotSuffixMatchCaseMismatchedPath() async throws {
         let root = makeTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -590,4 +697,8 @@ private func makeTemporaryWorkspaceRoot() -> String {
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url.path
+}
+
+private func fileReferencePath(_ url: URL) -> String {
+    ((url as NSURL).fileReferenceURL()?.path) ?? url.path
 }

@@ -185,7 +185,10 @@ package actor RefreshCodeIssuesTargetResolver {
         while let fileURL = enumerator?.nextObject() as? URL {
             guard fileURL.hasDirectoryPath == false else { continue }
             guard fileURL.lastPathComponent == requestedBasename else { continue }
-            guard isPath(fileURL.path, containedIn: workspaceRoot) else { continue }
+            guard resolvedRegularFilePath(
+                fileURL.path,
+                containedIn: workspaceRoot
+            ) != nil else { continue }
 
             let score = suffixMatchScore(
                 requestedComponents: requestedComponents,

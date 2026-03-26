@@ -90,15 +90,6 @@ package actor RefreshCodeIssuesCoordinator {
         }
     }
 
-    package nonisolated func resetAndWait() {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            await self.reset()
-            semaphore.signal()
-        }
-        semaphore.wait()
-    }
-
     package func reset() async {
         let waiters = waitersByKey.values.flatMap { $0 }
         let activeExecutions = Array(activeExecutionsByKey.values)

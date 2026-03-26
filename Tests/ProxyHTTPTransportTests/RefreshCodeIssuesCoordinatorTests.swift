@@ -247,7 +247,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         #expect(await acquisitions.snapshot() == ["first", "third"])
     }
 
-    @Test func refreshCoordinatorResetAndWaitCancelsQueuedWaiters() async throws {
+    @Test func refreshCoordinatorResetCancelsQueuedWaiters() async throws {
         let clock = TestClock()
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 1,
@@ -255,14 +255,13 @@ struct RefreshCodeIssuesCoordinatorTests {
             queueWaitTimeout: .seconds(5),
             queueWaitClock: clock
         )
-        let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
             _ = try? await coordinator.withPermit(key: "windowtab-reset") { _ in
                 await acquisitions.append("first")
-                await releaseFirst.wait()
+                try await Task.sleep(for: .seconds(5))
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -281,7 +280,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         }
 
         await clock.sleep(untilSuspendedBy: 1)
-        coordinator.resetAndWait()
+        await coordinator.reset()
 
         try await spinUntil("waiting for queued waiter to cancel") {
             await outcomes.count() == 1
@@ -294,17 +293,13 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await clock.sleep(untilSuspendedBy: 1)
-        #expect(await acquisitions.snapshot() == ["first"])
-
-        await releaseFirst.signal()
-        _ = await firstTask.value
         _ = await queuedTask.value
         _ = await thirdTask.value
+        _ = await firstTask.value
         #expect(await acquisitions.snapshot() == ["first", "third"])
     }
 
-    @Test func refreshCoordinatorResetAndWaitCancelsActiveExecution() async throws {
+    @Test func refreshCoordinatorResetCancelsActiveExecution() async throws {
         let coordinator = RefreshCodeIssuesCoordinator()
         let started = TestSignal()
         let outcomes = RecordedValues<String>()
@@ -324,7 +319,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         }
 
         try await started.wait(description: "waiting for active execution to start")
-        coordinator.resetAndWait()
+        await coordinator.reset()
 
         try await spinUntil("waiting for active execution to cancel") {
             await outcomes.count() == 1

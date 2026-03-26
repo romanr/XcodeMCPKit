@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import ProxyCore
+import ProxyFeatureXcode
 import ProxyRuntime
 
 package struct MCPForwardingService: Sendable {
@@ -69,6 +70,7 @@ package struct MCPForwardingService: Sendable {
         on eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil,
         leaseID: RequestLeaseID? = nil,
+        cancellationHandle: HTTPPostCancellationHandle? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
         let requestTimeout =
@@ -104,6 +106,8 @@ package struct MCPForwardingService: Sendable {
                 timeout: requestTimeout
             )
         }
+        cancellationHandle?.activate(upstreamIndex: prepared.upstreamIndex)
+        cancellationHandle?.bindRouterPendingToken(registration.token)
 
         sessionManager.sendUpstream(
             prepared.transform.upstreamData,
@@ -135,22 +139,29 @@ package struct MCPForwardingService: Sendable {
             let rewrittenResourcesData = Self.rewriteUnsupportedResourcesListResponseIfNeeded(
                 method: started.transform.method,
                 originalID: started.transform.originalID,
+                responseMethodsByIDKey: started.transform.responseMethodsByIDKey,
+                responseOriginalIDsByKey: started.transform.responseOriginalIDsByKey,
                 upstreamData: data
             )
-            let cacheableToolsListData = rewrittenResourcesData
+            let cacheableToolsListData = Self.rewriteToolsListResponseIfNeeded(
+                method: started.transform.method,
+                upstreamData: rewrittenResourcesData,
+                responseMethodsByIDKey: started.transform.responseMethodsByIDKey,
+                mode: config.refreshCodeIssuesMode
+            )
             let responseData = Self.rewriteToolsListResponseIfNeeded(
                 method: started.transform.method,
                 upstreamData: cacheableToolsListData,
+                responseMethodsByIDKey: started.transform.responseMethodsByIDKey,
+                mode: config.refreshCodeIssuesMode,
                 hiddenToolNames: disabledToolNames
             )
             if started.transform.isCacheableToolsListRequest,
-                let object = try? JSONSerialization.jsonObject(
-                    with: cacheableToolsListData,
-                    options: []
+                let responseIDKey = started.transform.cacheableToolsListResponseIDKey,
+                let result = Self.extractToolsListResult(
+                    from: cacheableToolsListData,
+                    matching: responseIDKey
                 )
-                    as? [String: Any],
-                let resultAny = object["result"],
-                let result = JSONValue(any: resultAny)
             {
                 sessionManager.setCachedToolsListResult(result)
             }
@@ -192,55 +203,258 @@ package struct MCPForwardingService: Sendable {
         }
     }
 
+    package func callInternalTool(
+        name: String,
+        arguments: [String: Any],
+        sessionID: String,
+        eventLoop: EventLoop,
+        cancellationHandle: HTTPPostCancellationHandle? = nil,
+        upstreamIndexOverride: Int? = nil,
+        requestTimeoutOverride: TimeAmount? = nil
+    ) async -> RefreshInternalToolResult {
+        let requestObject: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "__internal-\(UUID().uuidString)",
+            "method": "tools/call",
+            "params": [
+                "name": name,
+                "arguments": arguments,
+            ],
+        ]
+        let internalRequestID = RPCID(any: requestObject["id"]!)!
+
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
+        else {
+            return .unavailable
+        }
+
+        let descriptor = SessionPipelineRequestDescriptor(
+            sessionID: sessionID,
+            label: "tools/call:\(name)",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
+        let internalCancellationHandle = HTTPPostCancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: []
+        )
+        let session = sessionManager.session(id: sessionID)
+
+        let resolution: ResponseResolution
+        do {
+            resolution = try await sessionManager.enqueueOnUpstreamSlot(
+                leaseID: leaseID,
+                descriptor: descriptor,
+                on: eventLoop,
+                preferredUpstreamIndex: upstreamIndexOverride
+            ) { selectedUpstreamIndex in
+                internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
+                self.sessionManager.activateRequestLease(
+                    leaseID,
+                    requestIDKey: nil,
+                    upstreamIndex: selectedUpstreamIndex,
+                    timeout: nil
+                )
+                let parsedRequestJSON: Any
+                do {
+                    parsedRequestJSON = try JSONSerialization.jsonObject(
+                        with: bodyData,
+                        options: []
+                    )
+                } catch {
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                }
+                let prepared: PreparedRequest
+                do {
+                    guard let candidate = try prepareRequest(
+                        bodyData: bodyData,
+                        parsedRequestJSON: parsedRequestJSON,
+                        sessionID: sessionID,
+                        upstreamIndexOverride: selectedUpstreamIndex
+                    ) else {
+                        return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                    }
+                    prepared = candidate
+                    internalCancellationHandle.bindRequestIDKeys(
+                        prepared.transform.responseIDs.map(\.key)
+                    )
+                    if let cancellationHandle,
+                        cancellationHandle.bindChildHandle(internalCancellationHandle) == false
+                    {
+                        internalCancellationHandle.cancel(using: sessionManager)
+                        return eventLoop.makeFailedFuture(CancellationError())
+                    }
+                } catch {
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                }
+
+                let started: StartedRequest
+                do {
+                    started = try startRequest(
+                        prepared,
+                        session: session,
+                        on: eventLoop,
+                        requestTimeoutOverride: requestTimeoutOverride,
+                        leaseID: leaseID,
+                        cancellationHandle: internalCancellationHandle,
+                        onTimeout: {
+                            self.sessionManager.handleRequestLeaseTimeout(
+                                leaseID,
+                                sessionID: sessionID,
+                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
+                                upstreamIndex: prepared.upstreamIndex
+                            )
+                        }
+                    )
+                } catch {
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
+                }
+
+                return started.future.map { buffer in
+                    self.resolveResponse(
+                        .success(buffer),
+                        started: started,
+                        sessionID: sessionID
+                    )
+                }.flatMapErrorThrowing { error in
+                    if error is CancellationError {
+                        throw error
+                    }
+                    return self.resolveResponse(
+                        .failure(error),
+                        started: started,
+                        sessionID: sessionID
+                    )
+                }
+            }.get()
+        } catch is CancellationError {
+            internalCancellationHandle.cancel(using: sessionManager)
+            return .cancelled
+        } catch {
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .upstreamUnavailable
+            )
+            return .unavailable
+        }
+
+        switch resolution {
+        case .success(let responseData):
+            internalCancellationHandle.markCompleted()
+            sessionManager.completeRequestLease(leaseID)
+            guard let object = Self.responseObject(
+                from: responseData,
+                matching: internalRequestID.key
+            ),
+                let result = object["result"] as? [String: Any]
+            else {
+                return .unavailable
+            }
+            if let isError = result["isError"] as? Bool, isError {
+                return .unavailable
+            }
+            return .success(result)
+        case .timeout:
+            internalCancellationHandle.markCompleted()
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .timedOut,
+                reason: .timedOut
+            )
+            return .timeout
+        case .invalidUpstreamResponse:
+            internalCancellationHandle.markCompleted()
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .invalidUpstreamResponse
+            )
+            return .unavailable
+        }
+    }
+
     private static func rewriteUnsupportedResourcesListResponseIfNeeded(
         method: String?,
         originalID: RPCID?,
+        responseMethodsByIDKey: [String: String] = [:],
+        responseOriginalIDsByKey: [String: RPCID] = [:],
         upstreamData: Data
     ) -> Data {
-        guard let method,
-            method == "resources/list" || method == "resources/templates/list"
-        else {
-            return upstreamData
-        }
-        guard let originalID else { return upstreamData }
-
-        let expectedKey = method == "resources/list" ? "resources" : "resourceTemplates"
-
-        guard let object = try? JSONSerialization.jsonObject(with: upstreamData, options: [])
-            as? [String: Any]
-        else {
+        guard let payload = try? JSONSerialization.jsonObject(with: upstreamData, options: []) else {
             return upstreamData
         }
 
-        let result = object["result"]
-
-        if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
-            return upstreamData
-        }
-
-        if let error = object["error"] as? [String: Any] {
-            let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int)
-            guard code == -32601 else {
+        if let object = payload as? [String: Any] {
+            let resolvedRequest: (method: String, originalID: RPCID)? = {
+                if let method, let originalID {
+                    return (method, originalID)
+                }
+                guard let responseIDValue = object["id"],
+                    let responseID = RPCID(any: responseIDValue),
+                    let method = responseMethodsByIDKey[responseID.key],
+                    let originalID = responseOriginalIDsByKey[responseID.key]
+                else {
+                    return nil
+                }
+                return (method, originalID)
+            }()
+            guard let resolvedRequest else { return upstreamData }
+            let rewrittenObject = rewriteUnsupportedResourcesListResponseObjectIfNeeded(
+                object,
+                method: resolvedRequest.method,
+                originalID: resolvedRequest.originalID
+            )
+            guard JSONSerialization.isValidJSONObject(rewrittenObject),
+                let rewrittenData = try? JSONSerialization.data(
+                    withJSONObject: rewrittenObject,
+                    options: []
+                )
+            else {
                 return upstreamData
             }
-            if let result,
-                isNonStandardUnsupportedResourcesResult(result, method: method),
-                let empty = emptyResourcesListResponseData(method: method, originalID: originalID)
-            {
-                return empty
+            return rewrittenData
+        }
+
+        guard let array = payload as? [Any] else {
+            return upstreamData
+        }
+
+        var rewroteAny = false
+        let rewrittenArray = array.map { item -> Any in
+            guard let object = item as? [String: Any],
+                let responseIDValue = object["id"],
+                let responseID = RPCID(any: responseIDValue),
+                let method = responseMethodsByIDKey[responseID.key],
+                let originalID = responseOriginalIDsByKey[responseID.key]
+            else {
+                return item
             }
-            return emptyResourcesListResponseData(method: method, originalID: originalID)
-                ?? upstreamData
-        }
 
-        if let result,
-            isNonStandardUnsupportedResourcesResult(result, method: method),
-            let empty = emptyResourcesListResponseData(method: method, originalID: originalID)
-        {
-            return empty
-        }
+            guard method == "resources/list" || method == "resources/templates/list" else {
+                return item
+            }
 
-        return upstreamData
+            rewroteAny = true
+            return rewriteUnsupportedResourcesListResponseObjectIfNeeded(
+                object,
+                method: method,
+                originalID: originalID
+            )
+        }
+        guard rewroteAny,
+            JSONSerialization.isValidJSONObject(rewrittenArray),
+            let rewrittenData = try? JSONSerialization.data(
+                withJSONObject: rewrittenArray,
+                options: []
+            )
+        else {
+            return upstreamData
+        }
+        return rewrittenData
     }
 
     private static func isNonStandardUnsupportedResourcesResult(_ result: Any, method: String)
@@ -271,17 +485,54 @@ package struct MCPForwardingService: Sendable {
         return false
     }
 
-    private static func emptyResourcesListResponseData(method: String, originalID: RPCID)
-        -> Data?
+    private static func emptyResourcesListResponseObject(method: String, originalID: RPCID)
+        -> [String: Any]
     {
         let result: [String: Any] = method == "resources/list"
             ? ["resources": [Any]()]
             : ["resourceTemplates": [Any]()]
-        let response: [String: Any] = [
+        return [
             "jsonrpc": "2.0",
             "id": originalID.value.foundationObject,
             "result": result,
         ]
+    }
+
+    private static func rewriteUnsupportedResourcesListResponseObjectIfNeeded(
+        _ object: [String: Any],
+        method: String,
+        originalID: RPCID
+    ) -> [String: Any] {
+        guard method == "resources/list" || method == "resources/templates/list" else {
+            return object
+        }
+
+        let expectedKey = method == "resources/list" ? "resources" : "resourceTemplates"
+        let result = object["result"]
+
+        if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
+            return object
+        }
+
+        if let error = object["error"] as? [String: Any] {
+            let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int)
+            guard code == -32601 else {
+                return object
+            }
+            return emptyResourcesListResponseObject(method: method, originalID: originalID)
+        }
+
+        if let result, isNonStandardUnsupportedResourcesResult(result, method: method) {
+            return emptyResourcesListResponseObject(method: method, originalID: originalID)
+        }
+
+        return object
+    }
+
+    private static func emptyResourcesListResponseData(method: String, originalID: RPCID)
+        -> Data?
+    {
+        let response = emptyResourcesListResponseObject(method: method, originalID: originalID)
         guard JSONSerialization.isValidJSONObject(response) else {
             return nil
         }
@@ -291,15 +542,64 @@ package struct MCPForwardingService: Sendable {
     private static func rewriteToolsListResponseIfNeeded(
         method: String?,
         upstreamData: Data,
+        responseMethodsByIDKey: [String: String] = [:],
+        mode: RefreshCodeIssuesMode,
         hiddenToolNames: Set<String> = []
     ) -> Data {
-        guard method == "tools/list" else {
-            return upstreamData
-        }
-        return ToolsListFilter.rewriteResponseDataIfNeeded(
+        return RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
             upstreamData,
+            method: method,
+            responseMethodsByIDKey: responseMethodsByIDKey,
+            mode: mode,
             hiddenToolNames: hiddenToolNames
         )
+    }
+
+    private static func extractToolsListResult(
+        from responseData: Data,
+        matching responseIDKey: String
+    ) -> JSONValue? {
+        guard let object = responseObject(
+            from: responseData,
+            matching: responseIDKey
+        ),
+            let resultAny = object["result"]
+        else {
+            return nil
+        }
+        return JSONValue(any: resultAny)
+    }
+
+    package static func responseObject(
+        from responseData: Data,
+        matching responseIDKey: String
+    ) -> [String: Any]? {
+        guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
+            return nil
+        }
+        if let object = payload as? [String: Any] {
+            guard let responseIDValue = object["id"],
+                let responseID = RPCID(any: responseIDValue),
+                responseID.key == responseIDKey
+            else {
+                return nil
+            }
+            return object
+        }
+        guard let array = payload as? [Any] else {
+            return nil
+        }
+        for item in array {
+            guard let object = item as? [String: Any],
+                let responseIDValue = object["id"],
+                let responseID = RPCID(any: responseIDValue),
+                responseID.key == responseIDKey
+            else {
+                continue
+            }
+            return object
+        }
+        return nil
     }
 
     private static func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

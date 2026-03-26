@@ -2,6 +2,7 @@ import Foundation
 import Logging
 import NIO
 import ProxyCore
+import ProxyFeatureXcode
 import ProxyRuntime
 
 package enum LocalPostHandling {
@@ -16,15 +17,18 @@ package enum LocalPostHandling {
 
 package struct LocalMCPResponder {
     private let sessionManager: any RuntimeCoordinating
+    private let refreshCodeIssuesMode: RefreshCodeIssuesMode
     private let disabledToolNames: Set<String>
     private let logger: Logger
 
     package init(
         sessionManager: any RuntimeCoordinating,
+        refreshCodeIssuesMode: RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
+        self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = disabledToolNames
         self.logger = logger
     }
@@ -115,14 +119,15 @@ package struct LocalMCPResponder {
                     "has_params": .string(hasParams ? "true" : "false"),
                 ]
             )
-            let filteredResult = ToolsListFilter.rewriteResult(
+            let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
                 cachedResult,
+                mode: refreshCodeIssuesMode,
                 hiddenToolNames: disabledToolNames
             )
             let response: [String: Any] = [
                 "jsonrpc": "2.0",
                 "id": originalID.value.foundationObject,
-                "result": filteredResult.foundationObject,
+                "result": rewrittenResult.foundationObject,
             ]
             guard JSONSerialization.isValidJSONObject(response),
                 let data = try? JSONSerialization.data(withJSONObject: response, options: [])

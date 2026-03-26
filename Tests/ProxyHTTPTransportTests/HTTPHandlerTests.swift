@@ -6,6 +6,7 @@ import NIOHTTP1
 import Testing
 import ProxyCore
 import ProxyRuntime
+import ProxyFeatureXcode
 import XcodeMCPTestSupport
 
 @testable import ProxyHTTPTransport
@@ -100,22 +101,35 @@ struct HTTPHandlerTests {
 
     @Test func httpDebugResetResetsRuntimeOnLoopback() async throws {
         let config = makeConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         sessionManager.setCachedToolsListResult(.object(["tools": .array([])]))
         _ = sessionManager.session(id: "debug-reset-session")
-        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
 
-        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/debug/reset")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        do {
+            var components = URLComponents(url: server.url, resolvingAgainstBaseURL: false)!
+            components.path = "/debug/reset"
+            let requestURL = try #require(components.url)
+            var request = URLRequest(url: requestURL)
+            request.httpMethod = "POST"
 
-        let response = try collectResponse(from: channel)
-        #expect(response.head.status == .accepted)
-        #expect(response.body == "reset scheduled")
-        #expect(sessionManager.hasSession(id: "debug-reset-session") == false)
-        #expect(sessionManager.cachedToolsListResult() == nil)
+            let (responseData, response) = try await withTestURLSession { session in
+                try await session.data(for: request)
+            }
+            let httpResponse = try #require(response as? HTTPURLResponse)
+            #expect(httpResponse.statusCode == 202)
+            #expect(String(data: responseData, encoding: .utf8) == "reset scheduled")
+            #expect(sessionManager.hasSession(id: "debug-reset-session") == false)
+            #expect(sessionManager.cachedToolsListResult() == nil)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+
+        await server.shutdown()
     }
 
     @Test func httpDebugResetReturnsNotFoundWhenListenerIsNotLoopback() async throws {
@@ -134,6 +148,132 @@ struct HTTPHandlerTests {
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .notFound)
         #expect(response.body == "not found")
+    }
+
+    @Test func httpDebugUpstreamsIncludesActiveRefreshCodeIssuesState() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("A.swift")
+        try "".write(to: target, atomically: true, encoding: .utf8)
+        let firstSent = SyncSignal()
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-debug-state, workspacePath: \(temporaryRoot)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    firstSent.signal()
+                    return .manual(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [[
+                                    "type": "text",
+                                    "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"warn\",\"line\":1,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                ]],
+                                "structuredContent": [
+                                    "issues": [[
+                                        "path": target.path,
+                                        "message": "warn",
+                                        "line": 1,
+                                        "severity": "warning",
+                                    ]],
+                                    "totalFound": 1,
+                                    "truncated": false,
+                                ],
+                            ]
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let refreshTask = Task<Void, Error> {
+                _ = try await postHTTPJSON(
+                    url: server.url,
+                    sessionID: "session-debug-state",
+                    payload: toolsCallPayload(
+                        id: 34,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-debug-state",
+                            "filePath": "A.swift",
+                        ]
+                    )
+                )
+            }
+
+            try await firstSent.wait(description: "waiting for navigator issues request to start")
+
+            let (httpResponse, data) = try await getHTTPData(url: makeDebugSnapshotURL(from: server.url))
+            #expect(httpResponse.statusCode == 200)
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(HTTPDebugSnapshot.self, from: data)
+            #expect(snapshot.refreshCodeIssues == nil)
+
+            let (sensitiveResponse, sensitiveData) = try await getHTTPData(
+                url: makeDebugSnapshotURL(from: server.url, includeSensitive: true)
+            )
+            #expect(sensitiveResponse.statusCode == 200)
+            let sensitiveSnapshot = try decoder.decode(HTTPDebugSnapshot.self, from: sensitiveData)
+            let refreshSnapshot = try #require(sensitiveSnapshot.refreshCodeIssues)
+            #expect(refreshSnapshot.queue.activeRequestCount == 1)
+            #expect(refreshSnapshot.activeRequests.count == 1)
+            #expect(refreshSnapshot.activeRequests.first?.queueKey == "windowtab-debug-state")
+            #expect(refreshSnapshot.activeRequests.first?.step == "proxy.list_navigator_issues")
+            #expect(refreshSnapshot.activeRequests.first?.state == "running")
+            let activeLease = try #require(
+                sensitiveSnapshot.leases.first(where: {
+                    $0.state == .active && $0.requestIDKey == "34"
+                })
+            )
+            #expect(activeLease.sessionID == "session-debug-state")
+            #expect(activeLease.upstreamIndex == nil)
+
+            sessionManager.deliverNextPendingResponse()
+            _ = try await refreshTask.value
+
+            let (completedResponse, completedData) = try await getHTTPData(
+                url: makeDebugSnapshotURL(from: server.url, includeSensitive: true)
+            )
+            #expect(completedResponse.statusCode == 200)
+            let completedSnapshot = try decoder.decode(HTTPDebugSnapshot.self, from: completedData)
+            let completedRefreshSnapshot = try #require(completedSnapshot.refreshCodeIssues)
+            #expect(completedRefreshSnapshot.queue.activeRequestCount == 0)
+            #expect(completedRefreshSnapshot.recentCompletedRequests.first?.finalState == "completed")
+            #expect(completedRefreshSnapshot.recentCompletedRequests.first?.outcome == "success")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
     }
 
     @Test func httpSSERequiresAcceptHeader() async throws {
@@ -327,6 +467,50 @@ struct HTTPHandlerTests {
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
             as? [String: Any]
         let error = object?["error"] as? [String: Any]
+        #expect((error?["code"] as? NSNumber)?.intValue == -32600)
+        #expect((error?["message"] as? String) == "missing id")
+    }
+
+    @Test func httpSingleElementBatchInitializeMissingIDReturnsArrayShape() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [[String: Any]] = [
+            [
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": [
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": [String: Any](),
+                    "clientInfo": [
+                        "name": "xcode-mcp-proxy-tests",
+                        "version": "0.0",
+                    ],
+                ],
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+        #expect(response.head.headers.first(name: "Content-Type") == "application/json")
+        let array = try #require(
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+                as? [[String: Any]])
+        #expect(array.count == 1)
+        #expect(array[0]["id"] is NSNull)
+        let error = array[0]["error"] as? [String: Any]
         #expect((error?["code"] as? NSNumber)?.intValue == -32600)
         #expect((error?["message"] as? String) == "missing id")
     }
@@ -919,6 +1103,110 @@ struct HTTPHandlerTests {
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
+    @Test func httpSingleItemBatchToolsListUsesCachedResult() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: ["tools": [Any]()])!
+        )
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [[String: Any]] = [[
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        ]]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-batch-tools-list")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+
+        let responseArray =
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+            as? [[String: Any]]
+        let responseObject = try #require(responseArray?.first)
+        #expect((responseObject["id"] as? NSNumber)?.intValue == 2)
+        let result = responseObject["result"] as? [String: Any]
+        let tools = result?["tools"] as? [Any]
+        #expect(tools?.isEmpty == true)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+    }
+
+    @Test func httpForwardedSingleItemBatchToolsListRewritesDescription() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { method, originalID in
+                #expect(method == "tools/list")
+                return .immediate(
+                    try makeToolResultResponse(
+                        id: originalID,
+                        result: [
+                            "tools": [
+                                [
+                                    "name": "XcodeRefreshCodeIssuesInFile",
+                                    "description": "generic upstream description",
+                                ],
+                                [
+                                    "name": "OtherTool",
+                                    "description": "other",
+                                ],
+                            ]
+                        ]
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [[String: Any]] = [[
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/list",
+        ]]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-forwarded-batch-tools-list")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+
+        let responseArray =
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+            as? [[String: Any]]
+        let responseObject = try #require(responseArray?.first)
+        let result = responseObject["result"] as? [String: Any]
+        let tools = try #require(result?["tools"] as? [[String: Any]])
+        let refreshTool = tools.first { $0["name"] as? String == "XcodeRefreshCodeIssuesInFile" }
+        let description = refreshTool?["description"] as? String
+        #expect(description?.contains("--refresh-code-issues-mode upstream") == true)
+        #expect(sessionManager.sentUpstreamCount() == 1)
+    }
+
     @Test func httpToolsListCachesResultOnMissWhenParamsArePresent() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -1011,8 +1299,9 @@ struct HTTPHandlerTests {
         #expect(sessionManager.sentUpstreamCount() == 1)
     }
 
-    @Test func httpToolsListPreservesRefreshDescriptionOnForwardedMiss() async throws {
-        let config = makeConfig()
+    @Test func httpToolsListRewritesRefreshDescriptionOnForwardedMiss() async throws {
+        var config = makeConfig()
+        config.refreshCodeIssuesMode = .proxy
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config) { method, originalID in
@@ -1079,11 +1368,13 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
         let description = tools?.first?["description"] as? String
-        #expect(description == "original description")
+        #expect(description?.contains("avoid switching Spaces") == true)
+        #expect(description?.contains("--refresh-code-issues-mode upstream") == true)
     }
 
-    @Test func httpToolsListPreservesRefreshDescriptionOnCachedResponse() async throws {
-        let config = makeConfig()
+    @Test func httpToolsListRewritesRefreshDescriptionOnCachedResponse() async throws {
+        var config = makeConfig()
+        config.refreshCodeIssuesMode = .upstream
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
@@ -1145,11 +1436,12 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
         let description = tools?.first?["description"] as? String
-        #expect(description == "original description")
+        #expect(description?.contains("native live diagnostics path") == true)
     }
 
     @Test func httpToolsListHidesDisabledToolsOnForwardedMiss() async throws {
         var config = makeConfig()
+        config.refreshCodeIssuesMode = .proxy
         config.disabledToolNames = ["RunAllTests", "RunSomeTests"]
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -1198,7 +1490,7 @@ struct HTTPHandlerTests {
         let result = try #require(object["result"] as? [String: Any])
         let tools = try #require(result["tools"] as? [[String: Any]])
         #expect(tools.map { $0["name"] as? String } == ["XcodeRefreshCodeIssuesInFile"])
-        #expect(tools.first?["description"] as? String == "original description")
+        #expect((tools.first?["description"] as? String)?.contains("avoid switching Spaces") == true)
 
         let cachedResult = try #require(sessionManager.cachedToolsListResult())
         let cachedObject = try #require(cachedResult.foundationObject as? [String: Any])
@@ -1208,6 +1500,7 @@ struct HTTPHandlerTests {
 
     @Test func httpToolsListHidesDisabledToolsOnCachedResponse() async throws {
         var config = makeConfig()
+        config.refreshCodeIssuesMode = .upstream
         config.disabledToolNames = ["RunAllTests", "RunSomeTests"]
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -1251,7 +1544,7 @@ struct HTTPHandlerTests {
         let result = try #require(object["result"] as? [String: Any])
         let tools = try #require(result["tools"] as? [[String: Any]])
         #expect(tools.map { $0["name"] as? String } == ["XcodeRefreshCodeIssuesInFile"])
-        #expect(tools.first?["description"] as? String == "original description")
+        #expect((tools.first?["description"] as? String)?.contains("native live diagnostics path") == true)
     }
 
     @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
@@ -1347,6 +1640,204 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let resources = result?["resources"] as? [Any]
         #expect(resources?.isEmpty == true)
+    }
+
+    @Test func httpSingleItemBatchResourcesListReturnsEmptyArray() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [[String: Any]] = [[
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/list",
+            "params": [String: Any](),
+        ]]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-batch-resources")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+
+        let responseArray =
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+            as? [[String: Any]]
+        let responseObject = try #require(responseArray?.first)
+        #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
+        let result = responseObject["result"] as? [String: Any]
+        let resources = result?["resources"] as? [Any]
+        #expect(resources?.isEmpty == true)
+    }
+
+    @Test func httpForwardedSingleItemBatchResourcesListRewritesUnsupportedResponse() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { method, originalID in
+                #expect(method == "resources/list")
+                let response: [String: Any] = [
+                    "jsonrpc": "2.0",
+                    "id": originalID.value.foundationObject,
+                    "error": [
+                        "code": -32601,
+                        "message": "Method not found",
+                    ],
+                ]
+                return .immediate(try JSONSerialization.data(withJSONObject: response, options: []))
+            }
+        )
+        sessionManager.setInitialized(true)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [[String: Any]] = [[
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "resources/list",
+            "params": [String: Any](),
+        ]]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-forwarded-batch-resources-list")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+
+        let responseArray =
+            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+            as? [[String: Any]]
+        let responseObject = try #require(responseArray?.first)
+        let result = responseObject["result"] as? [String: Any]
+        let resources = result?["resources"] as? [Any]
+        #expect(resources?.isEmpty == true)
+        #expect(sessionManager.sentUpstreamCount() == 1)
+    }
+
+    @Test func forwardingServiceSelectsMatchingObjectFromMultiItemBatchResponse() throws {
+        let responseData = try JSONSerialization.data(
+            withJSONObject: [
+                [
+                    "jsonrpc": "2.0",
+                    "id": "other",
+                    "result": [
+                        "content": [
+                            [
+                                "type": "text",
+                                "text": "other",
+                            ]
+                        ]
+                    ],
+                ],
+                [
+                    "jsonrpc": "2.0",
+                    "id": "wanted",
+                    "result": [
+                        "content": [
+                            [
+                                "type": "text",
+                                "text": "wanted",
+                            ]
+                        ]
+                    ],
+                ],
+            ],
+            options: []
+        )
+
+        let object = MCPForwardingService.responseObject(
+            from: responseData,
+            matching: "wanted"
+        )
+
+        #expect(object?["id"] as? String == "wanted")
+    }
+
+    @Test func forwardingServiceRewritesSingleObjectResourcesListResponseUsingResponseIDMap()
+        throws
+    {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let forwardingService = MCPForwardingService(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let requestData = try JSONSerialization.data(
+            withJSONObject: [[
+                "jsonrpc": "2.0",
+                "id": 91,
+                "method": "resources/list",
+                "params": [String: Any](),
+            ]],
+            options: []
+        )
+        let transform = try RequestInspector.transform(
+            requestData,
+            sessionID: "session-batch-object-rewrite",
+            mapID: { _, _ in 4001 }
+        )
+
+        let responseData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 91,
+                "error": [
+                    "code": -32601,
+                    "message": "Method not found",
+                ],
+            ],
+            options: []
+        )
+        var buffer = ByteBufferAllocator().buffer(capacity: responseData.count)
+        buffer.writeBytes(responseData)
+        let eventLoop = EmbeddedEventLoop()
+        let started = MCPForwardingService.StartedRequest(
+            transform: transform,
+            upstreamIndex: 0,
+            requestTimeout: nil,
+            routerPendingToken: UUID(),
+            future: eventLoop.makeSucceededFuture(buffer)
+        )
+
+        let resolution = forwardingService.resolveResponse(
+            .success(buffer),
+            started: started,
+            sessionID: "session-batch-object-rewrite"
+        )
+
+        guard case .success(let rewrittenData) = resolution,
+            let rewrittenObject = try JSONSerialization.jsonObject(
+                with: rewrittenData,
+                options: []
+            ) as? [String: Any],
+            let result = rewrittenObject["result"] as? [String: Any],
+            let resources = result["resources"] as? [Any]
+        else {
+            Issue.record("expected resources/list response to be rewritten to an empty list")
+            return
+        }
+
+        #expect(resources.isEmpty)
     }
 
     @Test func httpResourceTemplatesListReturnsEmptyArray() async throws {
@@ -1761,9 +2252,9 @@ struct HTTPHandlerTests {
         #expect(result?["resources"] == nil)
     }
 
-    #if false
     @Test func httpRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -1885,8 +2376,607 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpSingleElementBatchRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-proxy-batch, workspacePath: \(workspacePath)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                    ]
+                                ],
+                                "structuredContent": [
+                                    "issues": [
+                                        [
+                                            "path": target.path,
+                                            "message": "target warning",
+                                            "line": 12,
+                                            "severity": "warning",
+                                        ]
+                                    ],
+                                    "totalFound": 1,
+                                    "truncated": false,
+                                ],
+                            ]
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setAvailableUpstreamIndices([1, 0, 0])
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-proxy-batch",
+                payload: [
+                    toolsCallPayload(
+                        id: 130,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy-batch",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    )
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body: [String: Any]
+            if let object = bodyData as? [String: Any] {
+                body = object
+            } else if let array = bodyData as? [[String: Any]],
+                let first = array.first
+            {
+                body = first
+            } else {
+                Issue.record("expected single refresh batch response payload")
+                return
+            }
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let issues = structuredContent?["issues"] as? [[String: Any]]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+            #expect(issues?.count == 1)
+            #expect(issues?.first?["path"] as? String == target.path)
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpMixedBatchKeepsRefreshProxyAndAllowedResponses() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/call" {
+                    switch toolName {
+                    case "XcodeListWindows":
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text:
+                                    "{\"message\":\"* tabIdentifier: windowtab-proxy-mixed, workspacePath: \(workspacePath)\"}"
+                            )
+                        )
+                    case "XcodeListNavigatorIssues":
+                        return .immediate(
+                            try makeToolResultResponse(
+                                id: originalID,
+                                result: [
+                                    "content": [
+                                        [
+                                            "type": "text",
+                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        ]
+                                    ],
+                                    "structuredContent": [
+                                        "issues": [
+                                            [
+                                                "path": target.path,
+                                                "message": "target warning",
+                                                "line": 12,
+                                                "severity": "warning",
+                                            ]
+                                        ],
+                                        "totalFound": 1,
+                                        "truncated": false,
+                                    ],
+                                ]
+                            )
+                        )
+                    case "OtherAllowedTool":
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text: "other-tool-result"
+                            )
+                        )
+                    default:
+                        return .immediate(
+                            try makeToolErrorResponse(
+                                id: originalID,
+                                text: "unexpected tool"
+                            )
+                        )
+                    }
+                }
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-proxy-mixed",
+                payload: [
+                    toolsCallPayload(
+                        id: 230,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy-mixed",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 231,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 2)
+            let refreshResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 230 })?["result"] as? [String: Any]
+            )
+            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+            let otherResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 231 })?["result"] as? [String: Any]
+            )
+            let otherContent = otherResult["content"] as? [[String: Any]]
+            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpMixedBatchReturnsInvalidRequestForScalarLeftoverAfterRefreshSplit() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/call" {
+                    switch toolName {
+                    case "XcodeListWindows":
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text:
+                                    "{\"message\":\"* tabIdentifier: windowtab-proxy-scalar-leftover, workspacePath: \(workspacePath)\"}"
+                            )
+                        )
+                    case "XcodeListNavigatorIssues":
+                        return .immediate(
+                            try makeToolResultResponse(
+                                id: originalID,
+                                result: [
+                                    "content": [
+                                        [
+                                            "type": "text",
+                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        ]
+                                    ],
+                                    "structuredContent": [
+                                        "issues": [
+                                            [
+                                                "path": target.path,
+                                                "message": "target warning",
+                                                "line": 12,
+                                                "severity": "warning",
+                                            ]
+                                        ],
+                                        "totalFound": 1,
+                                        "truncated": false,
+                                    ],
+                                ]
+                            )
+                        )
+                    default:
+                        return .immediate(
+                            try makeToolErrorResponse(
+                                id: originalID,
+                                text: "unexpected tool"
+                            )
+                        )
+                    }
+                }
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-proxy-scalar-leftover",
+                payload: [
+                    toolsCallPayload(
+                        id: 330,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy-scalar-leftover",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    ),
+                    NSNull(),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 2)
+
+            let refreshResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 330 })?["result"] as? [String: Any]
+            )
+            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+
+            let invalidRequest = try #require(
+                body.first(where: { $0["id"] is NSNull })
+            )
+            let error = try #require(invalidRequest["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32600)
+            #expect(error["message"] as? String == "invalid request")
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpMixedBatchPreservesNotificationLeftoverWhenScalarIsStripped() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                switch method {
+                case "tools/call":
+                    switch toolName {
+                    case "XcodeListWindows":
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text:
+                                    "{\"message\":\"* tabIdentifier: windowtab-proxy-notification-leftover, workspacePath: \(workspacePath)\"}"
+                            )
+                        )
+                    case "XcodeListNavigatorIssues":
+                        return .immediate(
+                            try makeToolResultResponse(
+                                id: originalID,
+                                result: [
+                                    "content": [
+                                        [
+                                            "type": "text",
+                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        ]
+                                    ],
+                                    "structuredContent": [
+                                        "issues": [
+                                            [
+                                                "path": target.path,
+                                                "message": "target warning",
+                                                "line": 12,
+                                                "severity": "warning",
+                                            ]
+                                        ],
+                                        "totalFound": 1,
+                                        "truncated": false,
+                                    ],
+                                ]
+                            )
+                        )
+                    default:
+                        return .immediate(
+                            try makeToolErrorResponse(
+                                id: originalID,
+                                text: "unexpected tool"
+                            )
+                        )
+                    }
+                default:
+                    return .immediate(Data())
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-proxy-notification-leftover",
+                payload: [
+                    toolsCallPayload(
+                        id: 340,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy-notification-leftover",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    ),
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": [
+                            "value": "tick"
+                        ],
+                    ],
+                    NSNull(),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 2)
+            #expect(sessionManager.sentMethods().contains("notifications/progress"))
+
+            let refreshResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 340 })?["result"] as? [String: Any]
+            )
+            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+
+            let invalidRequest = try #require(
+                body.first(where: { $0["id"] is NSNull })
+            )
+            let error = try #require(invalidRequest["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32600)
+            #expect(error["message"] as? String == "invalid request")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpMixedBatchRefreshRetryDoesNotReplayAllowedCalls() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
+        let refreshAttempts = NIOLockedValueBox(0)
+        let otherAttempts = NIOLockedValueBox(0)
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeRefreshCodeIssuesInFile":
+                    let attempt = refreshAttempts.withLockedValue { value in
+                        value += 1
+                        return value
+                    }
+                    if attempt == 1 {
+                        return .immediate(
+                            try makeToolErrorResponse(
+                                id: originalID,
+                                text:
+                                    "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
+                            )
+                        )
+                    }
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "refresh-ok"
+                        )
+                    )
+                case "OtherAllowedTool":
+                    otherAttempts.withLockedValue { value in
+                        value += 1
+                    }
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "other-tool-result"
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-upstream-mixed-retry",
+                payload: [
+                    toolsCallPayload(
+                        id: 232,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-upstream-mixed-retry",
+                            "filePath": "App.swift",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 233,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 2)
+            let refreshResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 232 })?["result"] as? [String: Any]
+            )
+            let refreshContent = refreshResult["content"] as? [[String: Any]]
+            #expect(refreshContent?.first?["text"] as? String == "refresh-ok")
+            let otherResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 233 })?["result"] as? [String: Any]
+            )
+            let otherContent = otherResult["content"] as? [[String: Any]]
+            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+            #expect(refreshAttempts.withLockedValue { $0 } == 2)
+            #expect(otherAttempts.withLockedValue { $0 } == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenWindowLookupFailsAfterPreviousSuccess() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2029,8 +3119,115 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesAreTruncated() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-truncated, workspacePath: \(workspacePath)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text": "{\"issues\":[],\"totalFound\":0,\"truncated\":true}"
+                                    ]
+                                ],
+                                "structuredContent": [
+                                    "issues": [],
+                                    "totalFound": 0,
+                                    "truncated": true,
+                                ],
+                            ]
+                        )
+                    )
+                case "XcodeRefreshCodeIssuesInFile":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "upstream-after-truncated-navigator"
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected tool"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-truncated-navigator",
+                payload: toolsCallPayload(
+                    id: 19,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-truncated",
+                        "filePath": "App/Sources/App.swift",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "upstream-after-truncated-navigator")
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+                "XcodeRefreshCodeIssuesInFile",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenResolverCannotFindTarget() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2106,6 +3303,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesFails() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2277,7 +3475,7 @@ struct HTTPHandlerTests {
                 }
                 return .timeout
             },
-            forwarder: { _, _, _, _, _, _ in
+            forwarder: { _, _, _, _, _, _, _ in
                 .success(upstreamFallbackData)
             }
         )
@@ -2297,8 +3495,316 @@ struct HTTPHandlerTests {
         #expect(observedTimeouts.withLockedValue { $0.first } == 50_000_000)
     }
 
+    @Test func refreshWorkflowDoesNotFabricateNavigatorTimeoutWhenRequestTimeoutIsDisabled() async throws {
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let config = makeConfig(requestTimeout: 0)
+        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let debugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: coordinator.maxPendingPerKey,
+            maxPendingTotal: coordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+        )
+        let workflow = RefreshCodeIssuesWorkflow(
+            mode: .proxy,
+            requestTimeout: config.requestTimeout,
+            coordinator: coordinator,
+            targetResolver: RefreshCodeIssuesTargetResolver(),
+            debugState: debugState,
+            windowLookupTimeout: 0.2,
+            navigatorIssuesTimeout: 0.05,
+            logger: ProxyLogging.make("test.refresh")
+        )
+        let observedTimeouts = NIOLockedValueBox<[Int64]>([])
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let requestID = RPCID(any: NSNumber(value: 133))!
+        let requestPayload = toolsCallPayload(
+            id: 133,
+            name: "XcodeRefreshCodeIssuesInFile",
+            arguments: [
+                "tabIdentifier": "windowtab-unbounded-timeout",
+                "filePath": "App/Sources/App.swift",
+            ]
+        )
+        let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
+
+        let result = await workflow.run(
+            refreshRequest: RefreshCodeIssuesRequest(
+                tabIdentifier: "windowtab-unbounded-timeout",
+                filePath: "App/Sources/App.swift"
+            ),
+            bodyData: requestData,
+            sessionID: "session-unbounded-timeout",
+            requestIDs: [requestID],
+            requestIsBatch: false,
+            eventLoop: group.next(),
+            windowsProvider: { _, _, _, _ in
+                [
+                    XcodeWindowInfo(
+                        tabIdentifier: "windowtab-unbounded-timeout",
+                        workspacePath: workspacePath
+                    )
+                ]
+            },
+            internalUpstreamChooser: { _ in 0 },
+            internalToolCaller: { name, _, _, _, _, requestTimeoutOverride in
+                guard name == "XcodeListNavigatorIssues" else {
+                    return .unavailable
+                }
+                observedTimeouts.withLockedValue { values in
+                    values.append(requestTimeoutOverride?.nanoseconds ?? -1)
+                }
+                return .success([
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                        ]
+                    ],
+                    "structuredContent": [
+                        "issues": [
+                            [
+                                "path": target.path,
+                                "message": "target warning",
+                                "line": 12,
+                                "severity": "warning",
+                            ]
+                        ],
+                        "totalFound": 1,
+                        "truncated": false,
+                    ],
+                ])
+            },
+            forwarder: { _, _, _, _, _, _, _ in
+                Issue.record("unbounded timeout should not fall back to upstream")
+                return .invalidRequest
+            }
+        )
+
+        switch result {
+        case .success(let responseData):
+            let object = try #require(
+                JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+            )
+            let responseResult = object["result"] as? [String: Any]
+            let structuredContent = responseResult?["structuredContent"] as? [String: Any]
+            let issues = structuredContent?["issues"] as? [[String: Any]]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+            #expect(issues?.first?["path"] as? String == target.path)
+        default:
+            Issue.record("expected workflow to keep proxy path when request timeout is disabled")
+        }
+
+        #expect(observedTimeouts.withLockedValue { $0.first } == -1)
+    }
+
+    @Test func refreshWorkflowPreservesCancellationWhenNavigatorIssuesCallIsCancelled()
+        async throws
+    {
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let debugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: coordinator.maxPendingPerKey,
+            maxPendingTotal: coordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+        )
+        let workflow = RefreshCodeIssuesWorkflow(
+            mode: .proxy,
+            requestTimeout: 2,
+            coordinator: coordinator,
+            targetResolver: RefreshCodeIssuesTargetResolver(),
+            debugState: debugState,
+            windowLookupTimeout: 0.2,
+            navigatorIssuesTimeout: 0.05,
+            logger: ProxyLogging.make("test.refresh")
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let requestID = RPCID(any: NSNumber(value: 144))!
+        let requestPayload = toolsCallPayload(
+            id: 144,
+            name: "XcodeRefreshCodeIssuesInFile",
+            arguments: [
+                "tabIdentifier": "windowtab-cancelled-navigator",
+                "filePath": "App/Sources/App.swift",
+            ]
+        )
+        let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
+
+        let result = await workflow.run(
+            refreshRequest: RefreshCodeIssuesRequest(
+                tabIdentifier: "windowtab-cancelled-navigator",
+                filePath: "App/Sources/App.swift"
+            ),
+            bodyData: requestData,
+            sessionID: "session-cancelled-navigator",
+            requestIDs: [requestID],
+            requestIsBatch: false,
+            eventLoop: group.next(),
+            windowsProvider: { _, _, _, _ in
+                [
+                    XcodeWindowInfo(
+                        tabIdentifier: "windowtab-cancelled-navigator",
+                        workspacePath: workspacePath
+                    )
+                ]
+            },
+            internalUpstreamChooser: { _ in 0 },
+            internalToolCaller: { name, _, _, _, _, _ in
+                #expect(name == "XcodeListNavigatorIssues")
+                return .cancelled
+            },
+            forwarder: { _, _, _, _, _, _, _ in
+                Issue.record("cancelled navigator lookup should not fall back upstream")
+                return .invalidRequest
+            }
+        )
+
+        guard case .cancelled(let responseIDs, let isBatch) = result else {
+            Issue.record("expected cancelled result")
+            return
+        }
+        #expect(responseIDs.map(\.key) == [requestID.key])
+        #expect(isBatch == false)
+    }
+
+    @Test func refreshWorkflowPreservesBackslashesInNavigatorGlob() async throws {
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("Group\\Folder/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let config = makeConfig(requestTimeout: 1)
+        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let debugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: coordinator.maxPendingPerKey,
+            maxPendingTotal: coordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+        )
+        let workflow = RefreshCodeIssuesWorkflow(
+            mode: .proxy,
+            requestTimeout: config.requestTimeout,
+            coordinator: coordinator,
+            targetResolver: RefreshCodeIssuesTargetResolver(),
+            debugState: debugState,
+            logger: ProxyLogging.make("test.refresh")
+        )
+        let observedGlob = NIOLockedValueBox<String?>(nil)
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let requestID = RPCID(any: NSNumber(value: 233))!
+        let requestPayload = toolsCallPayload(
+            id: 233,
+            name: "XcodeRefreshCodeIssuesInFile",
+            arguments: [
+                "tabIdentifier": "windowtab-backslash",
+                "filePath": "Group\\Folder/App.swift",
+            ]
+        )
+        let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
+
+        let result = await workflow.run(
+            refreshRequest: RefreshCodeIssuesRequest(
+                tabIdentifier: "windowtab-backslash",
+                filePath: "Group\\Folder/App.swift"
+            ),
+            bodyData: requestData,
+            sessionID: "session-backslash",
+            requestIDs: [requestID],
+            requestIsBatch: false,
+            eventLoop: group.next(),
+            windowsProvider: { _, _, _, _ in
+                [
+                    XcodeWindowInfo(
+                        tabIdentifier: "windowtab-backslash",
+                        workspacePath: workspacePath
+                    )
+                ]
+            },
+            internalUpstreamChooser: { _ in 0 },
+            internalToolCaller: { name, arguments, _, _, _, _ in
+                guard name == "XcodeListNavigatorIssues" else {
+                    return .unavailable
+                }
+                observedGlob.withLockedValue { $0 = arguments["glob"] as? String }
+                return .success([
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"issues\":[],\"totalFound\":0,\"truncated\":false}"
+                        ]
+                    ],
+                    "structuredContent": [
+                        "issues": [],
+                        "totalFound": 0,
+                        "truncated": false,
+                    ],
+                ])
+            },
+            forwarder: { _, _, _, _, _, _, _ in
+                Issue.record("backslash-preserving proxy path should not fall back upstream")
+                return .invalidRequest
+            }
+        )
+
+        switch result {
+        case .success:
+            #expect(observedGlob.withLockedValue { $0 } == "**/Group\\Folder/App.swift")
+        default:
+            Issue.record("expected workflow to stay on proxy path for backslash-containing path")
+        }
+    }
+
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWithUnlimitedTimeout() async throws {
         var config = makeConfig(requestTimeout: 0)
+        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -2386,6 +3892,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -2438,8 +3945,77 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpSingleElementBatchRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
+        let attempts = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { method, originalID in
+                #expect(method == "tools/call")
+                let attempt = attempts.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text:
+                                "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
+                        )
+                    )
+                }
+                return .immediate(try makeToolSuccessResponse(id: originalID, text: "ok"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-retry-batch",
+                payload: [
+                    toolsCallPayload(
+                        id: 110,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-retry-batch",
+                            "filePath": "App.swift",
+                        ]
+                    )
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body: [String: Any]
+            if let object = bodyData as? [String: Any] {
+                body = object
+            } else if let array = bodyData as? [[String: Any]],
+                let first = array.first
+            {
+                body = first
+            } else {
+                Issue.record("expected single refresh batch response payload")
+                return
+            }
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) != true)
+            #expect(sessionManager.sentUpstreamCount() == 2)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpRefreshCodeIssuesRetriesShortSourceEditorErrorFiveText() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -2494,6 +4070,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesDoesNotRetryNonRetryableToolError() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamPlanResponder: { method, originalID in
@@ -2702,6 +4279,72 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpMixedBatchDropsDisabledNotificationBeforeForwardingAllowedCalls() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "OtherAllowedTool")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "other-tool-result"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-disabled-notification-mixed",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": [
+                            "name": "RunAllTests",
+                            "arguments": [:],
+                        ],
+                    ],
+                    toolsCallPayload(
+                        id: 441,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body: [String: Any]
+            if let object = bodyData as? [String: Any] {
+                body = object
+            } else if let array = bodyData as? [[String: Any]],
+                let first = array.first
+            {
+                body = first
+            } else {
+                Issue.record("expected forwarded allowed tool response payload")
+                return
+            }
+            let result = body["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "other-tool-result")
+            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpDisabledToolBatchReturnsLocalAndQueueErrorsWhenNoUpstreamIsAvailable() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.disabledToolNames = ["RunAllTests"]
@@ -2900,6 +4543,7 @@ struct HTTPHandlerTests {
 
     @Test func httpDisabledToolNamesDoNotBlockInternalRefreshWorkflowCalls() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         config.disabledToolNames = ["XcodeListWindows"]
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
@@ -3007,6 +4651,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorWhenQueueIsFull() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 0,
             maxPendingTotal: 8,
@@ -3078,6 +4723,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshProxyReturnsBackpressureErrorWhenQueueIsFull() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 0,
             maxPendingTotal: 8,
@@ -3187,6 +4833,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 4,
             maxPendingTotal: 8,
@@ -3258,6 +4905,7 @@ struct HTTPHandlerTests {
 
     @Test func httpRefreshProxyReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
         let coordinator = RefreshCodeIssuesCoordinator(
             maxPendingPerKey: 4,
             maxPendingTotal: 8,
@@ -3365,8 +5013,9 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
-    @Test func httpRefreshProxyInternalToolCallsDoNotResetUpstreamSuccessState() async throws {
+    @Test func httpRefreshProxyInternalToolCallsUpdateUpstreamHealthState() async throws {
         var config = makeConfig(requestTimeout: 0.2)
+        config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -3437,7 +5086,7 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
                 "XcodeRefreshCodeIssuesInFile",
             ])
-            #expect(sessionManager.requestSuccessNotificationCount() == 0)
+            #expect(sessionManager.requestSuccessNotificationCount() == 2)
             #expect(sessionManager.requestTimeoutNotificationCount() == 1)
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
@@ -3480,6 +5129,8 @@ struct HTTPHandlerTests {
         switch result {
         case .success:
             break
+        case .cancelled:
+            Issue.record("expected the requested upstream dispatch to succeed")
         case .timeout:
             Issue.record("expected the requested upstream dispatch to succeed")
         case .unavailable:
@@ -3487,10 +5138,13 @@ struct HTTPHandlerTests {
         }
         #expect(sessionManager.sentToolRequests() == ["XcodeListNavigatorIssues@0"])
         #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        #expect(sessionManager.requestSuccessNotificationCount() == 1)
+        #expect(sessionManager.requestTimeoutNotificationCount() == 0)
     }
 
     @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
         var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -3564,67 +5218,21 @@ struct HTTPHandlerTests {
 
         await server.shutdown()
     }
-    #endif
 
-    @Test func httpRefreshCodeIssuesUsesGenericUpstreamForwarding() async throws {
-        let config = makeConfig(requestTimeout: 2)
-        let sessionManager = TestRuntimeCoordinator(
-            config: config,
-            upstreamRequestResponder: { method, toolName, originalID in
-                #expect(method == "tools/call")
-                #expect(toolName == "XcodeRefreshCodeIssuesInFile")
-                return .immediate(
-                    try makeToolSuccessResponse(
-                        id: originalID,
-                        text: "upstream-result"
-                    )
-                )
-            }
-        )
-        sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
-            config: config,
-            sessionManager: sessionManager
-        )
-
-        do {
-            let (response, body) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-refresh-forward",
-                payload: toolsCallPayload(
-                    id: 30,
-                    name: "XcodeRefreshCodeIssuesInFile",
-                    arguments: [
-                        "tabIdentifier": "windowtab-refresh-forward",
-                        "filePath": "App/Sources/App.swift",
-                    ]
-                )
-            )
-
-            #expect(response.statusCode == 200)
-            let result = body["result"] as? [String: Any]
-            let content = result?["content"] as? [[String: Any]]
-            #expect(content?.first?["text"] as? String == "upstream-result")
-            #expect(sessionManager.sentToolNames() == ["XcodeRefreshCodeIssuesInFile"])
-        } catch {
-            await server.shutdown()
-            throw error
-        }
-        await server.shutdown()
-    }
-
-    @Test func httpRefreshCodeIssuesDoesNotRetryErrorFive() async throws {
-        let config = makeConfig(requestTimeout: 2)
+    @Test func httpRefreshCodeIssuesCompletesLeaseWhenRetryBudgetExpires() async throws {
+        var config = makeConfig(requestTimeout: 0.5)
+        config.refreshCodeIssuesMode = .upstream
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamPlanResponder: { method, originalID in
                 #expect(method == "tools/call")
-                return .immediate(
+                return .delayed(
                     try makeToolErrorResponse(
                         id: originalID,
                         text:
                             "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
-                    )
+                    ),
+                    delayNanos: 350_000_000
                 )
             }
         )
@@ -3637,12 +5245,12 @@ struct HTTPHandlerTests {
         do {
             let (response, body) = try await postHTTPJSON(
                 url: server.url,
-                sessionID: "session-refresh-error-five",
+                sessionID: "session-retry-budget-exhausted",
                 payload: toolsCallPayload(
-                    id: 31,
+                    id: 19,
                     name: "XcodeRefreshCodeIssuesInFile",
                     arguments: [
-                        "tabIdentifier": "windowtab-refresh-error-five",
+                        "tabIdentifier": "windowtab-retry-budget-exhausted",
                         "filePath": "App.swift",
                     ]
                 )
@@ -3652,22 +5260,32 @@ struct HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             #expect((result?["isError"] as? Bool) == true)
             #expect(sessionManager.sentUpstreamCount() == 1)
+            #expect(sessionManager.requeuedLeaseCount() == 0)
+
+            let lease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(lease.state == .completed)
         } catch {
             await server.shutdown()
             throw error
         }
+
         await server.shutdown()
     }
 
-    @Test func httpDisabledToolBatchDropsBlockedNotificationsBeforeForwarding() async throws {
+    @Test func httpDirectRefreshSuccessDoesNotRecordLateLeaseResponse() async throws {
         var config = makeConfig(requestTimeout: 2)
-        config.disabledToolNames = ["RunAllTests"]
+        config.refreshCodeIssuesMode = .upstream
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
                 #expect(method == "tools/call")
-                #expect(toolName == "XcodeListWindows")
-                return .immediate(try makeToolSuccessResponse(id: originalID, text: "allowed"))
+                #expect(toolName == "XcodeRefreshCodeIssuesInFile")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "refresh-ok"
+                    )
+                )
             }
         )
         sessionManager.setInitialized(true)
@@ -3677,43 +5295,74 @@ struct HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let (response, body) = try await postHTTPJSON(
                 url: server.url,
-                sessionID: "session-disabled-batch-notification",
-                payload: [
-                    [
-                        "jsonrpc": "2.0",
-                        "method": "tools/call",
-                        "params": [
-                            "name": "RunAllTests",
-                            "arguments": [:],
-                        ],
-                    ],
-                    [
-                        "jsonrpc": "2.0",
-                        "id": 401,
-                        "method": "tools/call",
-                        "params": [
-                            "name": "XcodeListWindows",
-                            "arguments": [:],
-                        ],
-                    ],
-                ]
+                sessionID: "session-direct-refresh-success",
+                payload: toolsCallPayload(
+                    id: 42,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-direct-success",
+                        "filePath": "App.swift",
+                    ]
+                )
             )
 
             #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 1)
-            let allowed = bodyArray.first
-            let allowedResult = allowed?["result"] as? [String: Any]
-            let allowedContent = allowedResult?["content"] as? [[String: Any]]
-            #expect((allowed?["id"] as? NSNumber)?.intValue == 401)
-            #expect(allowedContent?.first?["text"] as? String == "allowed")
-            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+            let result = body["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "refresh-ok")
+
+            let lease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(lease.state == .completed)
+            #expect(lease.lateResponseCount == 0)
         } catch {
             await server.shutdown()
             throw error
         }
+
+        await server.shutdown()
+    }
+
+    @Test func httpDirectRefreshCancellationAbandonsActiveLease() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .upstream
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: nil,
+            cancelAfterStartingEnqueueRequest: true
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-direct-refresh-cancelled",
+                payload: toolsCallPayload(
+                    id: 43,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-direct-cancelled",
+                        "filePath": "App.swift",
+                    ]
+                )
+            )
+            #expect(response.statusCode == 202)
+            #expect(body.isEmpty)
+            #expect(sessionManager.sentUpstreamCount() == 1)
+
+            let abandonedLease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(abandonedLease.state == .abandoned)
+            #expect(abandonedLease.releaseReason == "clientDisconnected")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+
         await server.shutdown()
     }
 }
@@ -3791,36 +5440,43 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
+    private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = RequestLeaseRegistry()
 
     init(
         config: ProxyConfig,
-        upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil
+        upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
+        cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = nil
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
+        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: ProxyConfig,
-        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
+        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = nil
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
+        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: ProxyConfig,
-        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
+        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = upstreamRequestResponder
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
+        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     func session(id: String) -> SessionContext {
@@ -3928,6 +5584,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             return eventLoop.makeFailedFuture(
                 NSError(domain: "TestRuntimeCoordinator", code: 1)
             )
+        }
+        if cancelAfterStartingEnqueueRequest {
+            _ = starter(upstreamIndex)
+            return eventLoop.makeFailedFuture(CancellationError())
         }
         return starter(upstreamIndex)
     }
@@ -4275,6 +5935,12 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func sentMethods() -> [String] {
+        state.withLockedValue { state in
+            state.sentRequests.map(\.method)
+        }
+    }
+
     func assignedUpstreamIDCount() -> Int {
         state.withLockedValue { $0.assignUpstreamIDCount }
     }
@@ -4359,11 +6025,17 @@ private func makeHTTPTemporaryWorkspaceRoot() -> String {
 private func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: ProxyConfig,
-    sessionManager: any RuntimeCoordinating
+    sessionManager: any RuntimeCoordinating,
+    refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
+    refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
+    refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
 ) throws {
     let handler = HTTPHandler(
         config: config,
-        sessionManager: sessionManager
+        sessionManager: sessionManager,
+        refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
+        refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
+        refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
     )
     try channel.pipeline.addHandler(handler).wait()
 }
@@ -4442,9 +6114,21 @@ private struct TestHTTPHandlerServer {
 
     static func start(
         config: ProxyConfig,
-        sessionManager: any RuntimeCoordinating
+        sessionManager: any RuntimeCoordinating,
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
+        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let refreshCoordinator =
+            refreshCodeIssuesCoordinator
+            ?? RefreshCodeIssuesCoordinator.makeDefault(
+                requestTimeout: config.requestTimeout
+            )
+        let refreshDebugState = RefreshCodeIssuesDebugState(
+            maxPendingPerKey: refreshCoordinator.maxPendingPerKey,
+            maxPendingTotal: refreshCoordinator.maxPendingTotal,
+            queueWaitTimeoutSeconds: refreshCoordinator.queueWaitTimeoutSeconds
+        )
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -4453,7 +6137,10 @@ private struct TestHTTPHandlerServer {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
-                            sessionManager: sessionManager
+                            sessionManager: sessionManager,
+                            refreshCodeIssuesCoordinator: refreshCoordinator,
+                            refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
+                            refreshCodeIssuesDebugState: refreshDebugState
                         )
                     )
                 }
@@ -4567,10 +6254,12 @@ private func getHTTPData(url: URL) async throws -> (HTTPURLResponse, Data) {
     }
 }
 
-private func makeDebugSnapshotURL(from mcpURL: URL) -> URL {
+private func makeDebugSnapshotURL(from mcpURL: URL, includeSensitive: Bool = false) -> URL {
     var components = URLComponents(url: mcpURL, resolvingAgainstBaseURL: false)!
     components.path = "/debug/upstreams"
-    components.query = nil
+    components.queryItems = includeSensitive
+        ? [URLQueryItem(name: "includeSensitive", value: "1")]
+        : nil
     return components.url!
 }
 

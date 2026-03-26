@@ -131,6 +131,7 @@ See Quick Start for how to launch.
 | `--request-timeout seconds` | Request timeout (`0` disables non-initialize timeouts; `initialize` still uses a bounded handshake timeout) |
 | `--config path` | Path to proxy config TOML for overriding the upstream handshake |
 | `--auto-approve` | Opt in to auto-approve the Xcode permission dialog |
+| `--refresh-code-issues-mode mode` | Serve `XcodeRefreshCodeIssuesInFile` via proxy navigator issues (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`) |
 | `--force-restart` | If the listen port is in use, terminate an existing `xcode-mcp-proxy-server` and restart |
 
 #### Environment Variables
@@ -143,6 +144,7 @@ See Quick Start for how to launch.
 | `MCP_XCODE_PID` | Passed through to upstream `mcpbridge`; the proxy itself does not parse it |
 | `MCP_XCODE_SESSION_ID` | Optional explicit upstream session ID |
 | `MCP_XCODE_CONFIG` | Proxy config TOML path; `--config` takes precedence |
+| `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream` |
 | `MCP_LOG_LEVEL` | Log level: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` |
 
 Logs are written to stderr.

@@ -5,35 +5,30 @@ import ProxyCLI
 
 @Suite
 struct ServerCommandTests {
-    @Test func serverCommandRejectsRemovedRefreshCodeIssuesMode() throws {
-        #expect(throws: ProxyServerCommandError.self) {
-            _ = try XcodeMCPProxyServerCommand.parseOptions(args: [
-                "xcode-mcp-proxy-server",
-                "--listen",
-                "127.0.0.1:9000",
-                "--auto-approve",
-                "--refresh-code-issues-mode",
-                "upstream",
-                "--force-restart",
-                "--dry-run",
-            ])
-        }
+    @Test func serverCommandParsesForceRestartAndDryRun() throws {
+        let options = try XcodeMCPProxyServerCommand.parseOptions(args: [
+            "xcode-mcp-proxy-server",
+            "--listen",
+            "127.0.0.1:9000",
+            "--auto-approve",
+            "--refresh-code-issues-mode",
+            "upstream",
+            "--force-restart",
+            "--dry-run",
+        ])
 
-        do {
-            _ = try XcodeMCPProxyServerCommand.parseOptions(args: [
-                "xcode-mcp-proxy-server",
-                "--listen",
-                "127.0.0.1:9000",
-                "--auto-approve",
-                "--refresh-code-issues-mode",
-                "upstream",
-                "--force-restart",
-                "--dry-run",
-            ])
-            #expect(Bool(false))
-        } catch let error as ProxyServerCommandError {
-            #expect(error.description == CLIParser.removedRefreshCodeIssuesModeMessage)
-        }
+        #expect(options.forwardedArgs == [
+            "--listen", "127.0.0.1:9000",
+            "--auto-approve",
+            "--refresh-code-issues-mode", "upstream",
+        ])
+        #expect(options.showHelp == false)
+        #expect(options.showVersion == false)
+        #expect(options.hasListenFlag == true)
+        #expect(options.hasAutoApproveFlag == true)
+        #expect(options.hasRefreshCodeIssuesModeFlag == true)
+        #expect(options.forceRestart == true)
+        #expect(options.dryRun == true)
     }
 
     @Test func serverCommandPrintsVersionBeforeValidation() async throws {
@@ -123,6 +118,40 @@ struct ServerCommandTests {
         #expect(line.contains("Usage:"))
     }
 
+    @Test func serverCommandHelpWinsOverVersionWhenRefreshModeValueIsMissing() async throws {
+        let output = CapturedLines()
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                stderr: { errors.append($0) },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in
+                    Issue.record("makeServer should not be called for --help")
+                    return RecordingProxyServer()
+                },
+                isAddressAlreadyInUse: { _ in false },
+                detectExistingProxyServerPIDs: { _, _ in [] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy-server",
+                "--version",
+                "--refresh-code-issues-mode",
+                "--help",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(errors.snapshot().isEmpty)
+        let line = try #require(output.snapshot().first)
+        #expect(line.contains("Usage:"))
+    }
+
     @Test func serverCommandAppliesEnvironmentDefaultsWithoutXcodePID() throws {
         var options = ProxyServerOptions(
             forwardedArgs: [],
@@ -133,36 +162,26 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasConfigFlag: false,
             hasAutoApproveFlag: false,
+            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )
 
-        #expect(throws: ProxyServerCommandError.self) {
-            try XcodeMCPProxyServerCommand.applyDefaults(
-                from: [
-                    "HOST": "127.0.0.1",
-                    "PORT": "9999",
-                    "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
-                    "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
-                ],
-                to: &options
-            )
-        }
+        try XcodeMCPProxyServerCommand.applyDefaults(
+            from: [
+                "HOST": "127.0.0.1",
+                "PORT": "9999",
+                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
+            ],
+            to: &options
+        )
 
-        do {
-            try XcodeMCPProxyServerCommand.applyDefaults(
-                from: [
-                    "HOST": "127.0.0.1",
-                    "PORT": "9999",
-                    "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
-                    "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
-                ],
-                to: &options
-            )
-            #expect(Bool(false))
-        } catch let error as ProxyServerCommandError {
-            #expect(error.description == CLIParser.removedRefreshCodeIssuesModeEnvMessage)
-        }
+        #expect(options.forwardedArgs == [
+            "--listen", "127.0.0.1:9999",
+            "--config", "/tmp/proxy-config.toml",
+            "--refresh-code-issues-mode", "upstream",
+        ])
     }
 
     @Test func serverCommandExplicitConfigOverridesEnvironment() throws {
@@ -175,6 +194,7 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasConfigFlag: true,
             hasAutoApproveFlag: false,
+            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )
@@ -201,6 +221,7 @@ struct ServerCommandTests {
             hasPortFlag: false,
             hasConfigFlag: false,
             hasAutoApproveFlag: false,
+            hasRefreshCodeIssuesModeFlag: false,
             forceRestart: false,
             dryRun: false
         )

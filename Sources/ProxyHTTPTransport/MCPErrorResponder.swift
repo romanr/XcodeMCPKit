@@ -6,7 +6,8 @@ enum MCPErrorResponder {
         id: RPCID?,
         code: Int,
         message: String,
-        data: JSONValue? = nil
+        data: JSONValue? = nil,
+        forceBatchArray: Bool = false
     ) -> Data? {
         let errorObject = makeErrorObject(code: code, message: message, data: data)
         let response: [String: Any] = [
@@ -14,10 +15,11 @@ enum MCPErrorResponder {
             "id": id?.value.foundationObject ?? NSNull(),
             "error": errorObject,
         ]
-        guard JSONSerialization.isValidJSONObject(response) else {
+        let payload: Any = forceBatchArray ? [response] : response
+        guard JSONSerialization.isValidJSONObject(payload) else {
             return nil
         }
-        return try? JSONSerialization.data(withJSONObject: response, options: [])
+        return try? JSONSerialization.data(withJSONObject: payload, options: [])
     }
 
     static func errorResponseData(
@@ -28,10 +30,22 @@ enum MCPErrorResponder {
         forceBatchArray: Bool = false
     ) -> Data? {
         if ids.isEmpty {
-            return errorResponseData(id: nil, code: code, message: message, data: data)
+            return errorResponseData(
+                id: nil,
+                code: code,
+                message: message,
+                data: data,
+                forceBatchArray: forceBatchArray
+            )
         }
-        if ids.count == 1, forceBatchArray == false {
-            return errorResponseData(id: ids[0], code: code, message: message, data: data)
+        if ids.count == 1 {
+            return errorResponseData(
+                id: ids[0],
+                code: code,
+                message: message,
+                data: data,
+                forceBatchArray: forceBatchArray
+            )
         }
         let errorObject = makeErrorObject(code: code, message: message, data: data)
         let responses: [[String: Any]] = ids.map { id in

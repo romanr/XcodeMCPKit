@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import ProxyFeatureXcode
 import ProxyRuntime
 
 package struct HTTPDebugSnapshot: Codable, Sendable {
@@ -12,8 +13,12 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let sessions: [SessionDebugSnapshot]
     package let leases: [RequestLeaseDebugSnapshot]
     package let queuedRequestCount: Int
-    
-    package init(base: ProxyDebugSnapshot) {
+    package let refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
+
+    package init(
+        base: ProxyDebugSnapshot,
+        refreshCodeIssues: RefreshCodeIssuesDebugSnapshot?
+    ) {
         self.generatedAt = base.generatedAt
         self.proxyInitialized = base.proxyInitialized
         self.cachedToolsListAvailable = base.cachedToolsListAvailable
@@ -23,6 +28,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.sessions = base.sessions
         self.leases = base.leases
         self.queuedRequestCount = base.queuedRequestCount
+        self.refreshCodeIssues = refreshCodeIssues
     }
 }
 
@@ -36,9 +42,17 @@ package struct HTTPSSEOpenResult {
 
 package final class HTTPControlService: Sendable {
     private let runtimeCoordinator: any RuntimeCoordinating
+    private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator?
+    private let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState?
 
-    package init(runtimeCoordinator: any RuntimeCoordinating) {
+    package init(
+        runtimeCoordinator: any RuntimeCoordinating,
+        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
+        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
+    ) {
         self.runtimeCoordinator = runtimeCoordinator
+        self.refreshCodeIssuesCoordinator = refreshCodeIssuesCoordinator
+        self.refreshCodeIssuesDebugState = refreshCodeIssuesDebugState
     }
 
     package func debugSnapshotData(includeSensitiveDebugPayloads: Bool = false) -> Data? {
@@ -49,7 +63,10 @@ package final class HTTPControlService: Sendable {
             HTTPDebugSnapshot(
                 base: runtimeCoordinator.debugSnapshot(
                     includeSensitiveDebugPayloads: includeSensitiveDebugPayloads
-                )
+                ),
+                refreshCodeIssues: includeSensitiveDebugPayloads
+                    ? refreshCodeIssuesDebugState?.snapshot()
+                    : nil
             )
         )
     }
@@ -78,7 +95,12 @@ package final class HTTPControlService: Sendable {
     }
 
     package func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
-        runtimeCoordinator.debugReset()
-        return eventLoop.makeSucceededFuture(())
+        let promise = eventLoop.makePromise(of: Void.self)
+        promise.completeWithTask { [runtimeCoordinator, refreshCodeIssuesCoordinator, refreshCodeIssuesDebugState] in
+            await refreshCodeIssuesCoordinator?.reset()
+            refreshCodeIssuesDebugState?.reset()
+            runtimeCoordinator.debugReset()
+        }
+        return promise.futureResult
     }
 }

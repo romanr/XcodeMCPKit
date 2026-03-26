@@ -6,9 +6,12 @@ package struct RequestTransform {
     package let isBatch: Bool
     package let idKey: String?
     package let responseIDs: [RPCID]
+    package let responseMethodsByIDKey: [String: String]
+    package let responseOriginalIDsByKey: [String: RPCID]
     package let method: String?
     package let originalID: RPCID?
     package let isCacheableToolsListRequest: Bool
+    package let cacheableToolsListResponseIDKey: String?
 }
 
 package enum RequestInspector {
@@ -33,9 +36,12 @@ package enum RequestInspector {
                     isBatch: false,
                     idKey: rpcID.key,
                     responseIDs: [rpcID],
+                    responseMethodsByIDKey: method.map { [rpcID.key: $0] } ?? [:],
+                    responseOriginalIDsByKey: [rpcID.key: rpcID],
                     method: method,
                     originalID: rpcID,
-                    isCacheableToolsListRequest: isCacheableToolsListRequest
+                    isCacheableToolsListRequest: isCacheableToolsListRequest,
+                    cacheableToolsListResponseIDKey: isCacheableToolsListRequest ? rpcID.key : nil
                 )
             }
             let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
@@ -45,15 +51,20 @@ package enum RequestInspector {
                 isBatch: false,
                 idKey: nil,
                 responseIDs: [],
+                responseMethodsByIDKey: [:],
+                responseOriginalIDsByKey: [:],
                 method: method,
                 originalID: nil,
-                isCacheableToolsListRequest: isCacheableToolsListRequest
+                isCacheableToolsListRequest: isCacheableToolsListRequest,
+                cacheableToolsListResponseIDKey: nil
             )
         }
 
         if let array = json as? [Any] {
             var transformed: [Any] = []
             var responseIDs: [RPCID] = []
+            var responseMethodsByIDKey: [String: String] = [:]
+            var responseOriginalIDsByKey: [String: RPCID] = [:]
             responseIDs.reserveCapacity(array.count)
             for item in array {
                 if var object = item as? [String: Any] {
@@ -61,12 +72,27 @@ package enum RequestInspector {
                         let upstreamID = mapID(sessionID, rpcID)
                         object["id"] = upstreamID
                         responseIDs.append(rpcID)
+                        responseOriginalIDsByKey[rpcID.key] = rpcID
+                        if let method = object["method"] as? String {
+                            responseMethodsByIDKey[rpcID.key] = method
+                        }
                     }
                     transformed.append(object)
                 } else {
                     transformed.append(item)
                 }
             }
+            let cacheableToolsListResponseIDKey: String? = {
+                guard array.count == 1,
+                    let firstObject = array.first as? [String: Any],
+                    firstObject["method"] as? String == "tools/list",
+                    let firstID = firstObject["id"],
+                    let rpcID = RPCID(any: firstID)
+                else {
+                    return nil
+                }
+                return rpcID.key
+            }()
             let upstream = try JSONSerialization.data(withJSONObject: transformed, options: [])
             return RequestTransform(
                 upstreamData: upstream,
@@ -74,9 +100,12 @@ package enum RequestInspector {
                 isBatch: true,
                 idKey: nil,
                 responseIDs: responseIDs,
+                responseMethodsByIDKey: responseMethodsByIDKey,
+                responseOriginalIDsByKey: responseOriginalIDsByKey,
                 method: nil,
                 originalID: nil,
-                isCacheableToolsListRequest: false
+                isCacheableToolsListRequest: cacheableToolsListResponseIDKey != nil,
+                cacheableToolsListResponseIDKey: cacheableToolsListResponseIDKey
             )
         }
 
@@ -86,9 +115,12 @@ package enum RequestInspector {
             isBatch: false,
             idKey: nil,
             responseIDs: [],
+            responseMethodsByIDKey: [:],
+            responseOriginalIDsByKey: [:],
             method: nil,
             originalID: nil,
-            isCacheableToolsListRequest: false
+            isCacheableToolsListRequest: false,
+            cacheableToolsListResponseIDKey: nil
         )
     }
 }

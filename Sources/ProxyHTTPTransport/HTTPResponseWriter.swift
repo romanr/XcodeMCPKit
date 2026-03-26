@@ -110,6 +110,7 @@ package struct HTTPResponseWriter: Sendable {
         id: RPCID?,
         code: Int,
         message: String,
+        forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
         sessionID: String,
@@ -118,7 +119,8 @@ package struct HTTPResponseWriter: Sendable {
         guard let data = MCPErrorResponder.errorResponseData(
             id: id,
             code: code,
-            message: message
+            message: message,
+            forceBatchArray: forceBatchArray
         ) else {
             return sendPlain(
                 on: channel,

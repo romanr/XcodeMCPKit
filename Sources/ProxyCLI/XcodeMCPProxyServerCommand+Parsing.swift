@@ -13,6 +13,7 @@ extension XcodeMCPProxyServerCommand {
             hasPortFlag: scan.hasPortFlag,
             hasConfigFlag: scan.hasConfigFlag,
             hasAutoApproveFlag: scan.hasAutoApproveFlag,
+            hasRefreshCodeIssuesModeFlag: scan.hasRefreshCodeIssuesModeFlag,
             forceRestart: scan.forceRestart,
             dryRun: scan.dryRun
         )
@@ -52,9 +53,10 @@ extension XcodeMCPProxyServerCommand {
             throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
         }
 
-        if let mode = nonEmpty(environment[CLIParser.removedRefreshCodeIssuesModeEnv]) {
-            _ = mode
-            throw ProxyServerCommandError.message(CLIParser.removedRefreshCodeIssuesModeEnvMessage)
+        if !options.hasRefreshCodeIssuesModeFlag,
+            let mode = nonEmpty(environment["MCP_XCODE_REFRESH_CODE_ISSUES_MODE"])
+        {
+            options.forwardedArgs += ["--refresh-code-issues-mode", mode]
         }
     }
 
@@ -70,6 +72,7 @@ extension XcodeMCPProxyServerCommand {
           --config path
           --auto-approve
           --upstream-processes n
+          --refresh-code-issues-mode proxy|upstream
           --force-restart
           --dry-run
           --version

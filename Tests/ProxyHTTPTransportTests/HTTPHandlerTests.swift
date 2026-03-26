@@ -2580,6 +2580,256 @@ struct HTTPHandlerTests {
         await server.shutdown()
     }
 
+    @Test func httpMixedBatchReturnsInvalidRequestForScalarLeftoverAfterRefreshSplit() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/call" {
+                    switch toolName {
+                    case "XcodeListWindows":
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text:
+                                    "{\"message\":\"* tabIdentifier: windowtab-proxy-scalar-leftover, workspacePath: \(workspacePath)\"}"
+                            )
+                        )
+                    case "XcodeListNavigatorIssues":
+                        return .immediate(
+                            try makeToolResultResponse(
+                                id: originalID,
+                                result: [
+                                    "content": [
+                                        [
+                                            "type": "text",
+                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        ]
+                                    ],
+                                    "structuredContent": [
+                                        "issues": [
+                                            [
+                                                "path": target.path,
+                                                "message": "target warning",
+                                                "line": 12,
+                                                "severity": "warning",
+                                            ]
+                                        ],
+                                        "totalFound": 1,
+                                        "truncated": false,
+                                    ],
+                                ]
+                            )
+                        )
+                    default:
+                        return .immediate(
+                            try makeToolErrorResponse(
+                                id: originalID,
+                                text: "unexpected tool"
+                            )
+                        )
+                    }
+                }
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-proxy-scalar-leftover",
+                payload: [
+                    toolsCallPayload(
+                        id: 330,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy-scalar-leftover",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    ),
+                    NSNull(),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 2)
+
+            let refreshResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 330 })?["result"] as? [String: Any]
+            )
+            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+
+            let invalidRequest = try #require(
+                body.first(where: { $0["id"] is NSNull })
+            )
+            let error = try #require(invalidRequest["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32600)
+            #expect(error["message"] as? String == "invalid request")
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpMixedBatchPreservesNotificationLeftoverWhenScalarIsStripped() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                switch method {
+                case "tools/call":
+                    switch toolName {
+                    case "XcodeListWindows":
+                        return .immediate(
+                            try makeToolSuccessResponse(
+                                id: originalID,
+                                text:
+                                    "{\"message\":\"* tabIdentifier: windowtab-proxy-notification-leftover, workspacePath: \(workspacePath)\"}"
+                            )
+                        )
+                    case "XcodeListNavigatorIssues":
+                        return .immediate(
+                            try makeToolResultResponse(
+                                id: originalID,
+                                result: [
+                                    "content": [
+                                        [
+                                            "type": "text",
+                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        ]
+                                    ],
+                                    "structuredContent": [
+                                        "issues": [
+                                            [
+                                                "path": target.path,
+                                                "message": "target warning",
+                                                "line": 12,
+                                                "severity": "warning",
+                                            ]
+                                        ],
+                                        "totalFound": 1,
+                                        "truncated": false,
+                                    ],
+                                ]
+                            )
+                        )
+                    default:
+                        return .immediate(
+                            try makeToolErrorResponse(
+                                id: originalID,
+                                text: "unexpected tool"
+                            )
+                        )
+                    }
+                default:
+                    return .immediate(Data())
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-proxy-notification-leftover",
+                payload: [
+                    toolsCallPayload(
+                        id: 340,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy-notification-leftover",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    ),
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": [
+                            "value": "tick"
+                        ],
+                    ],
+                    NSNull(),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 2)
+            #expect(sessionManager.sentMethods().contains("notifications/progress"))
+
+            let refreshResult = try #require(
+                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 340 })?["result"] as? [String: Any]
+            )
+            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
+            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+
+            let invalidRequest = try #require(
+                body.first(where: { $0["id"] is NSNull })
+            )
+            let error = try #require(invalidRequest["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32600)
+            #expect(error["message"] as? String == "invalid request")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
     @Test func httpMixedBatchRefreshRetryDoesNotReplayAllowedCalls() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream
@@ -5638,6 +5888,12 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
                 guard let toolName = request.toolName else { return nil }
                 return "\(toolName)@\(request.upstreamIndex)"
             }
+        }
+    }
+
+    func sentMethods() -> [String] {
+        state.withLockedValue { state in
+            state.sentRequests.map(\.method)
         }
     }
 

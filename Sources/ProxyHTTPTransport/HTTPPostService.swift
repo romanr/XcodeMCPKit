@@ -55,6 +55,7 @@ private struct RefreshRequestRouting: Sendable {
     let refreshRoutes: [RefreshRequestRoute]
     let remainingBodyData: Data?
     let remainingRequestIDs: [RPCID]
+    let remainingLocalResponseData: Data?
 }
 
 package enum HTTPPostCancellationSource: String, Sendable {
@@ -586,6 +587,7 @@ package final class HTTPPostService: Sendable {
 
             if refreshRouting.refreshRoutes.count == 1,
                 refreshRouting.remainingBodyData == nil,
+                refreshRouting.remainingLocalResponseData == nil,
                 let route = refreshRouting.refreshRoutes.first
             {
                 let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
@@ -683,6 +685,10 @@ package final class HTTPPostService: Sendable {
                             forceBatchArray: route.requestIsBatch
                         )
                     )
+                }
+
+                if !Task.isCancelled {
+                    payloads.append(refreshRouting.remainingLocalResponseData)
                 }
 
                 if !Task.isCancelled,
@@ -1315,7 +1321,8 @@ package final class HTTPPostService: Sendable {
                     )
                 ],
                 remainingBodyData: nil,
-                remainingRequestIDs: []
+                remainingRequestIDs: [],
+                remainingLocalResponseData: nil
             )
         }
 
@@ -1323,12 +1330,21 @@ package final class HTTPPostService: Sendable {
             return nil
         }
         var refreshRoutes: [RefreshRequestRoute] = []
-        var remainingObjects: [Any] = []
-        for (index, item) in requests.enumerated() {
-            guard let object = item as? [String: Any],
-                let candidate = refreshCodeIssuesRequest(from: object)
-            else {
-                remainingObjects.append(item)
+        var remainingRequestObjects: [[String: Any]] = []
+        var remainingInvalidResponseObjects: [[String: Any]] = []
+        for item in requests {
+            guard let object = item as? [String: Any] else {
+                remainingInvalidResponseObjects.append(
+                    Self.makeJSONRPCErrorResponseObject(
+                        id: NSNull(),
+                        code: -32600,
+                        message: "invalid request"
+                    )
+                )
+                continue
+            }
+            guard let candidate = refreshCodeIssuesRequest(from: object) else {
+                remainingRequestObjects.append(object)
                 continue
             }
             let payload: Any = requests.count == 1 ? requests : object
@@ -1343,23 +1359,33 @@ package final class HTTPPostService: Sendable {
                     requestIsBatch: requests.count == 1
                 )
             )
-            _ = index
         }
         guard !refreshRoutes.isEmpty else {
             return nil
         }
 
+        let shouldKeepRemainingPayloadAsBatch = remainingInvalidResponseObjects.isEmpty == false
         let remainingPayload: Any? = {
-            guard !remainingObjects.isEmpty else { return nil }
-            return remainingObjects.count == 1 ? remainingObjects[0] : remainingObjects
+            guard !remainingRequestObjects.isEmpty else { return nil }
+            if remainingRequestObjects.count == 1,
+                shouldKeepRemainingPayloadAsBatch == false
+            {
+                return remainingRequestObjects[0]
+            }
+            return remainingRequestObjects
         }()
         let remainingBodyData = remainingPayload.flatMap {
             try? JSONSerialization.data(withJSONObject: $0, options: [])
         }
+        let remainingLocalResponseData = Self.makeToolResponseData(
+            from: remainingInvalidResponseObjects,
+            forceBatchArray: remainingInvalidResponseObjects.count > 1
+        )
         return RefreshRequestRouting(
             refreshRoutes: refreshRoutes,
             remainingBodyData: remainingBodyData,
-            remainingRequestIDs: Self.extractResponseIDs(from: remainingPayload as Any)
+            remainingRequestIDs: Self.extractResponseIDs(from: remainingPayload as Any),
+            remainingLocalResponseData: remainingLocalResponseData
         )
     }
 
@@ -2137,9 +2163,21 @@ package final class HTTPPostService: Sendable {
         code: Int,
         message: String
     ) -> [String: Any] {
+        makeJSONRPCErrorResponseObject(
+            id: id.value.foundationObject,
+            code: code,
+            message: message
+        )
+    }
+
+    private static func makeJSONRPCErrorResponseObject(
+        id: Any,
+        code: Int,
+        message: String
+    ) -> [String: Any] {
         [
             "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
+            "id": id,
             "error": [
                 "code": code,
                 "message": message,

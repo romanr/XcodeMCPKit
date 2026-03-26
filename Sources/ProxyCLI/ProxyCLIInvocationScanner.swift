@@ -20,6 +20,7 @@ package struct ProxyCLIServerScan {
     package var hasPortFlag = false
     package var hasConfigFlag = false
     package var hasAutoApproveFlag = false
+    package var hasRefreshCodeIssuesModeFlag = false
     package var forceRestart = false
     package var dryRun = false
 }
@@ -42,6 +43,7 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-arg",
         "--upstream-processes",
         "--session-id",
+        "--refresh-code-issues-mode",
     ]
 
     private static let serverOnlyValueFlags: Set<String> = [
@@ -55,6 +57,7 @@ package enum ProxyCLIInvocationScanner {
         "--upstream-arg",
         "--upstream-processes",
         "--session-id",
+        "--refresh-code-issues-mode",
     ]
 
     private static let serverForwardedValueFlags: Set<String> = [
@@ -69,6 +72,7 @@ package enum ProxyCLIInvocationScanner {
         "--session-id",
         "--max-body-bytes",
         "--request-timeout",
+        "--refresh-code-issues-mode",
     ]
 
     package static func scanAdapter(_ args: [String]) -> ProxyCLIAdapterScan {
@@ -104,11 +108,6 @@ package enum ProxyCLIInvocationScanner {
                     scan.removedFlagMessage = CLIParser.removedLazyInitMessage
                 }
                 cursor.advance()
-            case "--refresh-code-issues-mode":
-                if scan.removedFlagMessage == nil {
-                    scan.removedFlagMessage = CLIParser.removedRefreshCodeIssuesModeMessage
-                }
-                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
             case "--xcode-pid":
                 if scan.removedFlagMessage == nil {
                     scan.removedFlagMessage = CLIParser.removedXcodePIDMessage
@@ -146,7 +145,11 @@ package enum ProxyCLIInvocationScanner {
                     return scan
                 default:
                     if serverForwardedValueFlags.contains(arg) {
-                        cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+                        if arg == "--refresh-code-issues-mode" {
+                            cursor.advance()
+                        } else {
+                            cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+                        }
                     } else {
                         cursor.advance()
                     }
@@ -182,8 +185,6 @@ package enum ProxyCLIInvocationScanner {
                 throw ProxyServerCommandError.message(CLIParser.removedXcodePIDMessage)
             case "--lazy-init":
                 throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
-            case "--refresh-code-issues-mode":
-                throw ProxyServerCommandError.message(CLIParser.removedRefreshCodeIssuesModeMessage)
             case "--listen":
                 scan.hasListenFlag = true
             case "--host":
@@ -194,6 +195,8 @@ package enum ProxyCLIInvocationScanner {
                 scan.hasConfigFlag = true
             case "--auto-approve":
                 scan.hasAutoApproveFlag = true
+            case "--refresh-code-issues-mode":
+                scan.hasRefreshCodeIssuesModeFlag = true
             default:
                 break
             }

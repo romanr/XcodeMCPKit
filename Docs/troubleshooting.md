@@ -73,5 +73,14 @@ it usually means the MCP server process (`xcode-mcp-proxy`) was terminated while
   - `pkill -f xcode-mcp-proxy`
   - `pkill -f mcpbridge`
 
+## `XcodeRefreshCodeIssuesInFile` intermittently returns `error 5`
+When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagnostics service is prone to transient failures when `XcodeRefreshCodeIssuesInFile` is fired in bursts for the same `tabIdentifier`.
+
+- The default mode is `proxy`, which serves `XcodeRefreshCodeIssuesInFile` through `XcodeListNavigatorIssues`-style diagnostics to avoid switching Spaces.
+- In `upstream` mode, `xcode-mcp-proxy-server` serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
+- This reduces cold-start contention, but it can increase latency when many refresh requests target the same tab at once.
+- If a client bursts too many queued refreshes for the same tab in `upstream` mode, the proxy may return `refresh queue overloaded` instead of letting the queue grow without bound.
+- If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
+
 ## `session not found`
 Ensure the client is using the same session.

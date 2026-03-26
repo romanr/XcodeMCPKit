@@ -223,15 +223,11 @@ package func withTestURLSession<T>(
         timeout: timeout,
         waitsForConnectivity: waitsForConnectivity
     )
-
-    do {
-        let result = try await operation(session)
-        session.finishTasksAndInvalidate()
-        return result
-    } catch {
+    defer {
         session.invalidateAndCancel()
-        throw error
     }
+
+    return try await operation(session)
 }
 
 package final class TestSignal: @unchecked Sendable {

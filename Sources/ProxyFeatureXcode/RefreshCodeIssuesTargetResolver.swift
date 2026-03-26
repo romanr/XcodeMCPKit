@@ -225,14 +225,13 @@ package actor RefreshCodeIssuesTargetResolver {
         guard isPath(resolvedPath, containedIn: resolvedRoot) else {
             return nil
         }
-        if resolvedPath == resolvedRoot {
-            return "."
+        if let aliasRelativePath = lexicalRelativePath(
+            path: standardizedPathPreservingSymlink(absolutePath),
+            root: standardizedPathPreservingSymlink(workspaceRoot)
+        ) {
+            return aliasRelativePath
         }
-        let rootPrefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
-        guard resolvedPath.hasPrefix(rootPrefix) else {
-            return nil
-        }
-        return String(resolvedPath.dropFirst(rootPrefix.count))
+        return lexicalRelativePath(path: resolvedPath, root: resolvedRoot)
     }
 
     private func resolveWorkspacePath(
@@ -313,6 +312,21 @@ package actor RefreshCodeIssuesTargetResolver {
     private func resolvedPathForContainment(_ path: String) -> String {
         let symlinkResolvedPath = (path as NSString).resolvingSymlinksInPath
         return URL(fileURLWithPath: symlinkResolvedPath).standardizedFileURL.path
+    }
+
+    private func standardizedPathPreservingSymlink(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func lexicalRelativePath(path: String, root: String) -> String? {
+        if path == root {
+            return "."
+        }
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        guard path.hasPrefix(rootPrefix) else {
+            return nil
+        }
+        return String(path.dropFirst(rootPrefix.count))
     }
 
     private func suffixMatchScore(

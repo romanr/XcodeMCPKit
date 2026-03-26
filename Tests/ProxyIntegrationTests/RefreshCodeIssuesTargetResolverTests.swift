@@ -547,6 +547,81 @@ struct RefreshCodeIssuesTargetResolverTests {
         #expect(resolution.target?.workspaceRelativePath == "SampleProject/Feature/Scene/PrimaryView.swift")
     }
 
+    @Test func resolverPreservesSuffixMatchedSymlinkAliasInWorkspaceRelativePath() async throws {
+        let root = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let workspacePath = URL(fileURLWithPath: root)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let target = URL(fileURLWithPath: root)
+            .appendingPathComponent("Targets/Deep/PrimaryView.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let alias = URL(fileURLWithPath: root)
+            .appendingPathComponent("Alias/Feature/Scene/PrimaryView.swift")
+        try FileManager.default.createDirectory(
+            at: alias.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: alias.path,
+            withDestinationPath: target.path
+        )
+
+        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolution = try await resolver.resolve(
+            tabIdentifier: "windowtab2",
+            filePath: "Feature/Scene/PrimaryView.swift",
+            sessionID: "session-1",
+            eventLoop: EmbeddedEventLoop(),
+            windowsProvider: { _, _ in
+                [XcodeWindowInfo(tabIdentifier: "windowtab2", workspacePath: workspacePath)]
+            }
+        )
+
+        #expect(resolution.failureReason == nil)
+        #expect(resolution.target?.resolvedFilePath == fileReferencePath(alias))
+        #expect(resolution.target?.workspaceRelativePath == "Alias/Feature/Scene/PrimaryView.swift")
+    }
+
+    @Test func resolverFallsBackToResolvedPathWhenWorkspaceRootUsesSymlinkAlias() async throws {
+        let realRoot = makeTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: realRoot) }
+
+        let rootAlias = URL(fileURLWithPath: FileManager.default.temporaryDirectory.path)
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createSymbolicLink(
+            atPath: rootAlias.path,
+            withDestinationPath: realRoot
+        )
+        defer { try? FileManager.default.removeItem(at: rootAlias) }
+
+        let target = URL(fileURLWithPath: realRoot)
+            .appendingPathComponent("App/Sources/Foo.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let resolver = RefreshCodeIssuesTargetResolver()
+        let relativePath = await resolver.relativePath(
+            for: target.path,
+            within: rootAlias.path
+        )
+
+        #expect(relativePath == "App/Sources/Foo.swift")
+    }
+
     @Test func resolverUsesLatestWorkspacePathOnRepeatedLookups() async throws {
         let rootA = makeTemporaryWorkspaceRoot()
         let rootB = makeTemporaryWorkspaceRoot()

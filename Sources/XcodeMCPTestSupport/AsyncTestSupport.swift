@@ -230,6 +230,95 @@ package func withTestURLSession<T>(
     return try await operation(session)
 }
 
+package final class HTTPTestServerChannelTracker: @unchecked Sendable {
+    private let channels = NIOLockedValueBox([ObjectIdentifier: Channel]())
+
+    package init() {}
+
+    package func register(_ channel: Channel) {
+        let id = ObjectIdentifier(channel)
+        channels.withLockedValue { $0[id] = channel }
+        channel.closeFuture.whenComplete { [weak self] _ in
+            _ = self?.channels.withLockedValue { $0.removeValue(forKey: id) }
+        }
+    }
+
+    package func snapshot() -> [Channel] {
+        channels.withLockedValue { Array($0.values) }
+    }
+}
+
+package final class HTTPTestServerAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
+    package typealias InboundIn = Channel
+
+    private let tracker: HTTPTestServerChannelTracker
+
+    package init(tracker: HTTPTestServerChannelTracker) {
+        self.tracker = tracker
+    }
+
+    package func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let channel = unwrapInboundIn(data)
+        tracker.register(channel)
+        context.fireChannelRead(data)
+    }
+}
+
+package func shutdownHTTPTestServer(
+    listenChannel: Channel,
+    childChannelTracker: HTTPTestServerChannelTracker,
+    group: EventLoopGroup,
+    timeout: Duration = .seconds(5),
+    beforeClose: @escaping () -> Void = {}
+) async throws {
+    beforeClose()
+
+    var shutdownError: Error?
+
+    do {
+        let listenerCloseFuture = listenChannel.closeFuture
+        listenChannel.close(mode: .all, promise: nil)
+
+        try await waitWithTimeout(
+            "timed out waiting for HTTP test server listener to close",
+            timeout: timeout
+        ) {
+            try await listenerCloseFuture.get()
+        }
+        try await waitWithTimeout(
+            "timed out waiting for HTTP test server accept loop to drain",
+            timeout: timeout
+        ) {
+            try await listenChannel.eventLoop.submit { () }.get()
+        }
+
+        while true {
+            let childChannels = childChannelTracker.snapshot()
+            guard !childChannels.isEmpty else { break }
+
+            let childCloseFutures = childChannels.map(\.closeFuture)
+            for channel in childChannels {
+                channel.close(mode: .all, promise: nil)
+            }
+
+            try await waitWithTimeout(
+                "timed out waiting for HTTP test server channels to close",
+                timeout: timeout
+            ) {
+                try await EventLoopFuture.andAllSucceed(childCloseFutures, on: listenChannel.eventLoop).get()
+            }
+        }
+    } catch {
+        shutdownError = error
+    }
+
+    await shutdown(group)
+
+    if let shutdownError {
+        throw shutdownError
+    }
+}
+
 package final class TestSignal: @unchecked Sendable {
     private struct Waiter {
         let id: UUID

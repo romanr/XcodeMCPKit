@@ -69,11 +69,11 @@ struct CLICommandIntegrationTests {
             let result = responseObject["result"] as? [String: Any]
             #expect(result?["transport"] as? String == "stub")
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
 
-        await server.shutdown()
+        try await server.shutdown()
     }
 }
 
@@ -81,31 +81,40 @@ private struct StubMCPHTTPServer {
     let group: MultiThreadedEventLoopGroup
     let channel: Channel
     let url: URL
+    let childChannelTracker: HTTPTestServerChannelTracker
 
     static func start() throws -> StubMCPHTTPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let childChannelTracker = HTTPTestServerChannelTracker()
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 32)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                return channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(StubMCPHTTPHandler())
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
         let channel = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
+        try channel.pipeline.addHandler(
+            HTTPTestServerAcceptedChannelHandler(tracker: childChannelTracker)
+        ).wait()
         let port = try #require(channel.localAddress?.port)
         return StubMCPHTTPServer(
             group: group,
             channel: channel,
-            url: URL(string: "http://127.0.0.1:\(port)/mcp")!
+            url: URL(string: "http://127.0.0.1:\(port)/mcp")!,
+            childChannelTracker: childChannelTracker
         )
     }
 
-    func shutdown() async {
-        channel.close(promise: nil)
-        await XcodeMCPTestSupport.shutdown(group)
+    func shutdown() async throws {
+        try await shutdownHTTPTestServer(
+            listenChannel: channel,
+            childChannelTracker: childChannelTracker,
+            group: group
+        )
     }
 }
 

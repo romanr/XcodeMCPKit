@@ -21,10 +21,10 @@ struct HTTPConcurrencyTests {
             #expect(Set(results.0).count == count)
             #expect(Set(results.1).count == count)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpConcurrentInitializeStress() async throws {
@@ -38,10 +38,10 @@ struct HTTPConcurrencyTests {
             #expect(Set(results.0).count == count)
             #expect(Set(results.1).count == count)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpConcurrentRequestsShareSession() async throws {
@@ -95,10 +95,10 @@ struct HTTPConcurrencyTests {
             #expect((secondResult.1["id"] as? NSNumber)?.intValue == 101)
             #expect(await upstream.nonInitializeLabels() == ["tools/list", "tools/list"])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpConcurrentRequestsCanOverlapAcrossSessions() async throws {
@@ -154,10 +154,10 @@ struct HTTPConcurrencyTests {
             #expect(firstResult.0.statusCode == 200)
             #expect(secondResult.0.statusCode == 200)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
@@ -210,10 +210,10 @@ struct HTTPConcurrencyTests {
             #expect(secondResult.0.statusCode == 200)
             #expect((secondResult.1["id"] as? NSNumber)?.intValue == 301)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpTimedOutExecuteSnippetReleasesSessionAndStartsNextQueuedRequest() async throws {
@@ -289,10 +289,10 @@ struct HTTPConcurrencyTests {
                 }
             )
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpQueuedNotificationDoesNotOvertakeEarlierSessionRequest() async throws {
@@ -336,10 +336,10 @@ struct HTTPConcurrencyTests {
             let firstResult = try await first
             #expect(firstResult.0.statusCode == 200)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDebugSnapshotReportsSessionPipelineState() async throws {
@@ -395,10 +395,10 @@ struct HTTPConcurrencyTests {
                 }
             )
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDocumentationSearchRequestsSerializeWithinSession() async throws {
@@ -464,10 +464,10 @@ struct HTTPConcurrencyTests {
             #expect(firstResult.0.statusCode == 200)
             #expect(secondResult.0.statusCode == 200)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFiveOrDeadlockInternalCalls() async throws {
@@ -520,10 +520,10 @@ struct HTTPConcurrencyTests {
                 #expect(isError == false)
             }
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpConcurrentRefreshCodeIssuesRequestsRespectSingleFlightPerUpstream() async throws {
@@ -576,10 +576,10 @@ struct HTTPConcurrencyTests {
                 #expect(isError == false)
             }
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesNotificationForwardsWithoutInvalidUpstreamOverride()
@@ -620,10 +620,10 @@ struct HTTPConcurrencyTests {
                 }
             )
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpServerNotificationsReachActiveSSESessions() async throws {
@@ -692,10 +692,10 @@ struct HTTPConcurrencyTests {
             #expect(response.statusCode == 200)
             #expect(line == String(decoding: notificationData, as: UTF8.self))
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 }
 
@@ -738,6 +738,7 @@ private struct TestHTTPServer {
     let url: URL
     let sessionManager: RuntimeCoordinator
     let upstream: any UpstreamSlotControlling
+    let childChannelTracker: HTTPTestServerChannelTracker
 
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
@@ -745,6 +746,7 @@ private struct TestHTTPServer {
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let childChannelTracker = HTTPTestServerChannelTracker()
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
@@ -762,7 +764,7 @@ private struct TestHTTPServer {
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                return channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
@@ -774,6 +776,9 @@ private struct TestHTTPServer {
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
         let channel = try bootstrap.bind(host: config.listenHost, port: config.listenPort).wait()
+        try channel.pipeline.addHandler(
+            HTTPTestServerAcceptedChannelHandler(tracker: childChannelTracker)
+        ).wait()
         let port = channel.localAddress?.port ?? config.listenPort
         let url = URL(string: "http://\(config.listenHost):\(port)/mcp")!
         return TestHTTPServer(
@@ -781,18 +786,20 @@ private struct TestHTTPServer {
             channel: channel,
             url: url,
             sessionManager: sessionManager,
-            upstream: upstream
+            upstream: upstream,
+            childChannelTracker: childChannelTracker
         )
     }
 
-    func shutdown() async {
-        sessionManager.shutdown()
-        channel.close(promise: nil)
-        await withCheckedContinuation { continuation in
-            group.shutdownGracefully { _ in
-                continuation.resume()
+    func shutdown() async throws {
+        try await shutdownHTTPTestServer(
+            listenChannel: channel,
+            childChannelTracker: childChannelTracker,
+            group: group,
+            beforeClose: {
+                sessionManager.shutdown()
             }
-        }
+        )
     }
 }
 

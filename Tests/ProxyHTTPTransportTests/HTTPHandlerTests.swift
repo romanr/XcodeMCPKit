@@ -125,11 +125,11 @@ struct HTTPHandlerTests {
             #expect(sessionManager.hasSession(id: "debug-reset-session") == false)
             #expect(sessionManager.cachedToolsListResult() == nil)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
 
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDebugResetReturnsNotFoundWhenListenerIsNotLoopback() async throws {
@@ -270,10 +270,10 @@ struct HTTPHandlerTests {
             #expect(completedRefreshSnapshot.recentCompletedRequests.first?.finalState == "completed")
             #expect(completedRefreshSnapshot.recentCompletedRequests.first?.outcome == "success")
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpSSERequiresAcceptHeader() async throws {
@@ -2370,10 +2370,10 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues@1",
             ]))
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpSingleElementBatchRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
@@ -2492,10 +2492,10 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
             ])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpMixedBatchKeepsRefreshProxyAndAllowedResponses() async throws {
@@ -2618,10 +2618,10 @@ struct HTTPHandlerTests {
             let otherContent = otherResult["content"] as? [[String: Any]]
             #expect(otherContent?.first?["text"] as? String == "other-tool-result")
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpMixedBatchReturnsInvalidRequestForScalarLeftoverAfterRefreshSplit() async throws {
@@ -2740,10 +2740,10 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
             ])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpMixedBatchPreservesNotificationLeftoverWhenScalarIsStripped() async throws {
@@ -2868,10 +2868,10 @@ struct HTTPHandlerTests {
             #expect((error["code"] as? NSNumber)?.intValue == -32600)
             #expect(error["message"] as? String == "invalid request")
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpMixedBatchRefreshRetryDoesNotReplayAllowedCalls() async throws {
@@ -2968,10 +2968,10 @@ struct HTTPHandlerTests {
             #expect(refreshAttempts.withLockedValue { $0 } == 2)
             #expect(otherAttempts.withLockedValue { $0 } == 1)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenWindowLookupFailsAfterPreviousSuccess() async throws {
@@ -3113,10 +3113,10 @@ struct HTTPHandlerTests {
                 "XcodeRefreshCodeIssuesInFile",
             ])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesAreTruncated() async throws {
@@ -3219,10 +3219,10 @@ struct HTTPHandlerTests {
                 "XcodeRefreshCodeIssuesInFile",
             ])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenResolverCannotFindTarget() async throws {
@@ -3295,10 +3295,10 @@ struct HTTPHandlerTests {
             ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesFails() async throws {
@@ -3387,10 +3387,10 @@ struct HTTPHandlerTests {
             ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func refreshWorkflowFallsBackToUpstreamWhenNavigatorIssuesTimesOut() async throws {
@@ -3884,10 +3884,10 @@ struct HTTPHandlerTests {
                 "XcodeRefreshCodeIssuesInFile",
             ])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
@@ -3939,10 +3939,10 @@ struct HTTPHandlerTests {
             #expect((result?["isError"] as? Bool) != true)
             #expect(sessionManager.sentUpstreamCount() == 2)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpSingleElementBatchRefreshCodeIssuesRetriesSourceEditorErrorFive() async throws {
@@ -4007,10 +4007,10 @@ struct HTTPHandlerTests {
             #expect((result?["isError"] as? Bool) != true)
             #expect(sessionManager.sentUpstreamCount() == 2)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesRetriesShortSourceEditorErrorFiveText() async throws {
@@ -4062,10 +4062,10 @@ struct HTTPHandlerTests {
             #expect((result?["isError"] as? Bool) != true)
             #expect(sessionManager.sentUpstreamCount() == 2)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesDoesNotRetryNonRetryableToolError() async throws {
@@ -4108,10 +4108,10 @@ struct HTTPHandlerTests {
             #expect((result?["isError"] as? Bool) == true)
             #expect(sessionManager.sentUpstreamCount() == 1)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpNonTargetToolsCallDoesNotUseRefreshRetryPath() async throws {
@@ -4151,10 +4151,10 @@ struct HTTPHandlerTests {
             #expect((result?["isError"] as? Bool) == true)
             #expect(sessionManager.sentUpstreamCount() == 1)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolCallReturnsLocalToolErrorWithoutUpstream() async throws {
@@ -4191,10 +4191,10 @@ struct HTTPHandlerTests {
             #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
             #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolCallReturnsLocalToolErrorWhenNoUpstreamIsAvailable() async throws {
@@ -4233,10 +4233,10 @@ struct HTTPHandlerTests {
             #expect(sessionManager.sentToolNames().isEmpty)
             #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolNotificationReturnsAcceptedWithoutUpstream() async throws {
@@ -4273,10 +4273,10 @@ struct HTTPHandlerTests {
             #expect(rawResponse.bodyData.isEmpty)
             #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpMixedBatchDropsDisabledNotificationBeforeForwardingAllowedCalls() async throws {
@@ -4339,10 +4339,10 @@ struct HTTPHandlerTests {
             #expect(content?.first?["text"] as? String == "other-tool-result")
             #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolBatchReturnsLocalAndQueueErrorsWhenNoUpstreamIsAvailable() async throws {
@@ -4406,10 +4406,10 @@ struct HTTPHandlerTests {
             #expect(sessionManager.sentToolNames().isEmpty)
             #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolBatchReturnsLocalErrorsAndForwardsAllowedRequests() async throws {
@@ -4477,10 +4477,10 @@ struct HTTPHandlerTests {
             #expect(allowedContent?.first?["text"] as? String == "allowed")
             #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolBatchReturnsLocalOnlyResponseWhenAllRequestsAreBlocked() async throws {
@@ -4535,10 +4535,10 @@ struct HTTPHandlerTests {
             #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
             #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDisabledToolNamesDoNotBlockInternalRefreshWorkflowCalls() async throws {
@@ -4643,10 +4643,10 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
             ])
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorWhenQueueIsFull() async throws {
@@ -4715,10 +4715,10 @@ struct HTTPHandlerTests {
             #expect(firstStatusCode == 200)
             #expect(sessionManager.sentUpstreamCount() == 1)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshProxyReturnsBackpressureErrorWhenQueueIsFull() async throws {
@@ -4825,10 +4825,10 @@ struct HTTPHandlerTests {
             let firstStatusCode = try await firstTask.value
             #expect(firstStatusCode == 200)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
@@ -4897,10 +4897,10 @@ struct HTTPHandlerTests {
             #expect(firstStatusCode == 200)
             #expect(sessionManager.sentUpstreamCount() == 1)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshProxyReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
@@ -5007,10 +5007,10 @@ struct HTTPHandlerTests {
             let firstStatusCode = try await firstTask.value
             #expect(firstStatusCode == 200)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshProxyInternalToolCallsUpdateUpstreamHealthState() async throws {
@@ -5090,10 +5090,10 @@ struct HTTPHandlerTests {
             #expect(sessionManager.requestTimeoutNotificationCount() == 1)
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func forwardingServiceInternalToolRespectsRequestedOverride()
@@ -5212,11 +5212,11 @@ struct HTTPHandlerTests {
             #expect(completedLease.state == .completed)
         } catch {
             requestTask.cancel()
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
 
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpRefreshCodeIssuesCompletesLeaseWhenRetryBudgetExpires() async throws {
@@ -5265,11 +5265,11 @@ struct HTTPHandlerTests {
             let lease = try #require(sessionManager.leaseDebugSnapshots().first)
             #expect(lease.state == .completed)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
 
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDirectRefreshSuccessDoesNotRecordLateLeaseResponse() async throws {
@@ -5317,11 +5317,11 @@ struct HTTPHandlerTests {
             #expect(lease.state == .completed)
             #expect(lease.lateResponseCount == 0)
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
 
-        await server.shutdown()
+        try await server.shutdown()
     }
 
     @Test func httpDirectRefreshCancellationAbandonsActiveLease() async throws {
@@ -5359,11 +5359,11 @@ struct HTTPHandlerTests {
             #expect(abandonedLease.state == .abandoned)
             #expect(abandonedLease.releaseReason == "clientDisconnected")
         } catch {
-            await server.shutdown()
+            try? await server.shutdown()
             throw error
         }
 
-        await server.shutdown()
+        try await server.shutdown()
     }
 }
 
@@ -6111,6 +6111,7 @@ private struct TestHTTPHandlerServer {
     let channel: Channel
     let url: URL
     let sessionManager: any RuntimeCoordinating
+    let childChannelTracker: HTTPTestServerChannelTracker
 
     static func start(
         config: ProxyConfig,
@@ -6119,6 +6120,7 @@ private struct TestHTTPHandlerServer {
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let childChannelTracker = HTTPTestServerChannelTracker()
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
             ?? RefreshCodeIssuesCoordinator.makeDefault(
@@ -6133,7 +6135,7 @@ private struct TestHTTPHandlerServer {
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                return channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
@@ -6148,24 +6150,29 @@ private struct TestHTTPHandlerServer {
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
         let channel = try bootstrap.bind(host: config.listenHost, port: 0).wait()
+        try channel.pipeline.addHandler(
+            HTTPTestServerAcceptedChannelHandler(tracker: childChannelTracker)
+        ).wait()
         let port = channel.localAddress?.port ?? 0
         let url = URL(string: "http://\(config.listenHost):\(port)/mcp")!
         return TestHTTPHandlerServer(
             group: group,
             channel: channel,
             url: url,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            childChannelTracker: childChannelTracker
         )
     }
 
-    func shutdown() async {
-        sessionManager.shutdown()
-        channel.close(promise: nil)
-        await withCheckedContinuation { continuation in
-            group.shutdownGracefully { _ in
-                continuation.resume()
+    func shutdown() async throws {
+        try await shutdownHTTPTestServer(
+            listenChannel: channel,
+            childChannelTracker: childChannelTracker,
+            group: group,
+            beforeClose: {
+                sessionManager.shutdown()
             }
-        }
+        )
     }
 }
 

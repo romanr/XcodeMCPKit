@@ -170,11 +170,7 @@ struct RuntimeCoordinatorTests {
             on: eventLoop
         )
 
-        try await spinUntilSentCount(
-            upstream,
-            count: 1,
-            description: "waiting for initial initialize request"
-        )
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let initialInitialize = try #require(await upstream.sentValue(at: 0))
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
 
@@ -183,27 +179,15 @@ struct RuntimeCoordinatorTests {
         timeoutClock.advance(by: .milliseconds(150))
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await spinUntilSentCount(
-            upstream,
-            count: 2,
-            description: "waiting for overloaded initialized notification send"
-        )
-        try await spinUntilSentCount(
-            upstream,
-            count: 3,
-            description: "waiting for retried initialize request"
-        )
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let retriedInitialize = try #require(await upstream.sentValue(at: 2))
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
         await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(180))
         await upstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
-        try await spinUntilSentCount(
-            upstream,
-            count: 4,
-            description: "waiting for retried initialized notification send"
-        )
+        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil, "initializeResponse=\(response)")
@@ -585,12 +569,10 @@ struct RuntimeCoordinatorTests {
 
         await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .seconds(1))
-        try await spinUntil("waiting for initialize timeout state reset") {
-            manager.testStateSnapshot().initInFlight == false
-        }
         await #expect(throws: TimeoutError.self) {
             try await future.get()
         }
+        #expect(manager.testStateSnapshot().initInFlight == false)
 
         _ = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 2))!,
@@ -922,13 +904,10 @@ struct RuntimeCoordinatorTests {
         )
         await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(100))
-        try await spinUntil("waiting for eager initialize timeout") {
+        try await spinUntil("waiting for eager initialize timeout", maxIterations: 1_000) {
             let snapshot = manager.testStateSnapshot()
             return snapshot.initInFlight == false && snapshot.hasInitResult == false
         }
-        let snapshot = manager.testStateSnapshot()
-        #expect(snapshot.initInFlight == false)
-        #expect(snapshot.hasInitResult == false)
 
         _ = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -948,16 +927,14 @@ struct RuntimeCoordinatorTests {
             on: eventLoop
         )
 
-        try await spinUntilSentCount(
-            upstream,
-            count: 2,
-            description: "waiting for resent initialize request"
-        )
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
         let resent = try #require(await upstream.sentValue(at: 1))
         let object = try JSONSerialization.jsonObject(with: resent, options: []) as? [String: Any]
         let params = try #require(object?["params"] as? [String: Any])
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
+        let snapshot = manager.testStateSnapshot()
+        #expect(snapshot.hasInitResult == false)
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "configured-proxy")
         #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
